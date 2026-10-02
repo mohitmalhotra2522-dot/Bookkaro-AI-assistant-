@@ -23,6 +23,11 @@ export interface ChatResponse {
   reviewVersion?: number | null;
   confirmedReviewVersion?: number | null;
   readiness?: any;
+  /** Prompt 10 — execution boundary (real booking disabled). */
+  executionCapability?: { realBookingEnabled: boolean; configuredExecutor: string; effectiveExecutor: string; reason: string; executionPossible: false; configErrors: string[] };
+  handoff?: { handoffId: string; status: string; statusReason: string | null; reviewVersion: number; expiresAt: string } | null;
+  bookingLifecycle?: string | null;
+  execution?: any;
 }
 
 export async function sendMessage(

@@ -15,6 +15,7 @@ export interface InspectorMeta {
   toolActivity?: string;
   events?: string[];
   error?: { code: string; message: string } | null;
+  executionCapability?: { realBookingEnabled: boolean; effectiveExecutor: string; reason: string };
 }
 
 export const SessionInspector: React.FC<{ ctx: any; meta: InspectorMeta }> = ({ ctx, meta }) => {
@@ -49,7 +50,11 @@ export const SessionInspector: React.FC<{ ctx: any; meta: InspectorMeta }> = ({ 
           <div style={{ gridColumn: '1 / -1' }}>{cell('passengers', (c.passengers || []).length ? c.passengers.map((p: any) => `${p.id}:${p.name ? 'name' : '·'}/${p.age ?? '·'}/${p.gender ? p.gender[0] : '·'}${p.missingFields && !p.missingFields.length ? '✓' : ''}`).join('  ') : undefined)}</div>
           {cell('review', c.review ? `v${c.review.reviewVersion} ${c.review.valid ? 'valid' : `invalid (${c.review.invalidatedReason || '?'})`}` : undefined, c.review && !c.review.valid)}
           {cell('confirmedV', c.confirmedReviewVersion)}
-          {cell('handoff', c.bookingState === 'IRCTC_HANDOFF_READY' ? 'READY (execution disabled)' : undefined)}
+          {cell('handoff', c.handoff ? `${c.handoff.snapshot?.handoffId} ${c.handoff.status}${c.handoff.statusReason ? ` (${String(c.handoff.statusReason).split(':')[0]})` : ''}` : undefined, !!c.handoff && c.handoff.status !== 'READY')}
+          {cell('expires', c.handoff?.status === 'READY' && c.handoff.snapshot?.expiresAt ? new Date(c.handoff.snapshot.expiresAt).toLocaleTimeString() : undefined)}
+          {cell('lifecycle', c.bookingLifecycle?.status)}
+          {cell('execution', c.execution ? `${c.execution.status} · ${c.execution.reason} · ${c.execution.executorName}` : undefined)}
+          {cell('realBooking', meta.executionCapability ? `${meta.executionCapability.realBookingEnabled ? 'flag on' : 'OFF'} → ${meta.executionCapability.effectiveExecutor} (${meta.executionCapability.reason})` : undefined)}
           {cell('sessionV', meta.sessionVersion ?? c.sessionVersion)}
           {cell('searchV', meta.searchResultsVersion ?? c.searchResultsVersion)}
           <div style={{ gridColumn: '1 / -1' }}>{cell('ask', meta.pendingQuestion)}</div>

@@ -82,7 +82,7 @@ describe('Group 3 — confirmation guard', () => {
     expect(r.events).toContain('BOOKING_CONFIRMATION_REQUESTED');
     const ev = r.context.eventLog!.find(e => e.type === 'BOOKING_CONFIRMATION_REQUESTED')!;
     expect(ev.data).toMatchObject({ origin: 'ASR', destination: 'NDLS', trainNumber: '12014', selectedClass: 'CC', passengersCount: 2 });
-    expect(r.responseMessage).toMatch(/Actual booking handoff abhi enabled nahi hai/);
+    expect(r.responseMessage).toMatch(/Actual railway booking abhi enabled nahi hai/);
     expect(JSON.stringify(r)).not.toMatch(/\bPNR\s*[:#]?\s*\d{10}\b/);   // no fake PNR
     expect(r.cards?.find(c => c.type === 'handoff')?.data.realBooking).toBe(false);
   });

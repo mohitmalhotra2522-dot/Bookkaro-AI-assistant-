@@ -14,7 +14,7 @@
  *  5. IDLE → (COLLECTING_* | SEARCHING_TRAINS) is expanded into the explicit
  *     path IDLE → COLLECTING_JOURNEY → target, so no state is silently skipped.
  */
-import { BookingState, VALID_BOOKING_TRANSITIONS } from '@shared/states';
+import { BookingState, VALID_BOOKING_TRANSITIONS, EXECUTION_LOCKED_STATES } from '@shared/states';
 
 /** Canonical ordering of the booking funnel (used to detect backward moves). */
 export const STATE_ORDER: BookingState[] = [
@@ -33,7 +33,12 @@ export const STATE_ORDER: BookingState[] = [
   BookingState.REVIEW,
   BookingState.AWAITING_CONFIRMATION,
   BookingState.IRCTC_HANDOFF_READY,
-  BookingState.COMPLETE
+  BookingState.COMPLETE,
+  // Prompt 10 — locked future execution states (unreachable in this milestone)
+  BookingState.BOOKING_EXECUTION_REQUESTED,
+  BookingState.BOOKING_IN_PROGRESS,
+  BookingState.BOOKING_CONFIRMED,
+  BookingState.BOOKING_FAILED
 ];
 
 /** States that may be re-entered by a rewind (correction). */
@@ -51,7 +56,7 @@ const REWIND_TARGETS: ReadonlySet<BookingState> = new Set([
 ]);
 
 /** States from which no rewind is allowed (terminal for this milestone). */
-const NO_REWIND_FROM: ReadonlySet<BookingState> = new Set([BookingState.COMPLETE]);
+const NO_REWIND_FROM: ReadonlySet<BookingState> = new Set([BookingState.COMPLETE, ...EXECUTION_LOCKED_STATES]);
 
 export type TransitionCheck =
   | { ok: true; path: BookingState[]; kind: 'SAME' | 'FORWARD' | 'REWIND' }
@@ -64,6 +69,11 @@ export class StateTransitionValidator {
     if (from === to) return { ok: true, path: [], kind: 'SAME' };
 
     // Hard guards (never relaxed)
+    // 0) Real booking execution is disabled: execution states can never be entered
+    //    (BOOKING_EXECUTION_REQUESTED is only emitted as an internal EVENT).
+    if (EXECUTION_LOCKED_STATES.has(to)) {
+      return this.reject(from, to, 'Real booking execution is disabled — execution states are locked.');
+    }
     if (to === BookingState.IRCTC_HANDOFF_READY && from !== BookingState.AWAITING_CONFIRMATION) {
       return this.reject(from, to, 'IRCTC handoff requires explicit AWAITING_CONFIRMATION first.');
     }

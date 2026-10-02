@@ -57,7 +57,8 @@ const App: React.FC = () => {
         setMeta({
           state: resp.state, pendingType: resp.pendingInteraction?.type, pendingQuestion: resp.pendingQuestion,
           sessionVersion: resp.sessionVersion, searchResultsVersion: resp.searchResultsVersion,
-          toolActivity: resp.toolActivity, events: resp.events, error: resp.error
+          toolActivity: resp.toolActivity, events: resp.events, error: resp.error,
+          executionCapability: resp.executionCapability
         });
         if (resp.toolActivity) setToolActivity(resp.toolActivity);
         addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: resp.message, timestamp: Date.now() });
@@ -171,12 +172,19 @@ const App: React.FC = () => {
             if (msg.cardType === 'handoff') {
               return (
                 <div key={msg.id} style={{ margin: '8px 16px', padding: 16, background: '#e8f5e9', borderRadius: 12, textAlign: 'center' }}>
-                  <div style={{ fontWeight: 600, color: '#2e7d32', marginBottom: 6 }}>📝 Details ready · handoff disabled (v{msg.cardData.reviewVersion})</div>
+                  <div style={{ fontWeight: 600, color: '#2e7d32', marginBottom: 6 }}>📝 Booking details ready · real booking disabled (v{msg.cardData.reviewVersion})</div>
                   <div style={{ fontSize: 13, color: '#424242' }}>{msg.cardData.message}</div>
+                  {msg.cardData.handoffId && (
+                    <div style={{ fontSize: 11, color: '#616161', marginTop: 8, fontFamily: 'monospace' }}>
+                      handoff {msg.cardData.handoffId} · {msg.cardData.handoffStatus} · executor: {msg.cardData.executorName} → {msg.cardData.executionStatus}
+                      {msg.cardData.expiresAt ? ` · valid till ${new Date(msg.cardData.expiresAt).toLocaleTimeString()}` : ''}{msg.cardData.duplicate ? ' · duplicate (no new handoff)' : ''}
+                    </div>
+                  )}
                 </div>
               );
             }
             const d: any = msg.cardData;
+            if (msg.cardType === ('handoff_status' as any)) return chip('#fff3e0', '#e65100', <>⚠️ Handoff {d.handoffId} <b>{d.status}</b> ({d.reason}) — naya review confirm karna hoga</>, msg.id);
             if (msg.cardType === ('selected_train' as any)) return chip('#e3f2fd', '#0d47a1', <>🚆 Selected: <b>{d.trainNumber}</b> {d.trainName}</>, msg.id);
             if (msg.cardType === ('selected_class' as any)) return chip('#e3f2fd', '#0d47a1', <>🎫 Class: <b>{d.classCode}</b></>, msg.id);
             if (msg.cardType === ('availability' as any)) return chip('#fff8e1', '#795548', <>📊 {d.trainNumber} {d.travelClass} availability: <b>{d.status}</b> <span style={{ opacity: 0.7 }}>({d.date})</span></>, msg.id);

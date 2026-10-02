@@ -210,7 +210,14 @@ export class ConversationStateManager {
       duration: train.duration,
       availableClasses: (train.classes || []).map((c: any) => c.code),
       classes: train.classes || [],
-      dataSource: train.dataSource || 'MOCK'
+      dataSource: train.dataSource || 'MOCK',
+      // ---- Prompt 10: authoritative provenance (validated by the execution gateway) ----
+      /** Result row id from the search that produced this selection. */
+      resultId: train.resultId,
+      /** Search result set id + journey date / version the selection belongs to. */
+      searchResultId: s.searchResults?.resultId,
+      searchResultsVersion: s.searchResultsVersion,
+      date: s.searchResults?.journey?.date || s.date
     };
     const prev = s.selectedTrain ? ((s.selectedTrain as any).number || (s.selectedTrain as any).trainNumber) : undefined;
     if (prev && prev !== normalized.number) s.previousTrainNumber = prev;

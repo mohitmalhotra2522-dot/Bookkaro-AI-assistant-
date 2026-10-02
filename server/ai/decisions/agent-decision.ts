@@ -176,7 +176,18 @@ export type OrchestratorErrorCode =
   | 'STALE_FARE'
   | 'REVIEW_INVALIDATED'
   | 'CONFIRMATION_VERSION_MISMATCH'
-  | 'BOOKING_EXECUTION_DISABLED';
+  | 'BOOKING_EXECUTION_DISABLED'
+  // ---- Prompt 10: execution boundary ----
+  | 'REAL_BOOKING_DISABLED'
+  | 'INVALID_BOOKING_HANDOFF'
+  | 'STALE_BOOKING_HANDOFF'
+  | 'HANDOFF_EXPIRED'
+  | 'CONFIRMATION_REQUIRED'
+  | 'INVALID_TRAIN'
+  | 'INVALID_CLASS'
+  | 'UNKNOWN_BOOKING_EXECUTOR'
+  | 'BOOKING_EXECUTOR_UNAVAILABLE'
+  | 'BOOKING_EXECUTION_FAILED';
 
 export interface OrchestratorError {
   code: OrchestratorErrorCode;
@@ -209,6 +220,11 @@ export interface TurnToolRecord {
 }
 
 export interface TurnRecord {
+  /** Prompt 10 — PII-free execution-gateway log line (if the gateway ran this turn). */
+  execution?: import('@shared/booking-execution').ExecutionLogRecord;
+  handoffId?: string;
+  handoffStatus?: string;
+  bookingLifecycle?: string;
   sessionId: string;
   turnId: string;
   requestId?: string;

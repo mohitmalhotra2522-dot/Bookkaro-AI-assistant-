@@ -18,8 +18,25 @@ export enum BookingState {
   REVIEW = 'REVIEW',
   AWAITING_CONFIRMATION = 'AWAITING_CONFIRMATION',
   IRCTC_HANDOFF_READY = 'IRCTC_HANDOFF_READY',
-  COMPLETE = 'COMPLETE'
+  COMPLETE = 'COMPLETE',
+  // ---- Prompt 10: future execution states (LOCKED in this milestone) ----
+  // Defined so a future executor can plug in without changing the enum, but
+  // the transition validator HARD-REJECTS every transition into them while
+  // real booking execution is disabled. The final state of this milestone
+  // remains IRCTC_HANDOFF_READY.
+  BOOKING_EXECUTION_REQUESTED = 'BOOKING_EXECUTION_REQUESTED',
+  BOOKING_IN_PROGRESS = 'BOOKING_IN_PROGRESS',
+  BOOKING_CONFIRMED = 'BOOKING_CONFIRMED',
+  BOOKING_FAILED = 'BOOKING_FAILED'
 }
+
+/** States that can only be entered by a REAL, explicitly enabled executor (none exists). */
+export const EXECUTION_LOCKED_STATES: ReadonlySet<BookingState> = new Set([
+  BookingState.BOOKING_EXECUTION_REQUESTED,
+  BookingState.BOOKING_IN_PROGRESS,
+  BookingState.BOOKING_CONFIRMED,
+  BookingState.BOOKING_FAILED
+]);
 
 /**
  * Valid state transitions per specification. Any transition not listed is blocked.
@@ -99,7 +116,12 @@ export const VALID_BOOKING_TRANSITIONS: Record<BookingState, BookingState[]> = {
     BookingState.COLLECTING_PASSENGER_DETAILS
   ],
   [BookingState.IRCTC_HANDOFF_READY]: [BookingState.COMPLETE, BookingState.REVIEW],
-  [BookingState.COMPLETE]: [BookingState.IDLE]
+  [BookingState.COMPLETE]: [BookingState.IDLE],
+  // Locked: no edges in or out while execution is disabled (Prompt 10).
+  [BookingState.BOOKING_EXECUTION_REQUESTED]: [],
+  [BookingState.BOOKING_IN_PROGRESS]: [],
+  [BookingState.BOOKING_CONFIRMED]: [],
+  [BookingState.BOOKING_FAILED]: []
 };
 
 // Backwards compatible alias

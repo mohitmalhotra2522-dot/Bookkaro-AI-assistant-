@@ -51,6 +51,8 @@ export interface ApplyOutcome {
   confirmRequested?: boolean;
   /** Non-blocking validation error (e.g. INVALID_PASSENGER_DETAILS for one field). */
   softError?: OrchestratorError;
+  /** Confirmation repeated after the handoff exists → routed to gateway idempotency (no new handoff). */
+  duplicateConfirmation?: boolean;
 }
 
 const ALLOWED_INTENTS = new Set(['GENERAL_RAILWAY_QUERY', 'BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'UNKNOWN']);
@@ -82,7 +84,8 @@ export class ContextualTurnApplier {
     //    pendingInteraction === CONFIRMATION_REQUIRED. Version + freshness checks
     //    and the IRCTC_HANDOFF_READY transition are done by BookingPreparationService.
     if (S().bookingState === BookingState.IRCTC_HANDOFF_READY && (e.executionRequested || e.affirmation || d.intent === 'CONFIRM_BOOKING')) {
-      return fail('BOOKING_EXECUTION_DISABLED', 'Booking details ready hain. Actual booking handoff abhi enabled nahi hai — main ticket book, IRCTC login, submission ya payment nahi kar sakta.');
+      const o = fail('BOOKING_EXECUTION_DISABLED', 'Booking details ready hain. Actual railway booking abhi enabled nahi hai — main ticket book, IRCTC login, submission ya payment nahi kar sakta.');
+      return { ...o, duplicateConfirmation: !e.executionRequested };
     }
     if (e.executionRequested) {
       return fail('BOOKING_EXECUTION_DISABLED', 'Actual booking, IRCTC login, submission ya payment is milestone mein enabled nahi hai. Main sirf booking details tayyar karke confirmation tak le ja sakta hoon.');

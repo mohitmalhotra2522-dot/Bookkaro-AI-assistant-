@@ -1,3 +1,4 @@
+import type { BookingHandoffRecord, BookingLifecycleRecord, ExecutionAttemptRecord, HandoffStatus } from './booking-execution';
 /**
  * Core domain types. No secrets, credentials, payment, OTP fields EVER.
  */
@@ -193,6 +194,16 @@ export interface BookingSession {
   readiness?: BookingReadinessSnapshot;
   /** Selection to carry over after a DATE-only correction (same train/class re-verified on new date). */
   carryOverSelection?: { trainNumber: string; classCode?: string };
+
+  // ---- Booking execution boundary (Prompt 10) ----
+  /** Immutable handoff snapshot + status (READY / INVALIDATED / CONSUMED / EXPIRED). Backend-owned. */
+  handoff?: BookingHandoffRecord;
+  /** Previous handoffs (status history only — snapshots are never mutated). */
+  handoffHistory?: Array<{ handoffId: string; status: HandoffStatus; statusReason?: string; at: string }>;
+  /** Deterministic booking lifecycle (separate from the conversation state machine). */
+  bookingLifecycle?: BookingLifecycleRecord;
+  /** Last execution attempt outcome (DISABLED in this milestone). */
+  execution?: ExecutionAttemptRecord;
 }
 
 /** Provenance attached to every provider result synced into the session. */
@@ -290,7 +301,16 @@ export type BookingEventType =
   | 'FARE_REFRESHED'
   | 'REVIEW_CREATED'
   | 'REVIEW_INVALIDATED'
-  | 'IRCTC_HANDOFF_READY';
+  | 'IRCTC_HANDOFF_READY'
+  // ---- Prompt 10: execution boundary ----
+  | 'BOOKING_EXECUTION_REQUESTED'
+  | 'BOOKING_HANDOFF_CREATED'
+  | 'BOOKING_HANDOFF_INVALIDATED'
+  | 'BOOKING_HANDOFF_EXPIRED'
+  | 'BOOKING_EXECUTION_DISABLED'
+  | 'BOOKING_EXECUTION_REJECTED'
+  | 'BOOKING_EXECUTION_DUPLICATE'
+  | 'BOOKING_LIFECYCLE_UPDATED';
 
 export interface BookingEvent {
   type: BookingEventType;

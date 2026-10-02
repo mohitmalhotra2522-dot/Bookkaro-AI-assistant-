@@ -34,6 +34,10 @@ import { searchSummary, factFromTool } from '../context/response-formatter';
 import { currentResults } from '../context/train-reference-resolver';
 import { BookingPreparationService, type PrepOutcome } from '../../booking/booking-preparation-service';
 import type { PreparationPolicy } from '../../booking/booking-readiness';
+import type { ExecutionLogRecord } from '@shared/booking-execution';
+import { BookingExecutionGateway } from '../../booking/execution/booking-execution-gateway';
+import type { BookingExecutorRegistry } from '../../booking/execution/booking-executor-registry';
+import type { ExecutionConfig } from '../../booking/execution/execution-config';
 
 export interface ProcessTurnOptions {
   /** Optimistic concurrency: if supplied and different from the current
@@ -52,6 +56,10 @@ export interface OrchestratorOptions {
   preparationPolicy?: Partial<PreparationPolicy>;
   /** Injectable clock for freshness evaluation (tests). */
   clock?: () => number;
+  /** Prompt 10 — execution boundary. Defaults: production registry (Disabled only), fail-closed config. */
+  executionConfig?: ExecutionConfig;
+  executorRegistry?: BookingExecutorRegistry;
+  executionGateway?: BookingExecutionGateway;
 }
 
 export interface AgentTurnResult {
@@ -81,6 +89,8 @@ export class ConversationAgentOrchestrator {
   /** In-memory only (never logged): names at turn start, for log redaction. */
   private turnStartNames = new Map<string, string[]>();
   readonly preparation: BookingPreparationService;
+  /** BookingExecutionGateway — reachable only from the backend confirmation path (never from the LLM). */
+  readonly gateway: BookingExecutionGateway;
 
   constructor(
     private readonly llm: LLMProvider,
@@ -90,7 +100,8 @@ export class ConversationAgentOrchestrator {
   ) {
     this.runtime = new LLMToolCallingRuntime(llm, tools);
     this.applier = new ContextualTurnApplier(state);
-    this.preparation = new BookingPreparationService(state, { policy: options.preparationPolicy, clock: options.clock });
+    this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock });
+    this.preparation = new BookingPreparationService(state, { policy: options.preparationPolicy, clock: options.clock, gateway: this.gateway });
   }
 
   getTurnHistory(sessionId: string): TurnRecord[] { return [...(this.turns.get(sessionId) || [])]; }
@@ -132,6 +143,9 @@ export class ConversationAgentOrchestrator {
     const requestVersion = this.state.beginRequest(sessionId, requestId);
     const guard = new RequestGuard(this.state, { sessionId, turnId, requestId, requestVersion });
     this.state.setMode(sessionId, mode); // same session across text/voice switches
+    // ---- Handoff integrity (expiry / critical change) — before anything else this turn ----
+    const preChanges: string[] = [];
+    const handoffSync = this.preparation.syncHandoff(sessionId, { turnId, mode, cards, events, changes: preChanges });
     this.pushHistory(sessionId, { role: 'user', content: redact(safeInput) });
 
     // ---- Safety pre-filter (no LLM call) ----
@@ -149,7 +163,7 @@ export class ConversationAgentOrchestrator {
     }
 
     // ---- Tool-calling loop with per-decision deterministic application ----
-    const ctx: ApplyCtx = { turnId, mode, cards, events, changes: [] };
+    const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges };
     let pendingOverride: PendingInteraction | undefined;
     const bound = this.runtime.bind(guard.getSession, guard.commit, {
       requestId,
@@ -186,6 +200,8 @@ export class ConversationAgentOrchestrator {
     const blockErr = rt.stopReason === 'blocked' ? rt.error : undefined;
     const progress: string[] = [];
     let prep: PrepOutcome | undefined;
+    let dupExecution: ExecutionLogRecord | undefined;
+    progress.push(...handoffSync.notes);
     if (!blockErr) {
       const searchOk = rt.steps.some(st => st.result.toolName === 'SEARCH_TRAINS' && st.status === 'ok');
       if (searchOk) progress.push(...this.applier.applyCarryOver(sessionId, ctx));
@@ -209,6 +225,10 @@ export class ConversationAgentOrchestrator {
         if (st.result.toolName === 'GET_FARE') cards.push({ type: 'fare', data: { ...st.result.data, refreshedForReview: true } });
       }
     } else {
+      if (blockErr.code === 'BOOKING_EXECUTION_DISABLED' && rt.applyOutcomes.some(o => o.duplicateConfirmation)) {
+        // repeated "haan" after the handoff → gateway idempotency (same handoff, executor not re-invoked)
+        dupExecution = await this.preparation.duplicateConfirmation(sessionId, ctx);
+      }
       this.preparation.evaluate(sessionId);
     }
     const sess = this.state.getSession(sessionId);
@@ -217,18 +237,20 @@ export class ConversationAgentOrchestrator {
     const overrideValid = !override || !prep || prep.pendingOverride === override || sess.bookingState !== BookingState.AWAITING_CONFIRMATION || override.type === 'PASSENGER_DETAILS_REQUIRED' || override.type === 'CLARIFICATION_REQUIRED' || !!override.data?.correction;
     sess.pendingInteraction = { ...((overrideValid && override) || derivePendingInteraction(sess)), setAtTurnId: turnId };
 
-    const message = this.compose(sess, rt, blockErr, progress, cards, mode);
+    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes);
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-      message, error: blockErr || prep?.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined), rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps });
+      message, error: blockErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined), rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
+      execution: prep?.execution || dupExecution });
   }
 
   // ---------------------------------------------------------------- composition
 
-  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE'): string {
+  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = []): string {
     const parts: string[] = [];
     const q = questionFor(s.pendingInteraction, s, mode);
     if (blockErr) {
+      parts.push(...preNotes);
       parts.push(blockErr.message);
       if (q && !/\?\s*$/.test(blockErr.message) && !blockErr.message.includes(q)) parts.push(q);
       return joinParts(parts);
@@ -267,6 +289,7 @@ export class ConversationAgentOrchestrator {
     mode: 'TEXT' | 'VOICE'; stateBefore: BookingState; pendingBefore: string; cards: any[]; events: string[];
     message: string; error?: OrchestratorError; rejection?: string; stale?: boolean;
     rt: ToolRuntimeResult | null; decision: AgentDecision | null; changes: string[]; prepSteps?: ToolCallStep[];
+    execution?: ExecutionLogRecord;
   }): AgentTurnResult {
     const s = this.state.getSession(a.sessionId);
     if (!a.stale && a.message) this.pushHistory(a.sessionId, { role: 'assistant', content: a.message });
@@ -297,6 +320,10 @@ export class ConversationAgentOrchestrator {
       missingFields: s.readiness?.missingFields,
       reviewVersion: s.review?.valid ? s.review.reviewVersion : undefined,
       confirmationVersion: s.confirmedReviewVersion,
+      execution: a.execution,
+      handoffId: s.handoff?.snapshot.handoffId,
+      handoffStatus: s.handoff?.status,
+      bookingLifecycle: s.bookingLifecycle?.status,
       latencyMs: Date.now() - a.startedAt
     };
     const th = this.turns.get(a.sessionId) || [];
