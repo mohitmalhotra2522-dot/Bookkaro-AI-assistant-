@@ -1,0 +1,31 @@
+{
+  "name": "railway-ai-assistant",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n server,frontend -c blue,green \"vite-node server/main.ts\" \"vite\"",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc --noEmit",
+    "test:conversation": "vitest run tests/integration/conversation-flow.test.ts",
+    "test:voice": "vitest run tests/integration/voice-state.test.ts"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "@fastify/cors": "^9.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^8.2.2",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.2",
+    "vite-node": "^2.0.5",
+    "vitest": "^2.0.5"
+  }
+}
