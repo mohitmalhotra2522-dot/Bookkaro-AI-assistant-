@@ -8,6 +8,10 @@ import { railwayRegistry } from './railway/registry/provider-registry';
 import { questionFor } from './ai/context/pending-interaction';
 import { parseExecutionConfig } from './booking/execution/execution-config';
 import { createProductionExecutorRegistry } from './booking/execution/booking-executor-registry';
+import { createProductionAdapterRegistry } from './booking/handoff/booking-executor-adapter-registry';
+import { checkNoSensitiveData } from './booking/handoff/sensitive-data-guard';
+import { HANDOFF_READY_MESSAGE } from './booking/booking-preparation-service';
+import { randomUUID } from 'crypto';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider)
 const llmProvider = new MockLLMProvider();
@@ -18,9 +22,19 @@ const railwayTools = new RailwayToolService();
 // the DisabledBookingExecutor — no real booking can be executed by this server.
 const executionConfig = parseExecutionConfig(process.env);
 const orchestrator = new ConversationAgentOrchestrator(llmProvider, stateManager, railwayTools, {
-  executionConfig, executorRegistry: createProductionExecutorRegistry()
+  executionConfig, executorRegistry: createProductionExecutorRegistry(),
+  // Prompt 11: executor ADAPTER registry — production contains ONLY DisabledBookingExecutorAdapter.
+  adapterRegistry: createProductionAdapterRegistry()
 });
 const executionCapability = () => orchestrator.gateway.capability();
+const executorCapability = () => orchestrator.preparation.handoffSessions.capability();
+/** Client view of the handoff session — status + frozen capability only (snapshot stays server-side). */
+const handoffSessionView = (hs: any) => hs ? {
+  handoffSessionId: hs.handoffSessionId, bookingHandoffId: hs.bookingHandoffId, status: hs.status, statusReason: hs.statusReason ?? null,
+  reviewVersion: hs.reviewVersion, sessionVersion: hs.sessionVersion, createdAt: hs.createdAt, expiresAt: hs.expiresAt,
+  executorCapability: hs.executorCapability, executionAttempts: hs.executionAttempts, lastConsumeResult: hs.lastConsumeResult ?? null
+} : null;
+const confirmationView = (c: any) => c ? { status: c.status, reviewVersion: c.reviewVersion, sessionVersion: c.sessionVersion, confirmedAt: c.confirmedAt, statusReason: c.statusReason ?? null } : null;
 
 const server = Fastify({ logger: false });
 await server.register(cors, { origin: true });
@@ -61,6 +75,9 @@ server.post('/api/chat', async (request, reply) => {
     handoff: ctx.handoff ? { handoffId: ctx.handoff.snapshot.handoffId, status: ctx.handoff.status, statusReason: ctx.handoff.statusReason ?? null, reviewVersion: ctx.handoff.snapshot.reviewVersion, expiresAt: ctx.handoff.snapshot.expiresAt } : null,
     bookingLifecycle: ctx.bookingLifecycle?.status ?? null,
     execution: ctx.execution ?? null,
+    handoffSession: handoffSessionView(ctx.handoffSession),
+    confirmation: confirmationView(ctx.confirmation),
+    executorCapability: executorCapability(),
     error: result.error ? { code: result.error.code, message: result.error.message } : null,
     events: result.events,
     cards: result.cards || [],
@@ -69,6 +86,28 @@ server.post('/api/chat', async (request, reply) => {
     dataSourceLabel: railwayRegistry.getActive().label,
     turnLog: result.turnLog
   });
+});
+
+/**
+ * Explicit handoff consumption boundary (Prompt 11). NOT called by the conversation.
+ * With the DisabledBookingExecutorAdapter this always returns BOOKING_EXECUTION_DISABLED
+ * (or an earlier fail-closed rejection) — nothing is booked, no IRCTC call, no payment.
+ * Credential-like fields in the body are rejected (never stored or logged).
+ */
+server.post('/api/handoff/consume', async (request, reply) => {
+  const body = (request.body as any) || {};
+  const sens = checkNoSensitiveData(body);
+  if (!sens.ok) return reply.status(400).send({ code: 'SENSITIVE_DATA_REJECTED', message: 'Password, OTP, CAPTCHA, card/UPI/bank details ya tokens yahan accept nahi kiye jaate.' });
+  const { sessionId, handoffSessionId } = body;
+  if (!sessionId || typeof sessionId !== 'string' || !stateManager.hasSession(sessionId)) return reply.status(404).send({ code: 'HANDOFF_NOT_FOUND', message: 'Handoff session nahi mila.' });
+  const cards: any[] = [];
+  const r = await orchestrator.preparation.consumeHandoff(sessionId, String(handoffSessionId || ''), { turnId: `consume-${randomUUID()}`, mode: 'TEXT', cards, events: [], changes: [], requestId: randomUUID() });
+  const s = stateManager.getSession(sessionId);
+  const message = r.code === 'BOOKING_EXECUTION_DISABLED'
+    ? `${HANDOFF_READY_MESSAGE} Booking execution disabled hai — kuch book nahi hua.`
+    : `Handoff execute nahi hua (${r.code}). Kuch book nahi hua.`;
+  return reply.send({ code: r.code, message, duplicate: !!r.duplicate, executorAttempted: r.executorAttempted, executionStatus: r.executionStatus ?? null,
+    handoffSession: handoffSessionView(s.handoffSession), executorCapability: executorCapability(), realBooking: false, cards });
 });
 
 /** Structured, redacted turn history (observability; no secrets are ever stored). */
@@ -88,8 +127,9 @@ server.get('/api/health', async (_, reply) => {
     ok: true,
     provider: railwayRegistry.getActiveId(),
     providerLabel: railwayRegistry.getActive().label,
-    orchestrator: 'ConversationAgentOrchestrator.v4 (Prompt 10 execution boundary)',
-    executionCapability: executionCapability()
+    orchestrator: 'ConversationAgentOrchestrator.v5 (Prompt 11 secure handoff session)',
+    executionCapability: executionCapability(),
+    executorCapability: executorCapability()
   });
 });
 

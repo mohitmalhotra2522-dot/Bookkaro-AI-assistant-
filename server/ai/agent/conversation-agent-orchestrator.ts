@@ -35,6 +35,8 @@ import { currentResults } from '../context/train-reference-resolver';
 import { BookingPreparationService, type PrepOutcome } from '../../booking/booking-preparation-service';
 import type { PreparationPolicy } from '../../booking/booking-readiness';
 import type { ExecutionLogRecord } from '@shared/booking-execution';
+import { BookingHandoffSessionService } from '../../booking/handoff/booking-handoff-session-service';
+import type { BookingExecutorAdapterRegistry } from '../../booking/handoff/booking-executor-adapter-registry';
 import { BookingExecutionGateway } from '../../booking/execution/booking-execution-gateway';
 import type { BookingExecutorRegistry } from '../../booking/execution/booking-executor-registry';
 import type { ExecutionConfig } from '../../booking/execution/execution-config';
@@ -60,6 +62,10 @@ export interface OrchestratorOptions {
   executionConfig?: ExecutionConfig;
   executorRegistry?: BookingExecutorRegistry;
   executionGateway?: BookingExecutionGateway;
+  /** Prompt 11: executor ADAPTER registry (production: disabled adapter only). */
+  adapterRegistry?: BookingExecutorAdapterRegistry;
+  /** Prompt 11: handoff session service override (tests). */
+  handoffSessionService?: BookingHandoffSessionService;
 }
 
 export interface AgentTurnResult {
@@ -101,7 +107,10 @@ export class ConversationAgentOrchestrator {
     this.runtime = new LLMToolCallingRuntime(llm, tools);
     this.applier = new ContextualTurnApplier(state);
     this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock });
-    this.preparation = new BookingPreparationService(state, { policy: options.preparationPolicy, clock: options.clock, gateway: this.gateway });
+    this.preparation = new BookingPreparationService(state, {
+      policy: options.preparationPolicy, clock: options.clock, gateway: this.gateway,
+      handoffSessions: options.handoffSessionService || new BookingHandoffSessionService({ registry: options.adapterRegistry, config: this.gateway.config, clock: options.clock })
+    });
   }
 
   getTurnHistory(sessionId: string): TurnRecord[] { return [...(this.turns.get(sessionId) || [])]; }
@@ -145,7 +154,7 @@ export class ConversationAgentOrchestrator {
     this.state.setMode(sessionId, mode); // same session across text/voice switches
     // ---- Handoff integrity (expiry / critical change) — before anything else this turn ----
     const preChanges: string[] = [];
-    const handoffSync = this.preparation.syncHandoff(sessionId, { turnId, mode, cards, events, changes: preChanges });
+    const handoffSync = this.preparation.syncHandoff(sessionId, { turnId, mode, cards, events, changes: preChanges, requestId });
     this.pushHistory(sessionId, { role: 'user', content: redact(safeInput) });
 
     // ---- Safety pre-filter (no LLM call) ----
@@ -163,7 +172,7 @@ export class ConversationAgentOrchestrator {
     }
 
     // ---- Tool-calling loop with per-decision deterministic application ----
-    const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges };
+    const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges, rawText: normalizedInput, requestId };
     let pendingOverride: PendingInteraction | undefined;
     const bound = this.runtime.bind(guard.getSession, guard.commit, {
       requestId,
@@ -323,6 +332,8 @@ export class ConversationAgentOrchestrator {
       execution: a.execution,
       handoffId: s.handoff?.snapshot.handoffId,
       handoffStatus: s.handoff?.status,
+      handoffSessionStatus: s.handoffSession?.status,
+      confirmationStatus: s.confirmation?.status,
       bookingLifecycle: s.bookingLifecycle?.status,
       latencyMs: Date.now() - a.startedAt
     };

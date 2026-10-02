@@ -187,7 +187,20 @@ export type OrchestratorErrorCode =
   | 'INVALID_CLASS'
   | 'UNKNOWN_BOOKING_EXECUTOR'
   | 'BOOKING_EXECUTOR_UNAVAILABLE'
-  | 'BOOKING_EXECUTION_FAILED';
+  | 'BOOKING_EXECUTION_FAILED'
+  // ---- Prompt 11: secure handoff session ----
+  | 'HANDOFF_NOT_FOUND'
+  | 'HANDOFF_SESSION_EXPIRED'
+  | 'HANDOFF_INVALIDATED'
+  | 'HANDOFF_ALREADY_CONSUMED'
+  | 'HANDOFF_SESSION_REJECTED'
+  | 'INVALID_BOOKING_SNAPSHOT'
+  | 'INVALID_CONFIRMATION'
+  | 'EXECUTOR_DISABLED'
+  | 'EXECUTOR_NOT_FOUND'
+  | 'EXECUTOR_UNAVAILABLE'
+  | 'SENSITIVE_DATA_REJECTED'
+  | 'BOOKING_DATA_CHANGED';
 
 export interface OrchestratorError {
   code: OrchestratorErrorCode;
@@ -224,6 +237,9 @@ export interface TurnRecord {
   execution?: import('@shared/booking-execution').ExecutionLogRecord;
   handoffId?: string;
   handoffStatus?: string;
+  /** Prompt 11 */
+  handoffSessionStatus?: string;
+  confirmationStatus?: string;
   bookingLifecycle?: string;
   sessionId: string;
   turnId: string;

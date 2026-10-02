@@ -31,20 +31,17 @@ import type {
   ExecutionCapability, ExecutionLogRecord, BookingHandoffSnapshot
 } from '@shared/booking-execution';
 import { BOOKING_EXECUTION_STATUSES, NON_EXECUTING_STATUSES } from '@shared/booking-execution';
-import { MAX_PASSENGERS } from '@shared/constants';
 import type { ConversationStateManager } from '../../ai/state/conversation-state';
-import { currentResults } from '../../ai/context/train-reference-resolver';
-import { trainClassCodes } from '../../ai/context/class-reference-resolver';
-import { BookingReadinessEvaluator, defaultPolicy } from '../booking-readiness';
-import { passengerValidator } from '../passenger-validator';
+import { EXECUTION_READINESS } from './booking-data-validator';
 import { reviewFingerprint } from '../review-builder';
-import { v4 as uuid } from '../../ai/orchestrator/utils';
+import { randomBytes } from 'crypto';
 import type { BookingExecutor } from './booking-executor';
 import { BookingExecutorRegistry, createProductionExecutorRegistry } from './booking-executor-registry';
 import { BookingHandoffService, computeIdempotencyKey } from './booking-handoff';
 import { DEFAULT_EXECUTION_CONFIG, type ExecutionConfig } from './execution-config';
 import { findSensitiveKeys } from './execution-request';
 import { transitionLifecycle } from './booking-lifecycle';
+import { validateBookingData } from './booking-data-validator';
 
 export interface GatewayContext {
   turnId: string;
@@ -63,8 +60,6 @@ export interface GatewayOptions {
   handoffs?: BookingHandoffService;
 }
 
-const tn = (t: any): string | undefined => (t ? String(t.number || t.trainNumber) : undefined);
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 export class BookingExecutionGateway {
   readonly registry: BookingExecutorRegistry;
@@ -72,7 +67,7 @@ export class BookingExecutionGateway {
   readonly handoffs: BookingHandoffService;
   private readonly clock: () => number;
   /** Execution policy is STRICTER than the review policy: availability AND fare must be FRESH. */
-  private readonly executionReadiness = new BookingReadinessEvaluator({ ...defaultPolicy(), requireAvailability: true, requireFare: true });
+  private readonly executionReadiness = EXECUTION_READINESS;
   private readonly completed = new Map<string, Extract<GatewayOutcome, { ok: true }>>();
   private readonly inFlight = new Map<string, Promise<GatewayOutcome>>();
   private readonly logs: ExecutionLogRecord[] = [];
@@ -152,11 +147,11 @@ export class BookingExecutionGateway {
 
     // 5) readiness — every booking-critical value re-validated against authoritative data
     const now = this.clock();
-    const v = this.validateBookingData(s, request, now);
+    const v = validateBookingData(s, request, now, this.executionReadiness);
     if (v) return reject(v.code, v.detail);
 
     // Build the immutable handoff (not yet stored)
-    const handoffId = `HO-${uuid().slice(0, 8).toUpperCase()}`;
+    const handoffId = `HO-${randomBytes(8).toString('hex').toUpperCase()}`;  // opaque, not derived from session data
     const hb = this.handoffs.build(s, request, handoffId, now);
     if (!hb.ok) return reject(hb.code, hb.detail);
     ctx.emit?.('BOOKING_EXECUTION_REQUESTED', { reviewVersion: rv.reviewVersion, handoffId, executionCapability: capability.reason });
@@ -192,53 +187,6 @@ export class BookingExecutionGateway {
     const outcome = { ok: true as const, duplicate: false, handoff: record, execution: result, capability, log };
     this.completed.set(request.idempotencyKey, outcome);
     return outcome;
-  }
-
-  /** Independent re-validation of all booking-critical data. Returns the first failure. */
-  private validateBookingData(s: BookingSession, req: BookingExecutionRequest, now: number): { code: BookingExecutionErrorCode; detail: string } | null {
-    // Journey
-    if (!s.origin || !s.destination || s.origin === s.destination) return { code: 'BOOKING_NOT_READY', detail: 'invalid journey' };
-    if (req.journey?.origin !== s.origin || req.journey?.destination !== s.destination) return { code: 'BOOKING_NOT_READY', detail: 'journey mismatch' };
-    if (!s.date || !ISO_DATE.test(s.date) || req.date !== s.date) return { code: 'BOOKING_NOT_READY', detail: 'invalid date' };
-    if (s.date < new Date(now - 24 * 3600_000).toISOString().slice(0, 10)) return { code: 'BOOKING_NOT_READY', detail: 'date in the past' };
-
-    // Train — against the CURRENT authoritative search results (never LLM / old refs)
-    const t: any = s.selectedTrain;
-    const rt = req.selectedTrain;
-    const sr: any = s.searchResults;
-    if (!t || !rt || !sr) return { code: 'INVALID_TRAIN', detail: 'no selected train / results' };
-    if (rt.trainNumber !== tn(t)) return { code: 'INVALID_TRAIN', detail: 'train number mismatch' };
-    if (!t.resultId || rt.resultId !== t.resultId) return { code: 'INVALID_TRAIN', detail: 'resultId mismatch' };
-    if (!sr.resultId || t.searchResultId !== sr.resultId || !String(t.resultId).startsWith(`${sr.resultId}:`)) return { code: 'INVALID_TRAIN', detail: 'selection not from current results' };
-    if (sr.journey?.origin !== s.origin || sr.journey?.destination !== s.destination || sr.journey?.date !== s.date) return { code: 'INVALID_TRAIN', detail: 'results belong to another journey' };
-    if (t.date !== s.date || rt.date !== s.date) return { code: 'INVALID_TRAIN', detail: 'train date mismatch' };
-    const row: any = currentResults(s).find((r: any) => r.resultId === t.resultId);
-    if (!row || String(row.trainNumber || row.number) !== tn(t)) return { code: 'INVALID_TRAIN', detail: 'train not in current results' };
-    if (row.origin !== t.origin || row.destination !== t.destination || rt.origin !== t.origin || rt.destination !== t.destination) return { code: 'INVALID_TRAIN', detail: 'train route mismatch' };
-
-    // Class
-    if (!s.selectedClass || req.selectedClass !== s.selectedClass || !trainClassCodes(row).includes(s.selectedClass)) return { code: 'INVALID_CLASS', detail: 'class not valid for train' };
-
-    // Passengers — validator re-run, request must equal session
-    const ps: any[] = s.passengers || [];
-    const count = s.passengersCount || 0;
-    if (count < 1 || count > MAX_PASSENGERS || ps.length !== count || req.passengers.length !== count) return { code: 'INVALID_PASSENGER_DETAILS', detail: 'passenger count mismatch' };
-    for (let i = 0; i < ps.length; i++) {
-      const vr = passengerValidator.validateRecord(ps[i]);
-      if (!vr.complete || !vr.valid) return { code: 'INVALID_PASSENGER_DETAILS', detail: `passenger ${i + 1} invalid` };
-      const q = req.passengers[i];
-      if (!q || q.passengerId !== ps[i].id || q.name !== ps[i].name || q.age !== ps[i].age || q.gender !== ps[i].gender) return { code: 'INVALID_PASSENGER_DETAILS', detail: `passenger ${i + 1} mismatch` };
-    }
-
-    // Readiness + freshness (execution policy: availability AND fare must be FRESH)
-    const r = this.executionReadiness.evaluate(s, now);
-    if (r.blockers.includes('INVALID_TRAIN') || r.blockers.includes('MISSING_TRAIN')) return { code: 'INVALID_TRAIN', detail: 'readiness' };
-    if (r.blockers.includes('INVALID_CLASS') || r.blockers.includes('MISSING_CLASS')) return { code: 'INVALID_CLASS', detail: 'readiness' };
-    if (r.blockers.includes('INVALID_PASSENGER_DETAILS') || r.blockers.includes('MISSING_PASSENGER_DETAILS')) return { code: 'INVALID_PASSENGER_DETAILS', detail: 'readiness' };
-    if (r.availability !== 'FRESH') return { code: 'STALE_AVAILABILITY', detail: `availability ${r.availability}` };
-    if (r.fare !== 'FRESH') return { code: 'STALE_FARE', detail: `fare ${r.fare}` };
-    if (r.blockers.length) return { code: 'BOOKING_NOT_READY', detail: r.blockers.join(',') };
-    return null;
   }
 
   /** Never manufactures success. Non-REAL executors can only yield DISABLED / REQUIRES_HANDOFF / FAILED. */

@@ -91,8 +91,8 @@ describe('G3 — confirmation → gateway → Disabled → IRCTC_HANDOFF_READY',
     await toAwaiting(sid);
     const r = await say(sid, 'haan book karo');
     expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
-    expect(r.events).toEqual(['BOOKING_CONFIRMATION_REQUESTED', 'BOOKING_EXECUTION_REQUESTED', 'BOOKING_HANDOFF_CREATED', 'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'IRCTC_HANDOFF_READY']);
-    expect(r.responseMessage).toContain('Booking details ready hain. Actual railway booking abhi enabled nahi hai.');
+    expect(r.events).toEqual(['BOOKING_CONFIRMATION_REQUESTED', 'BOOKING_CONFIRMATION_CREATED', 'BOOKING_EXECUTION_REQUESTED', 'BOOKING_HANDOFF_CREATED', 'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'BOOKING_HANDOFF_SESSION_CREATED', 'IRCTC_HANDOFF_READY']);
+    expect(r.responseMessage).toContain('Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai.');
     expect(r.responseMessage).not.toMatch(FAKE_SUCCESS);
     const s = S(sid);
     const h = s.handoff.snapshot;

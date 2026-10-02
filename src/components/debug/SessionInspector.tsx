@@ -53,6 +53,9 @@ export const SessionInspector: React.FC<{ ctx: any; meta: InspectorMeta }> = ({ 
           {cell('handoff', c.handoff ? `${c.handoff.snapshot?.handoffId} ${c.handoff.status}${c.handoff.statusReason ? ` (${String(c.handoff.statusReason).split(':')[0]})` : ''}` : undefined, !!c.handoff && c.handoff.status !== 'READY')}
           {cell('expires', c.handoff?.status === 'READY' && c.handoff.snapshot?.expiresAt ? new Date(c.handoff.snapshot.expiresAt).toLocaleTimeString() : undefined)}
           {cell('lifecycle', c.bookingLifecycle?.status)}
+          {cell('confirmation', c.confirmation ? `${c.confirmation.status} · review v${c.confirmation.reviewVersion} · sv${c.confirmation.sessionVersion}` : undefined, !!c.confirmation && c.confirmation.status !== 'VALID')}
+          {cell('handoffSession', c.handoffSession ? `${String(c.handoffSession.handoffSessionId).slice(0, 11)}… ${c.handoffSession.status}${c.handoffSession.statusReason ? ` (${String(c.handoffSession.statusReason).split(':')[0]})` : ''}${c.handoffSession.status === 'READY' ? ` · till ${new Date(c.handoffSession.expiresAt).toLocaleTimeString()}` : ''}` : undefined, !!c.handoffSession && c.handoffSession.status !== 'READY')}
+          {cell('executor', c.handoffSession?.executorCapability ? `${c.handoffSession.executorCapability.executorName} · ${c.handoffSession.executorCapability.enabled ? 'enabled' : 'disabled'} · realBooking ${c.handoffSession.executorCapability.supportsRealBooking ? 'yes' : 'no'}` : undefined)}
           {cell('execution', c.execution ? `${c.execution.status} · ${c.execution.reason} · ${c.execution.executorName}` : undefined)}
           {cell('realBooking', meta.executionCapability ? `${meta.executionCapability.realBookingEnabled ? 'flag on' : 'OFF'} → ${meta.executionCapability.effectiveExecutor} (${meta.executionCapability.reason})` : undefined)}
           {cell('sessionV', meta.sessionVersion ?? c.sessionVersion)}

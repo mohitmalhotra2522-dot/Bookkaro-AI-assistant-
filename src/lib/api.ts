@@ -28,6 +28,31 @@ export interface ChatResponse {
   handoff?: { handoffId: string; status: string; statusReason: string | null; reviewVersion: number; expiresAt: string } | null;
   bookingLifecycle?: string | null;
   execution?: any;
+  /** Prompt 11 — secure handoff session (status + capability only; snapshot stays server-side). */
+  handoffSession?: { handoffSessionId: string; status: string; statusReason: string | null; reviewVersion: number; expiresAt: string; executorCapability: { enabled: boolean; executorName: string; supportsRealBooking: boolean; reason?: string } } | null;
+  confirmation?: { status: string; reviewVersion: number; sessionVersion: number; confirmedAt: string; statusReason: string | null } | null;
+  executorCapability?: { enabled: boolean; executorName: string; supportsRealBooking: boolean; reason?: string };
+}
+
+export interface ConsumeHandoffResponse {
+  code: string;
+  message: string;
+  duplicate: boolean;
+  executorAttempted: boolean;
+  executionStatus: string | null;
+  handoffSession: ChatResponse['handoffSession'];
+  realBooking: false;
+  cards: Array<{ type: string; data: any }>;
+}
+
+/** Explicit handoff consumption — returns BOOKING_EXECUTION_DISABLED in this build (nothing is booked). */
+export async function consumeHandoff(sessionId: string, handoffSessionId: string): Promise<ConsumeHandoffResponse> {
+  const res = await fetch('/api/handoff/consume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, handoffSessionId })
+  });
+  return res.json();
 }
 
 export async function sendMessage(

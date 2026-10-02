@@ -16,6 +16,7 @@
  * tool calls are validated, so "12014 ki CC availability" can select the train
  * + class and then run CHECK_AVAILABILITY in the same turn.
  */
+import { classifyConfirmation, AMBIGUOUS_CONFIRMATION_PROMPT } from '../../booking/handoff/confirmation-policy';
 import { BookingState } from '@shared/states';
 import type { BookingSession, PendingInteraction, BookingEventType } from '@shared/entities';
 import type { AgentDecision, OrchestratorError, OrchestratorErrorCode } from '../decisions/agent-decision';
@@ -35,6 +36,10 @@ export interface ApplyCtx {
   cards: Array<{ type: string; data: any }>;
   events: string[];
   changes: string[];
+  /** The user's own (normalized) words this turn — the backend ConfirmationPolicy reads them, not the LLM's label. */
+  rawText?: string;
+  /** Request id of the turn (audit correlation). */
+  requestId?: string;
 }
 
 export interface ApplyOutcome {
@@ -84,8 +89,15 @@ export class ContextualTurnApplier {
     //    pendingInteraction === CONFIRMATION_REQUIRED. Version + freshness checks
     //    and the IRCTC_HANDOFF_READY transition are done by BookingPreparationService.
     if (S().bookingState === BookingState.IRCTC_HANDOFF_READY && (e.executionRequested || e.affirmation || d.intent === 'CONFIRM_BOOKING')) {
-      const o = fail('BOOKING_EXECUTION_DISABLED', 'Booking details ready hain. Actual railway booking abhi enabled nahi hai — main ticket book, IRCTC login, submission ya payment nahi kar sakta.');
+      const o = fail('BOOKING_EXECUTION_DISABLED', 'Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai — main ticket book, IRCTC login, submission ya payment nahi kar sakta.');
       return { ...o, duplicateConfirmation: !e.executionRequested };
+    }
+    // Ambiguous reply while a booking confirmation is pending ("hmm", "achha", "theek hai?")
+    // — whatever the LLM labelled it — is never a confirmation: ask explicitly.
+    if (S().bookingState === BookingState.AWAITING_CONFIRMATION && !this.hasSubstantiveEntities(e) && !e.negation
+      && classifyConfirmation(ctx.rawText ?? '') === 'AMBIGUOUS') {
+      out.applied.push('CONFIRMATION_AMBIGUOUS');
+      return fail('INVALID_CONFIRMATION', AMBIGUOUS_CONFIRMATION_PROMPT, { type: 'CONFIRMATION_REQUIRED' });
     }
     if (e.executionRequested) {
       return fail('BOOKING_EXECUTION_DISABLED', 'Actual booking, IRCTC login, submission ya payment is milestone mein enabled nahi hai. Main sirf booking details tayyar karke confirmation tak le ja sakta hoon.');
@@ -102,6 +114,13 @@ export class ContextualTurnApplier {
       }
       if (s.bookingState !== BookingState.AWAITING_CONFIRMATION || s.pendingInteraction?.type !== 'CONFIRMATION_REQUIRED' || d.action === 'REQUEST_CONFIRMATION') {
         return fail('CONFIRMATION_NOT_PENDING', this.contextualNudge(s, ctx.mode));
+      }
+      // Backend ConfirmationPolicy: only the user's EXPLICIT words confirm a booking.
+      // AMBIGUOUS ("theek hai", "okay", "haan?") / NEGATIVE / NONE → no confirmation, ask again.
+      const cls = classifyConfirmation(ctx.rawText ?? '');
+      if (cls !== 'EXPLICIT') {
+        out.applied.push(`CONFIRMATION_${cls}`);
+        return fail('INVALID_CONFIRMATION', AMBIGUOUS_CONFIRMATION_PROMPT, { type: 'CONFIRMATION_REQUIRED' });
       }
       out.confirmRequested = true;
       out.applied.push('CONFIRMATION_ACCEPTED_BY_GUARD');

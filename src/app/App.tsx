@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useChatStore } from '../state/chatStore';
-import { createSession, sendMessage } from '../lib/api';
+import { createSession, sendMessage, consumeHandoff } from '../lib/api';
 import { useVoice } from '../voice/useVoice';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { MicButton } from '../components/voice/MicButton';
@@ -76,6 +76,18 @@ const App: React.FC = () => {
     },
     [sessionId, isLoading, addMessage, setLoading, setToolActivity, setContext, addCard, voice, setError, setSessionId]
   );
+
+  /** Explicit, user-initiated handoff consumption — always DISABLED in this build (no booking). */
+  const runConsume = useCallback(async (handoffSessionId: string) => {
+    if (!sessionId || !handoffSessionId) return;
+    try {
+      const r = await consumeHandoff(sessionId, handoffSessionId);
+      addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: r.message, timestamp: Date.now() });
+      (r.cards || []).forEach((card: any) => addCard(card));
+    } catch (e: any) {
+      setError(e.message || 'Handoff status check nahi ho paaya.');
+    }
+  }, [sessionId, addMessage, addCard, setError]);
 
   const handleMicStart = useCallback(() => {
     voice.cancelSpeak();
@@ -180,10 +192,26 @@ const App: React.FC = () => {
                       {msg.cardData.expiresAt ? ` · valid till ${new Date(msg.cardData.expiresAt).toLocaleTimeString()}` : ''}{msg.cardData.duplicate ? ' · duplicate (no new handoff)' : ''}
                     </div>
                   )}
+                  {msg.cardData.handoffSessionId && (
+                    <div style={{ fontSize: 11, color: '#616161', marginTop: 4, fontFamily: 'monospace' }}>
+                      session {msg.cardData.handoffSessionId.slice(0, 11)}… · {msg.cardData.handoffSessionStatus}
+                      {msg.cardData.handoffSessionExpiresAt ? ` · expires ${new Date(msg.cardData.handoffSessionExpiresAt).toLocaleTimeString()}` : ''}
+                      {' · executor '}{msg.cardData.executorCapability?.executorName} ({msg.cardData.executorCapability?.enabled ? 'enabled' : 'disabled'}, real booking: {msg.cardData.executorCapability?.supportsRealBooking ? 'yes' : 'no'})
+                    </div>
+                  )}
+                  {msg.cardData.handoffSessionId && (
+                    <button
+                      onClick={() => runConsume(msg.cardData.handoffSessionId)}
+                      style={{ marginTop: 10, padding: '6px 14px', borderRadius: 8, border: '1px solid #9e9e9e', background: '#fafafa', color: '#616161', fontSize: 12, cursor: 'pointer' }}
+                    >
+                      Execute handoff (disabled)
+                    </button>
+                  )}
                 </div>
               );
             }
             const d: any = msg.cardData;
+            if (msg.cardType === ('handoff_consume' as any)) return chip('#eceff1', '#37474f', <>🔒 Handoff execution: <b>{d.code}</b>{d.duplicate ? ' · duplicate (no new attempt)' : ''} · executor {d.executorName || 'none'} ({d.executorEnabled ? 'enabled' : 'disabled'}) · real booking: no</>, msg.id);
             if (msg.cardType === ('handoff_status' as any)) return chip('#fff3e0', '#e65100', <>⚠️ Handoff {d.handoffId} <b>{d.status}</b> ({d.reason}) — naya review confirm karna hoga</>, msg.id);
             if (msg.cardType === ('selected_train' as any)) return chip('#e3f2fd', '#0d47a1', <>🚆 Selected: <b>{d.trainNumber}</b> {d.trainName}</>, msg.id);
             if (msg.cardType === ('selected_class' as any)) return chip('#e3f2fd', '#0d47a1', <>🎫 Class: <b>{d.classCode}</b></>, msg.id);

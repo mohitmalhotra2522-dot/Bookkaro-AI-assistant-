@@ -26,6 +26,8 @@ import type { ExecutionLogRecord } from '@shared/booking-execution';
 import { BookingExecutionGateway, type GatewayOutcome } from './execution/booking-execution-gateway';
 import { buildExecutionRequest } from './execution/execution-request';
 import { transitionLifecycle } from './execution/booking-lifecycle';
+import { BookingConfirmationService } from './handoff/booking-confirmation';
+import { BookingHandoffSessionService, type ConsumeHandoffOutcome } from './handoff/booking-handoff-session-service';
 
 export interface PrepCtx {
   turnId: string;
@@ -33,6 +35,8 @@ export interface PrepCtx {
   cards: Array<{ type: string; data: any }>;
   events: string[];
   changes: string[];
+  /** Request id of the turn / API call (audit correlation). */
+  requestId?: string;
 }
 
 export type RunRequiredTools = (calls: ToolCall[]) => Promise<{ steps: ToolCallStep[]; stale: boolean }>;
@@ -60,12 +64,13 @@ export interface PrepOptions {
 const idx = (s: BookingState) => STATE_ORDER.indexOf(s);
 const FP_PARTS = ['origin', 'destination', 'date', 'train', 'class', 'passengersCount', 'passengers', 'availability', 'fare'];
 
-export const HANDOFF_READY_MESSAGE = 'Booking details ready hain. Actual railway booking abhi enabled nahi hai.';
+export const HANDOFF_READY_MESSAGE = 'Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai.';
 export const HANDOFF_DUPLICATE_MESSAGE = 'Ye booking pehle hi confirm ho chuki hai — wahi booking handoff ready hai, naya handoff nahi banaya.';
 export const HANDOFF_EXPIRED_MESSAGE = 'Pichla booking handoff expire ho gaya. Fresh availability aur fare check karke naya review bana raha hoon.';
 export const HANDOFF_INVALIDATED_MESSAGE = 'Booking details badalne se pichla handoff cancel ho gaya — naya review confirm karna hoga.';
 /** Gateway rejections after which the review is rebuilt in the same turn and confirmation re-asked. */
-const REGENERATE_CODES = ['STALE_REVIEW', 'REVIEW_INVALIDATED', 'STALE_BOOKING_HANDOFF', 'CONFIRMATION_REQUIRED', 'SESSION_VERSION_CONFLICT', 'INVALID_BOOKING_HANDOFF'];
+const REGENERATE_CODES = ['STALE_REVIEW', 'REVIEW_INVALIDATED', 'STALE_BOOKING_HANDOFF', 'CONFIRMATION_REQUIRED', 'SESSION_VERSION_CONFLICT', 'INVALID_BOOKING_HANDOFF',
+  'BOOKING_DATA_CHANGED', 'INVALID_BOOKING_SNAPSHOT', 'INVALID_CONFIRMATION', 'HANDOFF_SESSION_REJECTED'];
 const PREP_STATES = [BookingState.CLASS_SELECTED, BookingState.BOOKING_PREPARE, BookingState.COLLECTING_PASSENGER_DETAILS, BookingState.PASSENGERS_READY, BookingState.REVIEW];
 export const NO_EXECUTION_NOTE = 'Ticket abhi book nahi hua hai — koi IRCTC login, submission ya payment nahi hua.';
 
@@ -74,11 +79,16 @@ export class BookingPreparationService {
   private readonly clock: () => number;
   /** The ONLY path from a confirmed review to a BookingExecutor (Disabled in this milestone). */
   readonly gateway: BookingExecutionGateway;
+  /** Deterministic BookingConfirmation records (Prompt 11). */
+  readonly confirmations = new BookingConfirmationService();
+  /** Secure handoff sessions + the (disabled) executor adapter boundary (Prompt 11). */
+  readonly handoffSessions: BookingHandoffSessionService;
 
-  constructor(private readonly state: ConversationStateManager, opts: { policy?: Partial<PreparationPolicy>; clock?: () => number; gateway?: BookingExecutionGateway } = {}) {
+  constructor(private readonly state: ConversationStateManager, opts: { policy?: Partial<PreparationPolicy>; clock?: () => number; gateway?: BookingExecutionGateway; handoffSessions?: BookingHandoffSessionService } = {}) {
     this.readiness = new BookingReadinessEvaluator({ ...defaultPolicy(), ...(opts.policy || {}) });
     this.clock = opts.clock || (() => Date.now());
     this.gateway = opts.gateway || new BookingExecutionGateway(state, { clock: this.clock });
+    this.handoffSessions = opts.handoffSessions || new BookingHandoffSessionService({ config: this.gateway.config, clock: this.clock });
   }
 
   now(): number { return this.clock(); }
@@ -134,14 +144,24 @@ export class BookingPreparationService {
    */
   invalidateHandoff(sessionId: string, ctx: PrepCtx, status: 'INVALIDATED' | 'EXPIRED', reason: string): boolean {
     const s = this.state.getSession(sessionId);
-    if (!s.handoff || s.handoff.status !== 'READY') return false;
     const now = this.clock();
+    // the confirmation never survives its handoff (or a change after it)
+    if (this.confirmations.setStatus(s, status, reason, now)) {
+      this.emit(sessionId, ctx, 'BOOKING_CONFIRMATION_INVALIDATED', { reviewVersion: s.confirmation!.reviewVersion, sessionVersion: s.confirmation!.sessionVersion, status, reason: reason.split(':')[0] });
+    }
+    const hs = s.handoffSession;
+    const hsChanged = !!hs && this.handoffSessions.setStatus(s, status, reason, now);
+    if (!s.handoff || s.handoff.status !== 'READY') return hsChanged;
     this.gateway.handoffs.setStatus(s, status, reason, now);
     s.irctcHandoffReady = false;
     s.reviewConfirmed = false;
     transitionLifecycle(s, 'INVALIDATED', reason, new Date(now).toISOString());
-    this.emit(sessionId, ctx, status === 'EXPIRED' ? 'BOOKING_HANDOFF_EXPIRED' : 'BOOKING_HANDOFF_INVALIDATED', { handoffId: s.handoff.snapshot.handoffId, reason: reason.split(':')[0] });
-    ctx.cards.push({ type: 'handoff_status', data: { handoffId: s.handoff.snapshot.handoffId, status, reason: reason.split(':')[0], reviewVersion: s.handoff.snapshot.reviewVersion } });
+    const audit = hs && hsChanged ? BookingHandoffSessionService.audit(hs) : { sessionId, handoffId: s.handoff.snapshot.handoffId, reviewVersion: s.handoff.snapshot.reviewVersion, status };
+    this.emit(sessionId, ctx, status === 'EXPIRED' ? 'BOOKING_HANDOFF_EXPIRED' : 'BOOKING_HANDOFF_INVALIDATED', { ...audit, handoffId: s.handoff.snapshot.handoffId, status, reason: reason.split(':')[0] });
+    ctx.cards.push({ type: 'handoff_status', data: {
+      handoffId: s.handoff.snapshot.handoffId, status, reason: reason.split(':')[0], reviewVersion: s.handoff.snapshot.reviewVersion,
+      handoffSessionId: hs?.handoffSessionId, handoffSessionStatus: hs?.status, confirmationStatus: s.confirmation?.status
+    } });
     ctx.changes.push(`handoff:${status.toLowerCase()}`);
     this.state.bump(sessionId);
     return true;
@@ -155,8 +175,18 @@ export class BookingPreparationService {
    */
   syncHandoff(sessionId: string, ctx: PrepCtx): { notes: string[]; error?: OrchestratorError } {
     const s = this.state.getSession(sessionId);
-    const c = this.gateway.handoffs.check(s, this.clock());
-    if (!c || c.status === 'READY' || s.handoff?.status !== 'READY') return { notes: [] };
+    const now = this.clock();
+    let c = this.gateway.handoffs.check(s, now);
+    const hc = this.handoffSessions.check(s, now);
+    if (s.handoff?.status !== 'READY') {
+      // orphaned READY handoff session (should not happen) → fail closed, quietly
+      if (hc?.status === 'READY' || s.handoffSession?.status === 'READY') this.handoffSessions.setStatus(s, 'INVALIDATED', 'BOOKING_HANDOFF_NOT_READY', now);
+      return { notes: [] };
+    }
+    // the handoff SESSION expires/invalidates the handoff too (it is the execution context)
+    if (hc && hc.status === 'EXPIRED' && (!c || c.status === 'READY')) c = { status: 'EXPIRED', reason: 'HANDOFF_SESSION_EXPIRED' } as any;
+    else if (hc && hc.status === 'INVALIDATED' && (!c || c.status === 'READY')) c = { status: 'INVALIDATED', reason: hc.reason || 'HANDOFF_SESSION_INVALIDATED' } as any;
+    if (!c || c.status === 'READY') return { notes: [] };
     if (c.status === 'EXPIRED') {
       this.invalidateHandoff(sessionId, ctx, 'EXPIRED', 'HANDOFF_EXPIRED');
       const rv = s.review;
@@ -187,8 +217,25 @@ export class BookingPreparationService {
     const req = buildExecutionRequest(s, { requestId: ctx.turnId, confirmedAt: new Date(this.clock()).toISOString() });
     if (!req) return undefined;
     const g = await this.gateway.execute(req, { turnId: ctx.turnId, emit: (t, d) => this.emit(sessionId, ctx, t, d) });
-    if (g.ok) ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, true) });
+    if (g.ok) {
+      // resolves against the EXISTING READY handoff session — no new confirmation / session / attempt
+      const hs = this.handoffSessions.create(this.state.getSession(sessionId), { requestId: ctx.requestId, emit: (t, d) => this.emit(sessionId, ctx, t, d) });
+      if (hs.ok) ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, true) });
+    }
     return g.log;
+  }
+
+  /**
+   * consumeHandoff — the explicit execution boundary (never triggered by the
+   * conversation). With the DisabledBookingExecutorAdapter this always returns
+   * BOOKING_EXECUTION_DISABLED (or an earlier fail-closed rejection).
+   */
+  async consumeHandoff(sessionId: string, handoffSessionId: string, ctx: PrepCtx, options?: Record<string, unknown>): Promise<ConsumeHandoffOutcome> {
+    const s = this.state.getSession(sessionId);
+    const r = await this.handoffSessions.consume(s, String(handoffSessionId || ''), { requestId: ctx.requestId, emit: (t, d) => this.emit(sessionId, ctx, t, d) }, options);
+    if (r.code === 'HANDOFF_SESSION_EXPIRED' && s.handoff?.status === 'READY') this.syncHandoff(sessionId, ctx);
+    ctx.cards.push({ type: 'handoff_consume', data: { handoffSessionId: r.handoffSessionId, code: r.code, executionStatus: r.executionStatus, executorAttempted: r.executorAttempted, duplicate: !!r.duplicate, executorName: r.capability?.executorName, executorEnabled: r.capability?.enabled ?? false, realBooking: false } });
+    return r;
   }
 
   /** Lifecycle mirrors the preparation flow (separate from the conversation state machine). */
@@ -373,10 +420,17 @@ export class BookingPreparationService {
     let r = this.evaluate(sessionId, ctx);
     const staleCodes = r.blockers.filter(b => b === 'STALE_AVAILABILITY' || b === 'STALE_FARE');
     if (r.refreshNeeded.length) {
+      const before = { fare: (S().fare as any)?.total, avail: S().selectedClass ? String((S().availability as any)?.[S().selectedClass!]?.status ?? '') : '' };
       const res = await this.refresh(sessionId, ctx, runTools, r.refreshNeeded);
       out.steps.push(...res.steps);
       if (res.stale) return { ...out, stale: true };
       if (reviewFingerprint(S()) !== rv.fingerprint) {
+        const after = { fare: (S().fare as any)?.total, avail: S().selectedClass ? String((S().availability as any)?.[S().selectedClass!]?.status ?? '') : '' };
+        const changed: string[] = [];
+        const parts: string[] = [];
+        if (typeof before.fare === 'number' && typeof after.fare === 'number' && before.fare !== after.fare) { changed.push('fare'); parts.push(`Fare ₹${before.fare} se ₹${after.fare} ho gaya hai.`); }
+        if (before.avail && after.avail && before.avail !== after.avail) { changed.push('availability'); parts.push(`Availability ${before.avail} se ${after.avail} ho gayi hai.`); }
+        this.confirmations.setStatus(S(), 'INVALIDATED', 'RAILWAY_DATA_CHANGED', this.clock());
         rv.valid = false; rv.invalidatedReason = 'REFRESHED_AT_CONFIRMATION';
         S().confirmedReviewVersion = undefined;
         this.emit(sessionId, ctx, 'REVIEW_INVALIDATED', { reviewVersion: rv.reviewVersion, changed: ['railway-data-refresh'] });
@@ -384,7 +438,8 @@ export class BookingPreparationService {
         r = this.evaluate(sessionId, ctx);
         if (!r.ready) return this.blockForRetry(sessionId, ctx, r, out);
         const code = staleCodes.includes('STALE_AVAILABILITY') ? 'STALE_AVAILABILITY' : staleCodes.includes('STALE_FARE') ? 'STALE_FARE' : 'STALE_REVIEW';
-        out.error = { code: 'STALE_REVIEW', message: 'Confirm se pehle availability/fare dobara check kiya — review update hua hai, naye review ko confirm karein.', details: { reason: code } };
+        const msg = parts.length ? `${parts.join(' ')} Updated review dekh kar dobara confirm karein.` : 'Confirm se pehle availability/fare dobara check kiya — review update hua hai, naye review ko confirm karein.';
+        out.error = { code: 'STALE_REVIEW', message: msg, details: { reason: code, changed, ...(changed.includes('fare') ? { previousFare: before.fare, currentFare: after.fare } : {}), ...(changed.includes('availability') ? { previousAvailability: before.avail, currentAvailability: after.avail } : {}) } };
         out.notes.push(out.error.message);
         this.createReview(sessionId, ctx, r, out);
         this.enterAwaiting(sessionId, ctx);
@@ -411,9 +466,35 @@ export class BookingPreparationService {
       reviewVersion: cur, origin: req.journey.origin, destination: req.journey.destination, date: req.date,
       trainNumber: req.selectedTrain.trainNumber, selectedClass: req.selectedClass, passengersCount: req.passengers.length
     });
+    // 4a) deterministic BookingConfirmation for exactly this review / session version
+    const cf = this.confirmations.create(S(), { requestId: ctx.requestId || ctx.turnId, now: this.clock(), reviewVersion: opts.reviewVersion });
+    if (!cf.ok) {
+      out.error = { code: cf.code, message: 'Confirmation is review ke liye valid nahi hai — handoff nahi banaya. Latest review dekh kar confirm karein.' };
+      out.notes.push(out.error.message);
+      return out;
+    }
+    this.emit(sessionId, ctx, 'BOOKING_CONFIRMATION_CREATED', { sessionId, requestId: cf.confirmation.requestId, reviewVersion: cf.confirmation.reviewVersion, sessionVersion: cf.confirmation.sessionVersion, status: cf.confirmation.status });
     const g = await this.gateway.execute(req, { turnId: ctx.turnId, emit: (t, d) => this.emit(sessionId, ctx, t, d) });
     out.execution = g.log;
-    if (!g.ok) return this.handleGatewayRejection(sessionId, ctx, g, out);
+    if (!g.ok) {
+      if (this.confirmations.setStatus(S(), 'INVALIDATED', `GATEWAY_REJECTED:${g.code}`, this.clock())) {
+        this.emit(sessionId, ctx, 'BOOKING_CONFIRMATION_INVALIDATED', { reviewVersion: cur, status: 'INVALIDATED', reason: g.code });
+      }
+      return this.handleGatewayRejection(sessionId, ctx, g, out);
+    }
+    // 4b) BookingHandoffSession: snapshot + validator + capability (disabled). NOTHING is executed here.
+    const hsr = this.handoffSessions.create(S(), { requestId: ctx.requestId || ctx.turnId, emit: (t, d) => this.emit(sessionId, ctx, t, d) });
+    if (!hsr.ok) {
+      this.invalidateHandoff(sessionId, ctx, 'INVALIDATED', `HANDOFF_SESSION_REJECTED:${hsr.code}`);
+      const rv2 = S().review;
+      if (rv2?.valid) { rv2.valid = false; rv2.invalidatedReason = `HANDOFF_SESSION_REJECTED:${hsr.code}`; this.emit(sessionId, ctx, 'REVIEW_INVALIDATED', { reviewVersion: rv2.reviewVersion, changed: ['handoff-session'] }); }
+      S().confirmedReviewVersion = undefined;
+      this.state.tryTransition(sessionId, BookingState.COLLECTING_PASSENGER_DETAILS);
+      const regen = hsr.code === 'SENSITIVE_DATA_REJECTED' || hsr.code.startsWith('EXECUTOR_') ? hsr.code : 'HANDOFF_SESSION_REJECTED';
+      out.error = { code: regen as any, message: 'Booking handoff session verify nahi ho paaya — handoff nahi banaya. Updated review dekh kar dobara confirm karein.', details: { handoffCode: hsr.code } };
+      out.notes.push(out.error.message);
+      return out;
+    }
     this.emit(sessionId, ctx, 'IRCTC_HANDOFF_READY', { reviewVersion: cur, handoffId: g.handoff.snapshot.handoffId, executionStatus: g.execution.status, executionEnabled: false });
     ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, false) });
     out.notes.push(ctx.mode === 'VOICE' ? HANDOFF_READY_MESSAGE : `${HANDOFF_READY_MESSAGE} ${NO_EXECUTION_NOTE}`);
@@ -430,6 +511,8 @@ export class BookingPreparationService {
       executorName: g.execution.executorName, executionStatus: g.execution.status, executionReason: g.execution.reason,
       executionCapability: g.capability.reason, realBookingEnabled: g.capability.realBookingEnabled,
       realBooking: false, executionEnabled: false, duplicate,
+      handoffSessionId: s.handoffSession?.handoffSessionId, handoffSessionStatus: s.handoffSession?.status, handoffSessionExpiresAt: s.handoffSession?.expiresAt,
+      executorCapability: s.handoffSession ? { ...s.handoffSession.executorCapability } : undefined, confirmationStatus: s.confirmation?.status,
       message: duplicate ? `${HANDOFF_DUPLICATE_MESSAGE} ${HANDOFF_READY_MESSAGE}` : `${HANDOFF_READY_MESSAGE} ${NO_EXECUTION_NOTE}`
     };
   }

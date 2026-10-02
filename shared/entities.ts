@@ -1,4 +1,5 @@
 import type { BookingHandoffRecord, BookingLifecycleRecord, ExecutionAttemptRecord, HandoffStatus } from './booking-execution';
+import type { BookingConfirmation, BookingHandoffSession, HandoffSessionStatus } from './booking-handoff-session';
 /**
  * Core domain types. No secrets, credentials, payment, OTP fields EVER.
  */
@@ -204,6 +205,14 @@ export interface BookingSession {
   bookingLifecycle?: BookingLifecycleRecord;
   /** Last execution attempt outcome (DISABLED in this milestone). */
   execution?: ExecutionAttemptRecord;
+
+  // ---- Secure handoff session (Prompt 11) — backend-owned, never credential-bearing ----
+  /** Deterministic confirmation of the current review (VALID / INVALIDATED / EXPIRED). */
+  confirmation?: BookingConfirmation;
+  /** Current short-lived handoff session (READY / EXPIRED / INVALIDATED / FAILED). */
+  handoffSession?: BookingHandoffSession;
+  /** Status history of handoff sessions (snapshots never mutated). */
+  handoffSessionHistory?: Array<{ handoffSessionId: string; bookingHandoffId: string; status: HandoffSessionStatus; statusReason?: string; at: string }>;
 }
 
 /** Provenance attached to every provider result synced into the session. */
@@ -310,7 +319,12 @@ export type BookingEventType =
   | 'BOOKING_EXECUTION_DISABLED'
   | 'BOOKING_EXECUTION_REJECTED'
   | 'BOOKING_EXECUTION_DUPLICATE'
-  | 'BOOKING_LIFECYCLE_UPDATED';
+  | 'BOOKING_LIFECYCLE_UPDATED'
+  // ---- Prompt 11: secure handoff session ----
+  | 'BOOKING_CONFIRMATION_CREATED'
+  | 'BOOKING_CONFIRMATION_INVALIDATED'
+  | 'BOOKING_HANDOFF_SESSION_CREATED'
+  | 'BOOKING_HANDOFF_EXECUTION_REQUESTED';
 
 export interface BookingEvent {
   type: BookingEventType;
