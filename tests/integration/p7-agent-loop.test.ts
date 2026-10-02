@@ -5,7 +5,7 @@
  *   - Multi-slot input → SEARCH_TRAINS → trains card
  *   - Multi-step tool chain: SELECT_TRAIN → SELECT_CLASS → ASK availability+fare
  *     triggers CHECK_AVAILABILITY then GET_FARE fresh calls
- *   - TRACK_TRAIN/PNR requests return TOOL_UNAVAILABLE (no fake data)
+ *   - TRACK_TRAIN/PNR requests: read-only lookups; the mock provider honestly reports unavailable (no fake data)
  *   - Correction invalidates dependent results and re-searches with FRESH data
  *   - Confirmation is gated (no booking without AWAITING_CONFIRMATION)
  *   - Bounded loop (no infinite recursion)

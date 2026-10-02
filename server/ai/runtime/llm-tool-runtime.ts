@@ -32,6 +32,9 @@ import type { TurnToolResultView } from '../providers/llm-provider';
 import type { LLMContext } from '../context/context-builder';
 import type { ApplyOutcome } from '../context/turn-applier';
 import { v4 as uuidv4 } from '../orchestrator/utils';
+import type { ToolGrounding } from '../../booking/post-booking/post-booking-service';
+import { PnrStatusService, LiveTrainStatusService } from '../../booking/post-booking/pnr-status-service';
+import { maskPnr } from '../../booking/post-booking/pnr-validator';
 
 export const MAX_TOOL_CALL_ITERATIONS = 8; // deterministic hard cap (configurable via constructor)
 
@@ -74,6 +77,10 @@ export interface RuntimeHooks {
   buildContext?: () => LLMContext;
   emit?: (type: BookingEventType, data?: Record<string, any>) => void;
   requestId?: string;
+  /** Prompt 14: grounding for CHECK_PNR / TRACK_TRAIN (user's words + this session's booking records). */
+  grounding?: (userText: string) => ToolGrounding;
+  /** Prompt 14: audit callback for the read-only live tools (no session / booking mutation). */
+  onLiveTool?: (phase: 'REQUESTED' | 'RESULT', name: string, args: Record<string, any>, result?: { success: boolean; error?: { code: string } }) => void;
 }
 
 export interface ToolRuntimeResult {
@@ -138,6 +145,12 @@ export class LLMToolCallingRuntime {
 
 export class BoundToolRuntime {
   private searchOrch: RailwaySearchOrchestrator;
+  private readonly pnr: PnrStatusService;
+  private readonly live: LiveTrainStatusService;
+  /** The user's own words this turn (grounding for PNR / train values). */
+  private userText = '';
+  /** Prompt 14: tools permitted by the latest applied decision (undefined = no restriction). */
+  private allowedTools?: readonly string[];
   constructor(
     private readonly llm: LLMProvider,
     private readonly tools: RailwayToolService,
@@ -151,6 +164,8 @@ export class BoundToolRuntime {
     // Reuse the same class but bound to this turn's getter/committer so
     // RailwaySearchOrchestrator.invalidateDependentResults() & commits work.
     this.searchOrch = new RailwaySearchOrchestrator(getSession, commitSession);
+    this.pnr = new PnrStatusService(tools);
+    this.live = new LiveTrainStatusService(tools);
   }
 
   async run(userText: string, mode: 'TEXT'|'VOICE', history: HistoryMsg[]): Promise<ToolRuntimeResult> {
@@ -163,6 +178,7 @@ export class BoundToolRuntime {
     let lastError: OrchestratorError | undefined;
     let llmLatencyMs = 0;
     const H = this.hooks;
+    this.userText = userText;
     const done = (finalMessage: string, stopReason: ToolRuntimeResult['stopReason'], error?: OrchestratorError): ToolRuntimeResult => ({
       finalMessage, finalDecision: lastDecision || dummyDecision(), steps, stopReason, error,
       latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs
@@ -192,8 +208,10 @@ export class BoundToolRuntime {
       if (H.applyDecision) {
         const outcome = H.applyDecision(decision);
         applyOutcomes.push(outcome);
+        this.allowedTools = outcome.allowedTools;
         if (outcome.blockTools) {
-          return done(outcome.error?.message || decision.finalMessage || decision.clarification || '', 'blocked', outcome.error);
+          // a deterministic backend answer (post-booking record) is never mixed with LLM wording
+          return done(outcome.error?.message || (outcome.directAnswer ? '' : (decision.finalMessage || decision.clarification || '')), 'blocked', outcome.error);
         }
       }
 
@@ -236,8 +254,11 @@ export class BoundToolRuntime {
     : Promise<{ stale: boolean; error?: OrchestratorError }> {
     const H = this.hooks;
     const sess0 = this.getSession();
-    const val = this.validator.validate(tc, sess0);
     const ts = Date.now();
+    const notAllowed = !!this.allowedTools && !this.allowedTools.includes(String(tc?.name));
+    const val = notAllowed
+      ? { ok: false as const, error: { code: 'INVALID_ACTION_FOR_STATE' as const, message: 'Is step par sirf read-only railway jaankari (PNR / live status / timetable) available hai.' } }
+      : this.validator.validate(tc, sess0, H.grounding?.(this.userText));
     if (!val.ok) {
       const errRes: NormalizedToolResult = {
         toolName: tc.name, callId: tc.callId, success: false,
@@ -252,6 +273,7 @@ export class BoundToolRuntime {
     }
     const vt = val.v;
     if (vt.name === 'SEARCH_TRAINS') H.emit?.('SEARCH_STARTED', { origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date });
+    if (vt.name === 'TRACK_TRAIN' || vt.name === 'CHECK_PNR') H.onLiveTool?.('REQUESTED', vt.name, vt.arguments);
     // Provenance captured at call time (sessionId / requestId / sessionVersion).
     const versionAtCall = this.getSession().sessionVersion;
     const execRes = await this.executeTool(vt);
@@ -305,9 +327,11 @@ export class BoundToolRuntime {
           // authoritative journey from BookingSession (never an LLM argument)
           origin: this.getSession().origin, destination: this.getSession().destination
         } as any);
+      // Prompt 14: always FRESH (no cache), bounded by a timeout, provider output validated
       case 'TRACK_TRAIN':
+        return this.live.track(vt.arguments.trainNumber);
       case 'CHECK_PNR':
-        return { ok: false, error: { code: 'TOOL_UNAVAILABLE', message: `"${vt.name}" अभी उपलब्ध नहीं है।` } };
+        return this.pnr.check(vt.arguments.pnr);
       default:
         return { ok: false, error: { code: 'UNKNOWN_TOOL', message: `"${vt.name}" अज्ञात tool है।` } };
     }
@@ -350,6 +374,8 @@ export class BoundToolRuntime {
    * raw provider fields) — only facts + success/error.
    */
   private serializeForLLM(r: NormalizedToolResult): any {
+    // Prompt 14: the full PNR never goes back into LLM context
+    if (r.success && r.toolName === 'CHECK_PNR') return { ok: true, data: { ...r.data, pnr: maskPnr(r.data?.pnr) }, toolName: r.toolName };
     if (r.success) return { ok: true, data: r.data, toolName: r.toolName };
     return { ok: false, error: r.error, toolName: r.toolName };
   }
@@ -361,6 +387,8 @@ export class BoundToolRuntime {
    */
   private syncToSession(vt: ValidatedToolCall, r: NormalizedToolResult): void {
     const H = this.hooks;
+    // Prompt 14: live lookups never mutate BookingSession / BookingRecord facts — audit only
+    if (vt.name === 'CHECK_PNR' || vt.name === 'TRACK_TRAIN') { H.onLiveTool?.('RESULT', vt.name, vt.arguments, { success: r.success, error: r.error }); return; }
     if (!r.success) {
       // A failed search must not leave the session stuck in SEARCHING_TRAINS.
       if (vt.name === 'SEARCH_TRAINS' && this.getSession().bookingState === BookingState.SEARCHING_TRAINS) {

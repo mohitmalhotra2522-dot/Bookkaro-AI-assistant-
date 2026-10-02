@@ -45,13 +45,43 @@ export function factFromTool(toolName: string, data: any, mode: 'TEXT' | 'VOICE'
       if (mode === 'VOICE') return `Timetable mein ${stops.length} stops hain — ${stops[0].station} se ${stops[stops.length - 1].station} tak.`;
       return `Timetable: ${stops.map(x => `${x.station} ${x.departure || x.arrival}`).join(' → ')}.`;
     }
+    // ---- Prompt 14: fresh read-only lookups (masked PNR; mock data always labelled non-live) ----
+    case 'CHECK_PNR': {
+      const src = data.dataSource === 'MOCK' ? 'mock / non-live development data' : 'railway provider, abhi fetch kiya';
+      const head = `PNR ${data.pnrMasked} ka current status (${src}): ${data.pnrStatus}${data.chartStatus ? `, chart: ${data.chartStatus}` : ''}.`;
+      const pax: any[] = Array.isArray(data.passengers) ? data.passengers : [];
+      if (!pax.length) return head;
+      const rows = (mode === 'VOICE' ? pax.slice(0, 2) : pax).map(p => `Passenger ${p.number}: ${p.currentStatus}${mode === 'TEXT' ? ` (booking ke waqt ${p.bookingStatus})` : ''}`);
+      return `${head} ${rows.join(', ')}.`;
+    }
+    case 'TRACK_TRAIN': {
+      const src = data.dataSource === 'MOCK' ? 'mock / non-live development data' : 'railway provider, abhi fetch kiya';
+      const where = data.currentStationName || data.currentStationCode;
+      return `${data.trainNumber}${data.trainName && mode === 'TEXT' ? ' ' + data.trainName : ''} live status (${src}): ${data.currentStatus}${where ? ` — last reported: ${where}` : ''}${typeof data.delayMinutes === 'number' ? `, ${data.delayMinutes} min late` : ''}.`;
+    }
   }
   return '';
 }
 
+export const LIVE_TOOLS: ReadonlySet<string> = new Set(['CHECK_PNR', 'TRACK_TRAIN']);
+
+/**
+ * Prompt 14: deterministic message for a turn that ran CHECK_PNR / TRACK_TRAIN — successful
+ * results phrased strictly from provider data; rejected / failed calls use the validated error
+ * message (INVALID_PNR, PNR_NOT_AVAILABLE, PNR_STATUS_UNAVAILABLE …). Never LLM wording.
+ */
+export function liveToolMessage(steps: Array<{ status: string; result: { toolName: string; data?: any; error?: { code: string; message: string } } }>, mode: 'TEXT' | 'VOICE'): string {
+  const out: string[] = [];
+  for (const st of steps) {
+    if (st.status === 'ok') { const f = factFromTool(st.result.toolName, st.result.data, mode); if (f) out.push(f); }
+    else if (st.result.error?.message && !out.includes(st.result.error.message)) out.push(st.result.error.message);
+  }
+  return out.join(' ');
+}
+
 export const TOOL_LABEL: Record<string, string> = {
   SEARCH_TRAINS: 'Train search', CHECK_AVAILABILITY: 'Availability', GET_FARE: 'Fare',
-  GET_TRAIN_INFO: 'Train info', GET_TIMETABLE: 'Timetable'
+  GET_TRAIN_INFO: 'Train info', GET_TIMETABLE: 'Timetable', CHECK_PNR: 'PNR status', TRACK_TRAIN: 'Live train status'
 };
 
 // ---------- deterministic comparisons over authoritative results ----------

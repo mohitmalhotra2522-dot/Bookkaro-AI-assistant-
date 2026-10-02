@@ -7,6 +7,7 @@ import { v4 as uuid } from '../orchestrator/utils';
 import { isPureAffirmation, isPureNegation } from '../context/pending-interaction';
 import { canonicalClassToken, AC_CLASSES } from '../context/class-reference-resolver';
 import { factFromTool, TOOL_LABEL } from '../context/response-formatter';
+import { extractPnrCandidate } from '../../booking/post-booking/pnr-validator';
 
 /**
  * Deterministic MockLLMProvider (Prompt 8) — behaves like a tool-calling LLM:
@@ -108,13 +109,46 @@ export class MockLLMProvider implements LLMProvider {
 
     if (SENSITIVE_RE.test(t)) return this.final('UNKNOWN', 'Main kabhi password, OTP, CAPTCHA, card ya UPI PIN nahi maangta. Kripya aisi jaankari share na karein.');
     if (NON_RAILWAY_RE.test(t) && !/\b(train|railway|ticket|fare|kiraya)\b/.test(t)) return this.final('UNKNOWN', 'Main railway booking aur train jaankari mein hi madad kar sakta hoon.');
-    if (/\bpnr\b/.test(t)) return this.final('GENERAL_RAILWAY_QUERY', 'PNR status check abhi available nahi hai.');
-    if (/\b(track|live status|live location|kahan pahunchi|running status)\b/.test(t)) return this.final('GENERAL_RAILWAY_QUERY', 'Live train tracking abhi available nahi hai.');
+    // Prompt 14: post-booking lookups — the LLM only PROPOSES read-only tool calls; the backend
+    // grounds the PNR / train number (user's words or the booking record) and answers deterministically.
+    const pb = this.postBookingDecision(raw, t, input, turn);
+    if (pb) return pb;
 
     const u = this.understand(raw, t, s, input);
 
     if (turn.length) return this.afterTools(turn, u, s, input.inputMode);
     return this.plan(u, s, input);
+  }
+
+  private postBookingDecision(raw: string, t: string, input: LLMTurnInput, turn: TurnToolResultView[]): AgentDecision | null {
+    const live = (r: TurnToolResultView) => r.toolName === 'CHECK_PNR' || r.toolName === 'TRACK_TRAIN';
+    if (turn.length) {
+      if (!turn.every(live)) return null;
+      const facts = turn.filter(r => r.ok).map(r => factFromTool(r.toolName, r.data, input.inputMode)).filter(Boolean);
+      const errs = turn.filter(r => !r.ok).map(r => r.error?.message || 'Jaankari abhi verify nahi ho paayi.');
+      return this.final('GENERAL_RAILWAY_QUERY', [...facts, ...errs].join(' '));
+    }
+    const ctxPb: any = (input.context as any)?.postBooking;
+    const isPnr = /\bpnr\b/.test(t);
+    const isLive = /\b(track|tracking|live status|live location|running status|kahan pahunchi|kaha pahunchi|kitni late)\b|\babhi (kaha|kahan|kidhar)\b/.test(t) && /\b(train|gaadi|gadi|track|live|running|\d{5})\b/.test(t);
+    if (isPnr) {
+      const cand = extractPnrCandidate(raw);
+      if (cand) return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [this.call('CHECK_PNR', { pnr: cand })]);
+      if (/\b(status|check|chart|current|confirm hua|waiting)\b/.test(t)) return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [this.call('CHECK_PNR', {})]);
+      return this.final('GENERAL_RAILWAY_QUERY', '');                        // PNR value → backend booking record answers
+    }
+    if (isLive) {
+      const n = t.match(/(?<!\d)(\d{4,5})(?!\d)/);
+      return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [this.call('TRACK_TRAIN', n ? { trainNumber: n[1] } : {})]);
+    }
+    // follow-up to a booking clarification ("12014 wali") → same lookup for the chosen booking
+    const pend = ctxPb?.pendingClarification;
+    if (pend && Array.isArray(pend.candidates) && pend.candidates.some((c: any) => t.includes(String(c.trainNumber)))) {
+      if (pend.kind === 'PNR_STATUS') return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [this.call('CHECK_PNR', {})]);
+      if (pend.kind === 'LIVE_STATUS') return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [this.call('TRACK_TRAIN', {})]);
+      return this.final('GENERAL_RAILWAY_QUERY', '');
+    }
+    return null;
   }
 
   /** Compatibility: derive current-turn tool results from history if not supplied. */

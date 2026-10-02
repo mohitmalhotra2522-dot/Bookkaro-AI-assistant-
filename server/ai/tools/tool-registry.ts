@@ -50,9 +50,11 @@ export interface ToolResult {
 
 /**
  * ToolRegistry — deterministic, closed set of registered tools.
- * Only tools registered here are visible to the LLM. If a provider
- * implementation hasn't been added yet (e.g. live PNR), we simply do
- * NOT register the tool. Never expose a fake/placeholder tool.
+ * Only tools registered here are visible to the LLM. Never expose a
+ * fake/placeholder tool. Prompt 14 registers the READ-ONLY TRACK_TRAIN and
+ * CHECK_PNR lookups: they always call the active RailwayProvider fresh and
+ * report its normalized answer — or an honest *_UNAVAILABLE error when the
+ * provider has no data (the Phase-1 mock has no PNR / live data).
  */
 export const REGISTERED_TOOLS: ToolDefinition[] = [
   {
@@ -101,11 +103,25 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
       date: { type: 'string', description: 'YYYY-MM-DD' }
     },
     requiresState: ['selectedTrain','selectedClass']
+  },
+  // ---- Prompt 14: read-only post-booking lookups (fresh provider call every time) ----
+  {
+    name: 'TRACK_TRAIN',
+    description: 'Fresh LIVE running status of a train (read-only, always a new provider call). trainNumber must come from the user, the current results or the backend booking record; if omitted the backend uses the booking / train in focus. Never guess a train number. Live train status is separate from booking status and PNR status.',
+    parameters: {
+      trainNumber: { type: 'string', description: 'Train number e.g. 12014 (optional: defaults to the booking / train in focus)' }
+    }
+  },
+  {
+    name: 'CHECK_PNR',
+    description: 'Fresh PNR status from the railway provider (read-only, always a new provider call). Pass EITHER pnr (only a PNR the user typed) OR bookingId (from AUTHORITATIVE_BACKEND_CONTEXT); if omitted the backend uses the booking in focus. Never invent, guess or complete a PNR. PNR status is separate from booking status.',
+    parameters: {
+      pnr: { type: 'string', description: '10-digit PNR exactly as typed by the user (optional)' },
+      bookingId: { type: 'string', description: 'bookingId from AUTHORITATIVE_BACKEND_CONTEXT (optional)' }
+    }
   }
-  // NOTE: TRACK_TRAIN and CHECK_PNR are NOT registered until their provider
-  // implementations return real data (mock provider currently returns error).
-  // Registering them now would expose stubs/fake tools to the LLM, which
-  // violates the "NO fake implementations" rule.
+  // NOTE: booking execution / history mutation are NEVER tools. GET_CANCELLED_TRAINS and
+  // GENERAL_RAILWAY_ANSWER stay unexposed (no authoritative provider implementation).
 ];
 
 export function getToolDefinition(name: RegisteredToolName): ToolDefinition | undefined {

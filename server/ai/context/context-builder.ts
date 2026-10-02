@@ -15,6 +15,7 @@
  */
 import type { BookingSession } from '@shared/entities';
 import { currentResults } from './train-reference-resolver';
+import type { PostBookingContextView } from '../../booking/post-booking/post-booking-service';
 
 export interface HistoryMsg { role: 'user' | 'assistant' | 'tool'; content: string; toolCallId?: string; toolName?: string }
 
@@ -41,12 +42,17 @@ export interface LLMContext {
    * failure category / authoritative PNR). The LLM cannot change it and has no tool to
    * execute bookings. Never contains provider config, URLs, credentials or raw responses.
    */
-  bookingExecution?: { providerName: string; status: string; code: string; failureCode?: string; providerReference?: string; pnr?: string; retryBlocked: boolean };
+  bookingExecution?: { providerName: string; status: string; code: string; failureCode?: string; providerReference?: string; pnrAvailable?: boolean; retryBlocked: boolean };
+  /**
+   * Prompt 14 — AUTHORITATIVE_BACKEND_CONTEXT: backend-owned booking history summary (read-only).
+   * Contains NO PNR values (only pnrAvailable), no credentials, no raw provider data.
+   */
+  postBooking?: PostBookingContextView;
 }
 
 export const MAX_RECENT_MESSAGES = 12;
 
-export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRecent = MAX_RECENT_MESSAGES): LLMContext {
+export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRecent = MAX_RECENT_MESSAGES, postBooking?: PostBookingContextView): LLMContext {
   const t: any = s.selectedTrain;
   const recent = history.filter(h => h.role !== 'tool').slice(-maxRecent);
   const compressed = history.filter(h => h.role !== 'tool').length > maxRecent;
@@ -80,9 +86,11 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
       providerName: s.bookingExecution.providerName, status: s.bookingExecution.status, code: s.bookingExecution.code,
       ...(s.bookingExecution.failureCode ? { failureCode: s.bookingExecution.failureCode } : {}),
       ...(s.bookingExecution.providerReference ? { providerReference: s.bookingExecution.providerReference } : {}),
-      ...(s.bookingExecution.status === 'CONFIRMED' && s.bookingExecution.pnr ? { pnr: s.bookingExecution.pnr } : {}),
+      // Prompt 14: the PNR value never enters LLM context — only whether one exists
+      ...(s.bookingExecution.status === 'CONFIRMED' ? { pnrAvailable: !!s.bookingExecution.pnr } : {}),
       retryBlocked: s.bookingExecution.retryBlocked
-    }) } : {})
+    }) } : {}),
+    ...(postBooking ? { postBooking } : {})
   };
 }
 

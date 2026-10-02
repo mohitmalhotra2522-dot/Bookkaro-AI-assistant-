@@ -100,11 +100,9 @@ describe('Group 2a: AgentDecision schema + MockLLMProvider slot extraction', () 
     expect(isAsk).toBe(true);
   });
 
-  it('tool registry has exactly the 5 tools (TRACK/PNR NOT registered)', () => {
+  it('tool registry has exactly the 7 tools (P14: TRACK/PNR read-only lookups registered)', () => {
     const names = REGISTERED_TOOLS.map(t => t.name).sort();
-    expect(names).toEqual(['CHECK_AVAILABILITY','GET_FARE','GET_TIMETABLE','GET_TRAIN_INFO','SEARCH_TRAINS']);
-    expect(getToolDefinition('TRACK_TRAIN')).toBeUndefined();
-    expect(getToolDefinition('CHECK_PNR')).toBeUndefined();
+    expect(names).toEqual(['CHECK_AVAILABILITY','CHECK_PNR','GET_FARE','GET_TIMETABLE','GET_TRAIN_INFO','SEARCH_TRAINS','TRACK_TRAIN']);
   });
 
   it('finalMessage present on non-tool responses; not present when toolCalls pending', async () => {

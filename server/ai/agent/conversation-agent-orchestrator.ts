@@ -33,7 +33,10 @@ import { ContextualTurnApplier, type ApplyCtx, type ApplyOutcome } from '../cont
 import { RequestGuard } from '../context/request-guard';
 import { buildLLMContext, type HistoryMsg } from '../context/context-builder';
 import { derivePendingInteraction, questionFor } from '../context/pending-interaction';
-import { searchSummary, factFromTool } from '../context/response-formatter';
+import { searchSummary, factFromTool, liveToolMessage, LIVE_TOOLS } from '../context/response-formatter';
+import { PostBookingService } from '../../booking/post-booking/post-booking-service';
+import type { BookingHistoryStore } from '../../booking/post-booking/booking-history-store';
+import { maskPnrsInText, maskPnrDeep } from '../../booking/post-booking/pnr-validator';
 import { currentResults } from '../context/train-reference-resolver';
 import { BookingPreparationService, type PrepOutcome } from '../../booking/booking-preparation-service';
 import type { PreparationPolicy } from '../../booking/booking-readiness';
@@ -74,6 +77,8 @@ export interface OrchestratorOptions {
   adapterRegistry?: BookingExecutorAdapterRegistry;
   /** Prompt 11: handoff session service override (tests). */
   handoffSessionService?: BookingHandoffSessionService;
+  /** Prompt 14: post-booking history store (default: in-memory, session-scoped). */
+  bookingHistoryStore?: BookingHistoryStore;
 }
 
 export interface AgentTurnResult {
@@ -105,6 +110,8 @@ export class ConversationAgentOrchestrator {
   readonly preparation: BookingPreparationService;
   /** BookingExecutionGateway — reachable only from the backend confirmation path (never from the LLM). */
   readonly gateway: BookingExecutionGateway;
+  /** Prompt 14: post-booking read model + controlled history queries (backend only — never an LLM tool). */
+  readonly postBooking: PostBookingService;
 
   constructor(
     private readonly llm: LLMProvider,
@@ -113,8 +120,11 @@ export class ConversationAgentOrchestrator {
     options: OrchestratorOptions = {}
   ) {
     this.runtime = new LLMToolCallingRuntime(llm, tools);
-    this.applier = new ContextualTurnApplier(state);
     this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock, providerRegistry: options.bookingProviderRegistry, providerConfig: options.bookingProviderConfig, reconciliation: options.bookingReconciliation?.config, sleep: options.bookingReconciliation?.sleep });
+    // Prompt 14: BookingRecords are derived ONLY from the P13 lifecycle (single writer of execution status)
+    this.postBooking = new PostBookingService(state, { store: options.bookingHistoryStore, clock: options.clock });
+    this.postBooking.attach(this.gateway.bookingProviders.lifecycle);
+    this.applier = new ContextualTurnApplier(state, this.postBooking);
     this.preparation = new BookingPreparationService(state, {
       policy: options.preparationPolicy, clock: options.clock, gateway: this.gateway,
       handoffSessions: options.handoffSessionService || new BookingHandoffSessionService({ registry: options.adapterRegistry, config: this.gateway.config, clock: options.clock })
@@ -163,7 +173,7 @@ export class ConversationAgentOrchestrator {
     // ---- Handoff integrity (expiry / critical change) — before anything else this turn ----
     const preChanges: string[] = [];
     const handoffSync = this.preparation.syncHandoff(sessionId, { turnId, mode, cards, events, changes: preChanges, requestId });
-    this.pushHistory(sessionId, { role: 'user', content: redact(safeInput) });
+    this.pushHistory(sessionId, { role: 'user', content: maskPnrsInText(redact(safeInput)) });
 
     // ---- Safety pre-filter (no LLM call) ----
     if (sensitiveInput) {
@@ -185,8 +195,13 @@ export class ConversationAgentOrchestrator {
     const bound = this.runtime.bind(guard.getSession, guard.commit, {
       requestId,
       isStale: () => guard.isStale(),
-      buildContext: () => buildLLMContext(this.state.getSession(sessionId), this.getHistory(sessionId)),
+      buildContext: () => buildLLMContext(this.state.getSession(sessionId), this.getHistory(sessionId), undefined, this.postBooking.contextFor(sessionId)),
       emit: (type, data) => { if (!guard.isStale()) { this.state.emit(sessionId, type, turnId, data); events.push(type); } },
+      grounding: (text: string) => this.postBooking.grounding(sessionId, text),
+      onLiveTool: (phase, name, args, result) => {
+        if (guard.isStale()) return;
+        this.postBooking.onLiveTool(sessionId, phase, name, args, result, (type, data) => { this.state.emit(sessionId, type, turnId, data); events.push(type); });
+      },
       applyDecision: (d: AgentDecision): ApplyOutcome => {
         if (guard.isStale()) return { notes: [], blockTools: true, applied: [], error: { code: 'STALE_TOOL_RESULT', message: '' } };
         const o = this.applier.apply(sessionId, d, ctx);
@@ -220,7 +235,11 @@ export class ConversationAgentOrchestrator {
     let dupExecution: ExecutionLogRecord | undefined;
     const postNotes: string[] = [];
     progress.push(...handoffSync.notes);
-    if (!blockErr) {
+    // Prompt 14: a post-booking answer / read-only lookup never progresses the booking flow
+    const postBookingTurn = rt.applyOutcomes.some(o => o.postBooking);
+    if (postBookingTurn && !blockErr) {
+      this.preparation.evaluate(sessionId);
+    } else if (!blockErr) {
       const searchOk = rt.steps.some(st => st.result.toolName === 'SEARCH_TRAINS' && st.status === 'ok');
       if (searchOk) progress.push(...this.applier.applyCarryOver(sessionId, ctx));
       else this.state.getSession(sessionId).carryOverSelection = undefined;
@@ -302,13 +321,18 @@ export class ConversationAgentOrchestrator {
     const nonSearch = rt.steps.filter(st => st.result.toolName !== 'SEARCH_TRAINS');
     const searchFailed = rt.steps.some(st => st.result.toolName === 'SEARCH_TRAINS' && st.status !== 'ok');
     const llmFinalUseful = !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
-    if (llmFinalUseful) parts.push(factGuard(rt.finalMessage, rt.steps, mode));
+    // Prompt 14: PNR / live status answers are ALWAYS deterministic phrasing of the provider result
+    // (or its validated error) — LLM wording can never add or upgrade a status.
+    if (nonSearch.some(st => LIVE_TOOLS.has(st.result.toolName))) parts.push(liveToolMessage(nonSearch, mode));
+    else if (llmFinalUseful) parts.push(factGuard(rt.finalMessage, rt.steps, mode));
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
       if (st.result.toolName === 'CHECK_AVAILABILITY') cards.push({ type: 'availability', data: st.result.data });
       if (st.result.toolName === 'GET_FARE') cards.push({ type: 'fare', data: st.result.data });
       if (st.result.toolName === 'GET_TRAIN_INFO') cards.push({ type: 'train_info', data: st.result.data });
       if (st.result.toolName === 'GET_TIMETABLE') cards.push({ type: 'timetable', data: st.result.data });
+      if (st.result.toolName === 'CHECK_PNR') cards.push({ type: 'pnr_status', data: { ...st.result.data, pnr: undefined } });
+      if (st.result.toolName === 'TRACK_TRAIN') cards.push({ type: 'live_status', data: st.result.data });
     }
     parts.push(...progress);
     if (rt.stopReason === 'tool_limit' && rt.error) parts.push(rt.error.message);
@@ -328,13 +352,14 @@ export class ConversationAgentOrchestrator {
     execution?: ExecutionLogRecord;
   }): AgentTurnResult {
     const s = this.state.getSession(a.sessionId);
-    if (!a.stale && a.message) this.pushHistory(a.sessionId, { role: 'assistant', content: a.message });
+    if (!a.stale && a.message) this.pushHistory(a.sessionId, { role: 'assistant', content: maskPnrsInText(a.message) });
     const steps: ToolCallStep[] = [...(a.rt?.steps || []), ...(a.prepSteps || [])];
     // Observability privacy: passenger names are masked in the turn record.
-    const pii = (t: string) => containsSensitiveRequest(t) ? '[REDACTED SENSITIVE INPUT]' : redactPassengerNames(redact(t), s, this.turnStartNames.get(a.sessionId) || []);
+    // Prompt 14: PNRs are masked in every log line (12******90)
+    const pii = (t: string) => containsSensitiveRequest(t) ? '[REDACTED SENSITIVE INPUT]' : maskPnrsInText(redactPassengerNames(redact(t), s, this.turnStartNames.get(a.sessionId) || []));
     const toolResults: TurnToolRecord[] = steps.map(st => ({
       toolCallId: st.toolCall.callId, toolName: st.toolCall.name,
-      validatedArguments: st.validatedArguments ? redact(st.validatedArguments) : undefined,
+      validatedArguments: st.validatedArguments ? maskPnrDeep(redact(st.validatedArguments)) : undefined,
       resultStatus: st.status, errorCode: st.result.error?.code, provider: st.result.provider, latencyMs: st.result.latencyMs
     }));
     const turnLog: TurnRecord = {
@@ -343,7 +368,7 @@ export class ConversationAgentOrchestrator {
       userInput: pii(a.userText), normalizedInput: pii(a.normalizedInput), inputMode: a.mode,
       intent: a.decision?.intent, action: a.decision?.action, confidence: a.decision?.confidence,
       detectedChanges: a.changes,
-      toolCalls: steps.map(st => ({ name: st.toolCall.name, arguments: redact(st.toolCall.arguments) })),
+      toolCalls: steps.map(st => ({ name: st.toolCall.name, arguments: maskPnrDeep(redact(st.toolCall.arguments)) })),
       toolExecuted: steps.map(st => ({ name: st.result.toolName, ok: st.result.success, latencyMs: st.result.latencyMs, provider: st.result.provider })),
       toolResults,
       toolResultStatus: steps.length === 0 ? 'none' : steps.every(st => st.result.success) ? 'ok' : 'error',

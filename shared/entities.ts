@@ -220,6 +220,14 @@ export interface BookingSession {
   bookingExecution?: BookingExecutionRecord;
   /** Earlier execution records (one per handoff). */
   bookingExecutionHistory?: BookingExecutionRecord[];
+
+  // ---- Post-booking (Prompt 14) — ids only; records live in the backend BookingHistoryStore ----
+  /** BookingRecord ids owned by this session (session-scoped ownership). */
+  bookingRecordIds?: string[];
+  /** The booking the conversation is currently about (latest record / last resolved reference). */
+  activeBookingId?: string;
+  /** Open booking-reference clarification ("12014 wali ya 14542 wali?"). */
+  postBookingClarification?: { kind: 'PNR_STATUS' | 'LIVE_STATUS' | 'PNR_VALUE' | 'BOOKING_STATUS' | 'BOOKING_DETAILS' | 'HISTORY'; candidateIds: string[]; setAtTurnId: string };
 }
 
 /** Provenance attached to every provider result synced into the session. */
@@ -351,7 +359,14 @@ export type BookingEventType =
   | 'BOOKING_EXECUTION_UNKNOWN'
   | 'BOOKING_MANUAL_VERIFICATION_REQUIRED'
   | 'BOOKING_RETRY_AFTER_FAILURE'
-  | 'BOOKING_CANCEL_NOT_SUPPORTED';
+  | 'BOOKING_CANCEL_NOT_SUPPORTED'
+  // ---- Prompt 14: post-booking read model (PNR always masked in event data) ----
+  | 'BOOKING_RECORD_CREATED'
+  | 'BOOKING_STATUS_UPDATED'
+  | 'PNR_ATTACHED'
+  | 'PNR_STATUS_CHECKED'
+  | 'BOOKING_HISTORY_QUERIED'
+  | 'BOOKING_LIVE_STATUS_REQUESTED';
 
 export interface BookingEvent {
   type: BookingEventType;

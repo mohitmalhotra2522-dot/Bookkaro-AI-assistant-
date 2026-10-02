@@ -126,9 +126,26 @@ export interface TrackData {
   trainNumber: string;
   currentStatus?: string;
   lastUpdated?: string;
+  /** Prompt 14 (optional, provider-supplied only): last reported station / delay. */
+  trainName?: string;
+  currentStationCode?: string;
+  currentStationName?: string;
+  delayMinutes?: number;
 }
+
+/** Prompt 14: per-passenger PNR status — provider-supplied only (never derived locally). */
+export interface PNRPassengerStatus { number: number; bookingStatus: string; currentStatus: string }
 
 export interface PNRData {
   pnr: string;
   status?: string;
+  /** Prompt 14 (optional, provider-supplied only). */
+  chartStatus?: string;
+  trainNumber?: string;
+  trainName?: string;
+  journeyDate?: string;
+  from?: string;
+  to?: string;
+  travelClass?: string;
+  passengers?: PNRPassengerStatus[];
 }

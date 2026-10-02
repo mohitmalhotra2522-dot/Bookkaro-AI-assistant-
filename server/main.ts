@@ -174,7 +174,17 @@ server.post('/api/booking/reconcile', async (request, reply) => {
 server.get('/api/session/:id/booking-history', async (request, reply) => {
   const { id } = request.params as any;
   if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
-  return reply.send({ sessionId: id, history: orchestrator.preparation.bookingHistory(id) });
+  // Prompt 14: + normalized BookingDetailsResponse DTOs (masked PNR, no raw provider payloads, no credentials)
+  return reply.send({ sessionId: id, history: orchestrator.preparation.bookingHistory(id), bookings: orchestrator.postBooking.listDetails(id) });
+});
+
+/** Prompt 14: one booking's details — session-scoped ownership (another session's booking → 403). */
+server.get('/api/session/:id/bookings/:bookingId', async (request, reply) => {
+  const { id, bookingId } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ code: 'BOOKING_NOT_FOUND', message: 'Session nahi mila.' });
+  const r = orchestrator.postBooking.getBookingDetails(id, String(bookingId), { revealPnr: true });
+  if (!r.ok) return reply.status(r.code === 'BOOKING_ACCESS_DENIED' ? 403 : r.code === 'BOOKING_HISTORY_UNAVAILABLE' ? 503 : 404).send({ code: r.code, message: r.message });
+  return reply.send({ sessionId: id, booking: r.details });
 });
 
 /** Structured, redacted turn history (observability; no secrets are ever stored). */

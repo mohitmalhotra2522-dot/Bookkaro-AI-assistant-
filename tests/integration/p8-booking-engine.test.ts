@@ -346,7 +346,8 @@ describe('Group 3 — review, tool failure, voice/text, observability', () => {
     const sid = state.createSession().sessionId;
     const r = await say(sid, 'PNR 1234567890 ka status batao');
     expect(r.responseMessage).toMatch(/PNR status check abhi available nahi hai/);
-    expect(tools(r)).toEqual([]);
+    // P14: CHECK_PNR is a read-only lookup — the (mock, non-live) provider honestly reports unavailable; nothing faked
+    expect(tools(r).every((t: string) => t.startsWith('CHECK_PNR:') && !t.endsWith(':ok'))).toBe(true);
     const evil: LLMProvider = { providerId: 'evil', init: async () => {}, generateStructuredDecision: async () => ({ decision: {
       intent: 'BOOK_TRAIN', action: 'NO_ACTION', entities: {}, missingFields: [], clarification: null, confidence: 1,
       toolCalls: [{ callId: 'x', name: 'BOOK_TICKET' as any, arguments: {} }, { callId: 'y', name: 'SUBMIT_PAYMENT' as any, arguments: {} }] } }) };

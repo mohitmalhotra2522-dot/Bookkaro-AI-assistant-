@@ -11,6 +11,7 @@
  *   4. Loop (bounded iterations) until LLM returns a final response.
  */
 import type { ToolCall } from '../tools/tool-registry';
+import type { PostBookingErrorCode } from '@shared/booking-record';
 
 export type AgentIntent =
   | 'GENERAL_RAILWAY_QUERY'
@@ -209,7 +210,12 @@ export type OrchestratorErrorCode =
   | 'EXECUTOR_NOT_FOUND'
   | 'EXECUTOR_UNAVAILABLE'
   | 'SENSITIVE_DATA_REJECTED'
-  | 'BOOKING_DATA_CHANGED';
+  | 'BOOKING_DATA_CHANGED'
+  // ---- Prompt 14: post-booking / PNR ----
+  | PostBookingErrorCode
+  | 'LIVE_STATUS_UNAVAILABLE'
+  | 'LIVE_STATUS_TIMEOUT'
+  | 'LIVE_STATUS_PROVIDER_ERROR';
 
 export interface OrchestratorError {
   code: OrchestratorErrorCode;

@@ -51,8 +51,19 @@ export function sessionStateFor(status: BookingExecutionLifecycleStatus): Bookin
 
 const SAFE_DATA_KEY = /^(attempt|reason|failureCode|providerStatus|latencyMs|idempotencyKeySent|pnrProvided|referenceProvided|providerCalled|source|explicit|maxAttempts)$/;
 
+/** Prompt 14: read-model subscribers (post-booking history). Called AFTER a validated write; never alter the lifecycle. */
+export type LifecycleListener = (s: BookingSession, rec: Readonly<BookingExecutionRecord>, previousStatus: BookingExecutionLifecycleStatus, ctx: LifecycleCtx) => void;
+
 export class BookingExecutionLifecycleManager {
   private readonly logs: BookingLifecycleLogRecord[] = [];
+  private readonly listeners: LifecycleListener[] = [];
+
+  /** Subscribe a read-model listener (e.g. BookingHistory sync). Listener errors never break the lifecycle. */
+  onChange(fn: LifecycleListener): void { this.listeners.push(fn); }
+
+  private notify(s: BookingSession, rec: Readonly<BookingExecutionRecord>, prev: BookingExecutionLifecycleStatus, ctx: LifecycleCtx) {
+    for (const fn of this.listeners) { try { fn(s, rec, prev, ctx); } catch { /* read model only — lifecycle stays authoritative */ } }
+  }
 
   constructor(private readonly state: ConversationStateManager, private readonly clock: () => number = () => Date.now()) {}
 
@@ -101,6 +112,7 @@ export class BookingExecutionLifecycleManager {
     this.syncSession(s, rec);
     this.log(rec, cur.status, to, event, ctx, ch);
     ctx.emit?.(event, this.eventData(rec, cur.status, ch));
+    this.notify(s, rec, cur.status, ctx);
     return { ok: true, record: rec };
   }
 
@@ -110,6 +122,7 @@ export class BookingExecutionLifecycleManager {
     const rec = this.write(s, cur, cur.status, event, ch);
     this.log(rec, cur.status, cur.status, event, ctx, ch);
     ctx.emit?.(event, this.eventData(rec, cur.status, ch));
+    this.notify(s, rec, cur.status, ctx);
     return rec;
   }
 

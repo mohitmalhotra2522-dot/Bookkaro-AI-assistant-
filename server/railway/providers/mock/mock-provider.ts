@@ -328,13 +328,18 @@ export class MockRailwayProvider implements RailwayProvider {
     };
   }
 
-  async trackTrain(req: TrackRequest): Promise<RailwayResponse<TrackData>> {
+  /**
+   * Prompt 14: the Phase-1 mock has NO live running data and NO PNR database. It therefore answers
+   * honestly with an *_UNAVAILABLE error — it never fabricates a live position, delay or PNR status
+   * (a stub "ok" answer would be a fake railway fact). Real providers implement these later.
+   */
+  async trackTrain(_req: TrackRequest): Promise<RailwayResponse<TrackData>> {
     const s = Date.now();
-    return { ok: true, data: { trainNumber: req.trainNumber, currentStatus: 'Track status not implemented in mock' }, meta: meta(s, this.providerId, 'mock') };
+    return errResp('PROVIDER_UNAVAILABLE', 'Live train status mock provider mein uplabdh nahi hai (non-live development data).', s, this.providerId);
   }
 
   async checkPNR(_req: PNRRequest): Promise<RailwayResponse<PNRData>> {
     const s = Date.now();
-    return errResp('PROVIDER_UNAVAILABLE', 'PNR check mock provider mein uplabdh nahi hai.', s, this.providerId);
+    return errResp('PROVIDER_UNAVAILABLE', 'PNR check mock provider mein uplabdh nahi hai (non-live development data).', s, this.providerId);
   }
 }

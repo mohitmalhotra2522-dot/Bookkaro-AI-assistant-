@@ -337,7 +337,7 @@ describe('G3 — freshness at confirmation (fake clock)', () => {
 
 describe('G3 — safety: no credentials / OTP / CAPTCHA / payment / PNR / fake success; voice same pipeline', () => {
   it('[23]–[27] sensitive input, payment / OTP / PNR requests after the handoff → nothing executed, nothing stored, no fake success', async () => {
-    expect(REGISTERED_TOOLS.map((t: any) => t.name).sort()).toEqual(['CHECK_AVAILABILITY', 'GET_FARE', 'GET_TIMETABLE', 'GET_TRAIN_INFO', 'SEARCH_TRAINS']);
+    expect(REGISTERED_TOOLS.map((t: any) => t.name).sort()).toEqual(['CHECK_AVAILABILITY', 'CHECK_PNR', 'GET_FARE', 'GET_TIMETABLE', 'GET_TRAIN_INFO', 'SEARCH_TRAINS', 'TRACK_TRAIN']);   // P14: + 2 read-only lookups; still no booking tool
     const sid = state.createSession().sessionId;
     await toAwaiting(sid);
     const rs: any[] = [];

@@ -43,6 +43,7 @@ import { ClassReferenceResolver } from './class-reference-resolver';
 import { passengerCollection, passengerLabel } from '../../booking/passenger-collection';
 import { derivePendingInteraction, questionFor } from './pending-interaction';
 import { compareArrival, durationMinutes, absoluteArrival, shortName, humanDate } from './response-formatter';
+import type { PostBookingService, PostBookingTurn } from '../../booking/post-booking/post-booking-service';
 
 export interface ApplyCtx {
   turnId: string;
@@ -76,6 +77,10 @@ export interface ApplyOutcome {
   reconcileRequested?: boolean;
   /** Prompt 13: explicit user retry after an authoritative FAILED / CANCELLED execution. */
   retryAfterFailure?: boolean;
+  /** Prompt 14: post-booking turn (answered from BookingRecords / read-only lookups; no booking progression). */
+  postBooking?: boolean;
+  /** Prompt 14: only these tools may run for this decision (read-only post-booking lookups). */
+  allowedTools?: readonly string[];
 }
 
 const ALLOWED_INTENTS = new Set(['GENERAL_RAILWAY_QUERY', 'BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'UNKNOWN']);
@@ -87,7 +92,10 @@ export class ContextualTurnApplier {
   private trainRefs = new TrainReferenceResolver();
   private classRefs = new ClassReferenceResolver();
 
-  constructor(private readonly state: ConversationStateManager) {}
+  /** Per-turn memo so a multi-iteration tool loop classifies / resolves a post-booking query once. */
+  private pbMemo = new Map<string, PostBookingTurn>();
+
+  constructor(private readonly state: ConversationStateManager, private readonly postBooking?: PostBookingService) {}
 
   apply(sessionId: string, d: AgentDecision, ctx: ApplyCtx): ApplyOutcome {
     const out: ApplyOutcome = { notes: [], blockTools: false, applied: [] };
@@ -100,6 +108,32 @@ export class ContextualTurnApplier {
     // 0) Structural validation of untrusted LLM output
     if (!d || typeof d !== 'object' || !ALLOWED_INTENTS.has(d.intent) || !ALLOWED_ACTIONS.has(d.action)) {
       return fail('INVALID_CONTEXT', 'Maaf kijiye, request samajh nahi aayi. Thoda alag tareeke se batayein?');
+    }
+
+    // 0b) Prompt 14 — post-booking questions are classified from the user's OWN words and answered
+    //     from authoritative BookingRecords (or via read-only CHECK_PNR / TRACK_TRAIN) BEFORE any
+    //     entity is applied, so "kal wali booking" can never change the journey date and a PNR
+    //     question can never progress / execute / re-submit a booking.
+    if (this.postBooking && ctx.rawText) {
+      const locked = EXECUTION_LOCKED_STATES.has(S().bookingState);
+      let pb = this.pbMemo.get(ctx.turnId);
+      if (!pb) {
+        pb = this.postBooking.handleTurn(sessionId, ctx.rawText, { locked, mode: ctx.mode, turnId: ctx.turnId, emit, cards: ctx.cards });
+        this.pbMemo.clear();
+        this.pbMemo.set(ctx.turnId, pb);
+      }
+      if (pb.type === 'DIRECT') {
+        out.applied.push('POST_BOOKING_ANSWER');
+        return { ...out, blockTools: true, postBooking: true, directAnswer: pb.answer, ...(pb.softError ? { softError: pb.softError } : {}) };
+      }
+      if (pb.type === 'ERROR') {
+        out.applied.push('POST_BOOKING_CLARIFICATION');
+        return { ...fail(pb.code, pb.message), postBooking: true };
+      }
+      if (pb.type === 'INFO') {
+        out.applied.push('POST_BOOKING_LOOKUP');
+        return { ...out, blockTools: false, postBooking: true, allowedTools: pb.allowedTools };
+      }
     }
 
     // 1) Confirmation guard — "haan/yes/confirm/book it/continue" is booking

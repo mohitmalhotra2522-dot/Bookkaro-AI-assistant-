@@ -250,7 +250,7 @@ describe('G3 — fail closed, LLM isolation, concurrency, no fake success', () =
   });
 
   it('[22] the LLM cannot invoke the executor: no booking tool exists; BOOK_TICKET / EXECUTE_BOOKING calls rejected; LLM confirm outside AWAITING ignored', async () => {
-    expect(REGISTERED_TOOLS.map((t: any) => t.name).sort()).toEqual(['CHECK_AVAILABILITY', 'GET_FARE', 'GET_TIMETABLE', 'GET_TRAIN_INFO', 'SEARCH_TRAINS']);
+    expect(REGISTERED_TOOLS.map((t: any) => t.name).sort()).toEqual(['CHECK_AVAILABILITY', 'CHECK_PNR', 'GET_FARE', 'GET_TIMETABLE', 'GET_TRAIN_INFO', 'SEARCH_TRAINS', 'TRACK_TRAIN']);   // P14: + 2 read-only lookups; still no booking tool
     const sid = state.createSession().sessionId;
     await say(sid, 'Amritsar se Delhi kal 2 log'); await say(sid, '12014'); await say(sid, 'CC');
     const evil: LLMProvider = { providerId: 'evil', init: async () => {}, generateStructuredDecision: async () => ({ decision: {

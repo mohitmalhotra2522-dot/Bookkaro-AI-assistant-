@@ -228,8 +228,8 @@ describe('P13 G3 — lifecycle through the orchestrator', () => {
     llm.evil = false;
     expect(JSON.stringify(S(sid).bookingExecution)).toBe(before);
     expect([p.executeCalls, p.statusCalls]).toEqual([1, 0]);
-    expect(REGISTERED_TOOLS.map((t: any) => t.name).sort()).toEqual(['CHECK_AVAILABILITY', 'GET_FARE', 'GET_TIMETABLE', 'GET_TRAIN_INFO', 'SEARCH_TRAINS']);
-    expect(llm.toolNames.flat().some(n => /BOOK|EXECUTE|STATUS|PNR|CANCEL/i.test(n))).toBe(false);
+    expect(REGISTERED_TOOLS.map((t: any) => t.name).sort()).toEqual(['CHECK_AVAILABILITY', 'CHECK_PNR', 'GET_FARE', 'GET_TIMETABLE', 'GET_TRAIN_INFO', 'SEARCH_TRAINS', 'TRACK_TRAIN']);   // P14: + 2 read-only lookups; still no booking tool
+    expect(llm.toolNames.flat().filter(n => n !== 'CHECK_PNR').some(n => /BOOK|EXECUTE|STATUS|PNR|CANCEL/i.test(n))).toBe(false);   // CHECK_PNR = read-only lookup (P14)
   });
   it('[D] production (disabled provider) unchanged: NOT_STARTED, handoff stays final, never reaches REQUESTED', async () => {
     const sid = newSid();

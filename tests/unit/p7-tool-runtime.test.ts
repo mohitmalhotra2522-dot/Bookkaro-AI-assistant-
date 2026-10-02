@@ -27,11 +27,10 @@ describe('Group 2: LLM tool-calling contract + ToolCallValidator + MockLLMProvid
   const validator = new ToolCallValidator();
 
   // ---- Registry ----
-  it('registry exposes 5 tools; TRACK_TRAIN/CHECK_PNR NOT registered', () => {
+  it('registry exposes 7 tools (P14: + read-only TRACK_TRAIN / CHECK_PNR); no booking tools', () => {
     const names = REGISTERED_TOOLS.map(t => t.name).sort();
-    expect(names).toEqual(['CHECK_AVAILABILITY','GET_FARE','GET_TIMETABLE','GET_TRAIN_INFO','SEARCH_TRAINS']);
-    expect(getToolDefinition('TRACK_TRAIN')).toBeUndefined();
-    expect(getToolDefinition('CHECK_PNR')).toBeUndefined();
+    expect(names).toEqual(['CHECK_AVAILABILITY','CHECK_PNR','GET_FARE','GET_TIMETABLE','GET_TRAIN_INFO','SEARCH_TRAINS','TRACK_TRAIN']);
+    expect(getToolDefinition('BOOK_TICKET' as any)).toBeUndefined();
   });
 
   // ---- ToolCallValidator ----
@@ -42,14 +41,14 @@ describe('Group 2: LLM tool-calling contract + ToolCallValidator + MockLLMProvid
     if (!r.ok) expect(r.error.code).toBe('UNKNOWN_TOOL');
   });
 
-  it('rejects TRACK_TRAIN/CHECK_PNR even if sent by LLM → TOOL_UNAVAILABLE', () => {
+  it('P14: TRACK_TRAIN/CHECK_PNR with LLM-invented train / PNR (no grounding) → AUTHORITATIVE_DATA_REQUIRED', () => {
     const s = blank();
     const r1 = validator.validate({ callId:'c1', name:'TRACK_TRAIN', arguments:{ trainNumber:'12014' } }, s);
     expect(r1.ok).toBe(false);
-    if (!r1.ok) expect(r1.error.code).toBe('TOOL_UNAVAILABLE');
+    if (!r1.ok) expect(r1.error.code).toBe('AUTHORITATIVE_DATA_REQUIRED');
     const r2 = validator.validate({ callId:'c2', name:'CHECK_PNR', arguments:{ pnr:'1234567890' } }, s);
     expect(r2.ok).toBe(false);
-    if (!r2.ok) expect(r2.error.code).toBe('TOOL_UNAVAILABLE');
+    if (!r2.ok) expect(r2.error.code).toBe('AUTHORITATIVE_DATA_REQUIRED');
   });
 
   it('validates SEARCH_TRAINS with canonical codes + resolves station words/date', () => {

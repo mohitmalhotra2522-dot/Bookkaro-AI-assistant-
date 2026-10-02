@@ -123,7 +123,7 @@ describe('P12 G3 — LLM boundary', () => {
     await say(sid, 'Rahul Sharma 31 male, Neha Sharma 28 female');     // availability/fare: deterministic prep (after passengers) via the same tool runtime
     expect(S(sid).availability).toBeTruthy();
     expect(S(sid).fare).toBeTruthy();
-    expect(new Set(llm.toolNames.flat())).toEqual(new Set(['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE']));
+    expect(new Set(llm.toolNames.flat())).toEqual(new Set(['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE', 'TRACK_TRAIN', 'CHECK_PNR']));   // P14: + 2 read-only lookups
   });
   it('[2] booking is NOT callable by the LLM: no tool, BOOK_TICKET rejected, provider untouched', async () => {
     const p = new TestBookingProvider('test-ext', {}, async () => ({ status: 'REQUIRES_EXTERNAL_HANDOFF' }));
@@ -139,7 +139,7 @@ describe('P12 G3 — LLM boundary', () => {
     expect(JSON.stringify(S(sid).bookingExecution)).toBe(before);
     expect(S(sid).bookingState).toBe(BookingState.IRCTC_HANDOFF_READY);
     expect(JSON.stringify(r.turnLog)).not.toMatch(/"toolResultStatus":"ok".*BOOK_TICKET/);
-    expect(REGISTERED_TOOLS.some((t: any) => /BOOK|EXECUTE|PNR|PAY|CANCEL/i.test(t.name))).toBe(false);
+    expect(REGISTERED_TOOLS.some((t: any) => t.name !== 'CHECK_PNR' && /BOOK|EXECUTE|PNR|PAY|CANCEL/i.test(t.name))).toBe(false);   // CHECK_PNR = read-only lookup (P14)
     expect(llm.toolNames.flat().some(n => /BOOK|EXECUTE/i.test(n))).toBe(false);
   });
 });
