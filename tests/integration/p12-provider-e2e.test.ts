@@ -26,7 +26,7 @@ import { BookingProviderError } from '../../server/booking/provider/booking-prov
 import { DisabledBookingProvider } from '../../server/booking/provider/disabled-booking-provider';
 import { BookingProviderRegistry, createProductionBookingProviderRegistry } from '../../server/booking/provider/booking-provider-registry';
 import { parseBookingProviderConfig, type BookingProviderConfig } from '../../server/booking/provider/booking-provider-config';
-import { BookingProviderExecutionService, bookingExecutionView, PROVIDER_CONFIRMED_MESSAGE, EXTERNAL_HANDOFF_MESSAGE, PROVIDER_UNAVAILABLE_MESSAGE, STATUS_UNKNOWN_MESSAGE } from '../../server/booking/provider/booking-provider-execution-service';
+import { BookingProviderExecutionService, bookingExecutionView, PROVIDER_CONFIRMED_MESSAGE, EXTERNAL_HANDOFF_MESSAGE, PROVIDER_UNAVAILABLE_MESSAGE, STATUS_UNKNOWN_MESSAGE, MANUAL_VERIFICATION_MESSAGE, PROVIDER_NOT_REACHED_MESSAGE } from '../../server/booking/provider/booking-provider-execution-service';
 
 type Caps = ReturnType<BookingProvider['getCapabilities']>;
 class TestBookingProvider implements BookingProvider {
@@ -119,8 +119,9 @@ describe('P12 G3 — LLM boundary', () => {
     const r = await say(sid, 'Amritsar se Delhi kal 2 log');
     expect((r.turnLog.toolExecuted || []).some((t: any) => t.name === 'SEARCH_TRAINS')).toBe(true);
     await say(sid, '12497');
-    await say(sid, 'CC');                                              // availability/fare: deterministic prep via the same tool runtime
-    expect(S(sid).availability?.CC).toBeTruthy();
+    await say(sid, 'CC');
+    await say(sid, 'Rahul Sharma 31 male, Neha Sharma 28 female');     // availability/fare: deterministic prep (after passengers) via the same tool runtime
+    expect(S(sid).availability).toBeTruthy();
     expect(S(sid).fare).toBeTruthy();
     expect(new Set(llm.toolNames.flat())).toEqual(new Set(['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE']));
   });
@@ -150,7 +151,7 @@ describe('P12 G3 — provider selection (production registry)', () => {
     expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
     expect(r.events.slice(-3)).toEqual(['IRCTC_HANDOFF_READY', 'BOOKING_PROVIDER_SELECTED', 'BOOKING_PROVIDER_UNAVAILABLE']);
     expect(r.events).not.toContain('BOOKING_EXECUTION_STARTED');
-    expect(S(sid).bookingExecution).toMatchObject({ providerName: 'disabled', status: 'DISABLED', code: 'BOOKING_EXECUTION_DISABLED', submitted: false });
+    expect(S(sid).bookingExecution).toMatchObject({ providerName: 'disabled', status: 'NOT_STARTED', code: 'BOOKING_EXECUTION_DISABLED', submitted: false });   // P13 lifecycle status
     expect(S(sid).handoffSession.status).toBe('READY');
     expect(r.responseMessage).toContain(HANDOFF_READY_MESSAGE);
     const card = r.cards.find((c: any) => c.type === 'handoff').data;
@@ -164,7 +165,7 @@ describe('P12 G3 — provider selection (production registry)', () => {
     const sid = newSid();
     const r = await confirm(sid);
     expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
-    expect(S(sid).bookingExecution).toMatchObject({ providerName: 'disabled', code: 'BOOKING_PROVIDER_DISABLED', status: 'DISABLED' });
+    expect(S(sid).bookingExecution).toMatchObject({ providerName: 'disabled', code: 'BOOKING_PROVIDER_DISABLED', status: 'NOT_STARTED' });
     expect(r.responseMessage).toContain('Automatic booking provider abhi available nahi hai.');
   });
   it('[5] unknown provider → BOOKING_PROVIDER_UNKNOWN, no fallback', async () => {
@@ -172,7 +173,7 @@ describe('P12 G3 — provider selection (production registry)', () => {
     const sid = newSid();
     const r = await confirm(sid);
     expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
-    expect(S(sid).bookingExecution).toMatchObject({ providerName: 'irctc', code: 'BOOKING_PROVIDER_UNKNOWN', status: 'UNAVAILABLE', submitted: false });
+    expect(S(sid).bookingExecution).toMatchObject({ providerName: 'irctc', code: 'BOOKING_PROVIDER_UNKNOWN', status: 'NOT_STARTED', submitted: false });
     expect(r.responseMessage).toContain(PROVIDER_UNAVAILABLE_MESSAGE);
     expect(orch.gateway.bookingProviders.providerStatus()).toMatchObject({ configured: 'irctc', resolved: false, code: 'BOOKING_PROVIDER_UNKNOWN' });
   });
@@ -188,7 +189,7 @@ describe('P12 G3 — provider selection (production registry)', () => {
       const r = await confirm(sid);
       expect(p.calls).toBe(0);
       expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
-      expect(S(sid).bookingExecution).toMatchObject({ status: 'UNAVAILABLE', code: 'BOOKING_PROVIDER_UNAVAILABLE', submitted: false });
+      expect(S(sid).bookingExecution).toMatchObject({ status: 'NOT_STARTED', code: 'BOOKING_PROVIDER_UNAVAILABLE', submitted: false });
     }
     const ok = new TestBookingProvider('test-cap', { health: 'UNKNOWN' }, async () => ({ status: 'CONFIRMED', providerReference: 'R1', pnr: '1234567890' }), { health: async () => 'AVAILABLE' });
     mk(withProvider(ok));
@@ -198,17 +199,17 @@ describe('P12 G3 — provider selection (production registry)', () => {
 });
 
 describe('P12 G3 — provider responses', () => {
-  it('[7] invalid response → UNKNOWN, no PNR, never CONFIRMED, retry blocked', async () => {
+  it('[7] invalid response → UNKNOWN → (no status API) MANUAL_VERIFICATION_REQUIRED, no PNR, never CONFIRMED, retry blocked', async () => {
     const p = new TestBookingProvider('test-bad', {}, async () => ({ status: 'SUCCESS', pnr: '1234567890', http: 200 }));
     mk(withProvider(p));
     const sid = newSid();
     const r = await confirm(sid);
-    expect(r.newState).toBe(BookingState.BOOKING_EXECUTION_REQUESTED);
-    expect(S(sid).bookingExecution).toMatchObject({ status: 'UNKNOWN', code: 'INVALID_PROVIDER_RESPONSE', failureCode: 'INVALID_PROVIDER_RESPONSE', retryBlocked: true });
-    expect(S(sid).bookingExecution.pnr).toBeUndefined();
-    expect(r.responseMessage).toContain(STATUS_UNKNOWN_MESSAGE);
+    expect(r.newState).toBe(BookingState.BOOKING_STATUS_UNKNOWN);
+    expect(S(sid).bookingExecution).toMatchObject({ status: 'MANUAL_VERIFICATION_REQUIRED', code: 'INVALID_PROVIDER_RESPONSE', failureCode: 'INVALID_PROVIDER_RESPONSE', retryBlocked: true });
+    expect(S(sid).bookingExecution.pnr).toBeNull();
+    expect(r.responseMessage).toContain(MANUAL_VERIFICATION_MESSAGE);
     const again = await orch.preparation.executeBookingProvider(sid, pctx());
-    expect(again).toMatchObject({ code: 'BOOKING_RETRY_BLOCKED', manualVerificationRequired: true, detail: 'MANUAL_PROVIDER_VERIFICATION_REQUIRED' });
+    expect(again).toMatchObject({ code: 'MANUAL_VERIFICATION_REQUIRED', manualVerificationRequired: true, detail: 'MANUAL_PROVIDER_VERIFICATION_REQUIRED' });
     expect(p.calls).toBe(1);
   });
   it('[8] timeout → BOOKING_STATUS_UNKNOWN (no resubmission); with status support → one status check', async () => {
@@ -216,12 +217,12 @@ describe('P12 G3 — provider responses', () => {
     mk(withProvider(p, 50));
     const sid = newSid();
     const r = await confirm(sid);
-    expect(S(sid).bookingExecution).toMatchObject({ status: 'UNKNOWN', failureCode: 'PROVIDER_TIMEOUT', code: 'BOOKING_STATUS_UNKNOWN', retryBlocked: true });
-    expect(r.newState).toBe(BookingState.BOOKING_EXECUTION_REQUESTED);
-    expect(r.events).toContain('BOOKING_STATUS_UNKNOWN');
-    expect((await orch.preparation.executeBookingProvider(sid, pctx())).code).toBe('BOOKING_RETRY_BLOCKED');
+    expect(S(sid).bookingExecution).toMatchObject({ status: 'MANUAL_VERIFICATION_REQUIRED', failureCode: 'PROVIDER_TIMEOUT', code: 'BOOKING_STATUS_UNKNOWN', retryBlocked: true });
+    expect(r.newState).toBe(BookingState.BOOKING_STATUS_UNKNOWN);
+    expect(r.events).toContain('BOOKING_EXECUTION_UNKNOWN');
+    expect((await orch.preparation.executeBookingProvider(sid, pctx())).code).toBe('MANUAL_VERIFICATION_REQUIRED');
     const locked = await say(sid, 'haan book karo');
-    expect(locked.error?.code).toBe('BOOKING_EXECUTION_LOCKED');
+    expect(locked.error?.code).toBe('UNSAFE_RETRY');
     expect(p.calls).toBe(1);
     const q = new TestBookingProvider('test-slow2', { supportsIdempotency: true }, () => new Promise(() => {}), { status: async () => ({ status: 'CONFIRMED', providerReference: 'REF-T', pnr: '8812345678' }) });
     mk(withProvider(q, 50));
@@ -239,23 +240,23 @@ describe('P12 G3 — provider responses', () => {
     expect(r.newState).toBe(BookingState.BOOKING_FAILED);
     expect(S(sid).bookingExecution).toMatchObject({ status: 'FAILED', code: 'BOOKING_PROVIDER_REJECTED', failureCode: 'NO_SEATS', providerReference: 'REF-F1' });
     expect(Date.parse(S(sid).bookingExecution.updatedAt)).toBeGreaterThan(0);
-    expect(S(sid).bookingExecution.pnr).toBeUndefined();
-    expect(r.events).toContain('BOOKING_FAILED');
+    expect(S(sid).bookingExecution.pnr).toBeNull();
+    expect(r.events).toContain('BOOKING_PROVIDER_FAILED');
     const a = new TestBookingProvider('test-auth', {}, async () => { throw new BookingProviderError('PROVIDER_UNKNOWN_ERROR', 401, 'invalid api key sk-XYZ'); });
     mk(withProvider(a));
     const sid2 = newSid();
     expect((await confirm(sid2)).newState).toBe(BookingState.BOOKING_FAILED);
     expect(S(sid2).bookingExecution).toMatchObject({ status: 'FAILED', code: 'BOOKING_PROVIDER_AUTH_FAILED', failureCode: 'PROVIDER_AUTH_FAILED' });
   });
-  it('[10] provider unavailable → back to IRCTC_HANDOFF_READY, nothing booked', async () => {
+  it('[10] provider unavailable (request provably not processed) → BOOKING_FAILED (P13), nothing booked', async () => {
     for (const exec of [async () => ({ status: 'UNAVAILABLE' }), async () => { throw new BookingProviderError('NETWORK_NOT_SENT'); }]) {
       const p = new TestBookingProvider('test-unav', {}, exec);
       mk(withProvider(p));
       const sid = newSid();
       const r = await confirm(sid);
-      expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
-      expect(S(sid).bookingExecution).toMatchObject({ status: 'UNAVAILABLE', code: 'BOOKING_PROVIDER_UNAVAILABLE' });
-      expect(r.responseMessage).toContain(PROVIDER_UNAVAILABLE_MESSAGE);
+      expect(r.newState).toBe(BookingState.BOOKING_FAILED);
+      expect(S(sid).bookingExecution).toMatchObject({ status: 'FAILED', code: 'BOOKING_PROVIDER_UNAVAILABLE', pnr: null });
+      expect(r.responseMessage).toContain(PROVIDER_NOT_REACHED_MESSAGE);
       expect(r.responseMessage).not.toMatch(FAKE_SUCCESS);
     }
   });
@@ -288,13 +289,13 @@ describe('P12 G3 — duplicates, concurrency, idempotency', () => {
     await confirm(sid);
     const id = S(sid).bookingExecution.bookingExecutionId;
     const t2 = await say(sid, 'haan book karo');
-    expect(t2.error?.code).toBe('BOOKING_EXECUTION_LOCKED');
+    expect(t2.error?.code).toBe('EXECUTION_ALREADY_CONFIRMED');
     expect(t2.newState).toBe(BookingState.BOOKING_CONFIRMED);
     const api = await orch.preparation.executeBookingProvider(sid, pctx());
-    expect(api).toMatchObject({ code: 'BOOKING_EXECUTION_DUPLICATE', duplicate: true, providerCalled: false });
+    expect(api).toMatchObject({ code: 'EXECUTION_ALREADY_CONFIRMED', duplicate: true, providerCalled: false });
     expect(api.record!.bookingExecutionId).toBe(id);
     const edit = await say(sid, 'Neha ki age 29 kar do');
-    expect(edit.error?.code).toBe('BOOKING_EXECUTION_LOCKED');
+    expect(edit.error?.code).toBe('EXECUTION_LOCKED');
     expect(S(sid).passengers[1].age).toBe(28);
     expect(p.calls).toBe(1);
   });
@@ -308,10 +309,10 @@ describe('P12 G3 — duplicates, concurrency, idempotency', () => {
     await toAwaiting(sid);
     const t1 = say(sid, 'haan book karo');
     await startedP;
-    expect(S(sid).bookingState).toBe(BookingState.BOOKING_EXECUTION_REQUESTED);
+    expect(S(sid).bookingState).toBe(BookingState.BOOKING_IN_PROGRESS);
     const [api, t2] = await Promise.all([orch.preparation.executeBookingProvider(sid, pctx()), say(sid, 'haan book karo', 'VOICE')]);
-    expect(api.code).toBe('BOOKING_EXECUTION_LOCKED');
-    expect(t2.error?.code).toBe('BOOKING_EXECUTION_LOCKED');
+    expect(api.code).toBe('EXECUTION_LOCKED');
+    expect(t2.error?.code).toBe('EXECUTION_ALREADY_ACTIVE');
     release({ status: 'CONFIRMED', providerReference: 'REF-C', pnr: '7712345678' });
     await t1;
     expect(S(sid).bookingState).toBe(BookingState.BOOKING_CONFIRMED);
@@ -397,7 +398,7 @@ describe('P12 G3 — authoritative results only', () => {
     const sid = newSid();
     const r = await confirm(sid);
     expect(r.newState).toBe(BookingState.BOOKING_CONFIRMED);
-    expect(r.events).toEqual(expect.arrayContaining(['BOOKING_PROVIDER_SELECTED', 'BOOKING_EXECUTION_STARTED', 'BOOKING_PROVIDER_RESPONSE_RECEIVED', 'BOOKING_CONFIRMED']));
+    expect(r.events).toEqual(expect.arrayContaining(['BOOKING_PROVIDER_SELECTED', 'BOOKING_EXECUTION_STARTED', 'BOOKING_PROVIDER_RESPONSE_RECEIVED', 'BOOKING_PROVIDER_CONFIRMED']));
     expect(r.responseMessage).toContain(`${PROVIDER_CONFIRMED_MESSAGE} PNR: 4412345678.`);
     expect(S(sid).bookingExecution).toMatchObject({ status: 'CONFIRMED', providerStatus: 'CONFIRMED', pnr: '4412345678', providerReference: 'REF-A1', submitted: true });
     expect(S(sid).bookingLifecycle.status).toBe('EXECUTION_SUCCESS');
@@ -408,28 +409,28 @@ describe('P12 G3 — authoritative results only', () => {
     const sid2 = newSid();
     const r2 = await confirm(sid2);
     expect(r2.newState).toBe(BookingState.BOOKING_CONFIRMED);
-    expect(S(sid2).bookingExecution.pnr).toBeUndefined();
+    expect(S(sid2).bookingExecution.pnr).toBeNull();
     expect(r2.responseMessage).toContain('PNR provider ne abhi nahi diya.');
   });
   it('[21] no local PNR: disabled / pending / invalid flows never carry a PNR', async () => {
     const sid = newSid();
     const r = await confirm(sid);
     const dump = JSON.stringify({ s: S(sid).bookingExecution, cards: r.cards, msg: r.responseMessage });
-    expect(dump).not.toMatch(/"pnr"/);
+    expect(dump).not.toMatch(/"pnr":"\d/);
     expect(dump).not.toMatch(/PNR\s*[:#]?\s*\d{6,}/);
     const p = new TestBookingProvider('test-acc', {}, async () => ({ status: 'ACCEPTED', providerReference: 'REF-P', pnr: '1234567890' }));
     mk(withProvider(p));
     const sid2 = newSid();
     await confirm(sid2);
-    expect(S(sid2).bookingExecution).toMatchObject({ status: 'UNKNOWN', code: 'INVALID_PROVIDER_RESPONSE' });
-    expect(S(sid2).bookingExecution.pnr).toBeUndefined();
+    expect(S(sid2).bookingExecution).toMatchObject({ status: 'MANUAL_VERIFICATION_REQUIRED', code: 'INVALID_PROVIDER_RESPONSE' });
+    expect(S(sid2).bookingExecution.pnr).toBeNull();
     const q = new TestBookingProvider('test-acc2', {}, async () => ({ status: 'ACCEPTED', providerReference: 'REF-Q' }));
     mk(withProvider(q));
     const sid3 = newSid();
     const r3 = await confirm(sid3);
     expect(r3.newState).toBe(BookingState.BOOKING_IN_PROGRESS);
-    expect(S(sid3).bookingExecution).toMatchObject({ status: 'ACCEPTED', code: 'BOOKING_ACCEPTED' });
-    expect(S(sid3).bookingExecution.pnr).toBeUndefined();
+    expect(S(sid3).bookingExecution).toMatchObject({ status: 'IN_PROGRESS', providerStatus: 'ACCEPTED', code: 'BOOKING_ACCEPTED' });
+    expect(S(sid3).bookingExecution.pnr).toBeNull();
   });
   it('[22] no fake success across disabled / unknown / unavailable / external / timeout / pending', async () => {
     const msgs: string[] = [];

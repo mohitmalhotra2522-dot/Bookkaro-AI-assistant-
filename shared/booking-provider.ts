@@ -10,6 +10,7 @@
  * enter these objects, the BookingSession, the LLM or the frontend.
  */
 import type { AvailabilitySnapshot, ExecutionPassenger, ExecutionTrainRef, FareSnapshot } from './booking-execution';
+import type { BookingExecutionEvent, BookingExecutionLifecycleStatus, BookingLifecycleErrorCode } from './booking-execution-lifecycle';
 
 export type ProviderHealth = 'AVAILABLE' | 'UNAVAILABLE' | 'UNKNOWN';
 
@@ -86,7 +87,6 @@ export type BookingProviderErrorCode =
   | 'BOOKING_PROVIDER_VALIDATION_FAILED'
   | 'BOOKING_STATUS_UNKNOWN'
   | 'BOOKING_RETRY_BLOCKED'
-  | 'BOOKING_EXECUTION_LOCKED'
   | 'BOOKING_EXECUTION_DUPLICATE'
   | 'BOOKING_EXECUTION_FAILED'
   | 'BOOKING_REQUIRES_EXTERNAL_HANDOFF'
@@ -97,44 +97,50 @@ export type BookingProviderErrorCode =
 /** Outcome codes of one execution request (errors above + authoritative provider outcomes). */
 export type BookingExecutionOutcomeCode =
   | BookingProviderErrorCode
+  | BookingLifecycleErrorCode
   | 'BOOKING_ACCEPTED'
   | 'BOOKING_IN_PROGRESS'
   | 'BOOKING_CONFIRMED'
   | 'BOOKING_FAILED'
   | 'BOOKING_CANCELLED';
 
-export type BookingExecutionRecordStatus =
-  | 'DISABLED'                    // REAL_BOOKING_ENABLED off / provider "disabled" — nothing sent
-  | 'UNAVAILABLE'                 // provider missing / unknown / unhealthy — nothing sent (or definitely not received)
-  | 'REQUIRES_EXTERNAL_HANDOFF'   // provider cannot execute automatically
-  | 'SUBMITTING'                  // request in flight (lock held)
-  | 'ACCEPTED'
-  | 'IN_PROGRESS'
-  | 'CONFIRMED'                   // ONLY from an authoritative, schema-valid provider response
-  | 'FAILED'                      // authoritative provider failure / definite rejection
-  | 'CANCELLED'                   // ONLY if the provider reports it
-  | 'UNKNOWN';                    // outcome uncertain (timeout / invalid response) → never auto-retried
+/** Prompt 13: the record status IS the lifecycle status (single source of truth). */
+export type BookingExecutionRecordStatus = BookingExecutionLifecycleStatus;
 
-/** Persisted, normalized execution record. Never contains provider secrets or raw responses. */
+/**
+ * Normalized execution record. Copy-on-write: every change produces a NEW frozen record
+ * with an appended BookingExecutionEvent — history is never rewritten.
+ * Never contains provider secrets or raw responses.
+ */
 export interface BookingExecutionRecord {
   bookingExecutionId: string;
   sessionId: string;
   handoffId: string;
   handoffSessionId: string;
   requestId: string;
+  /** The handoff's idempotency key (kept for reconciliation; sent only if the provider supports it). */
+  idempotencyKey: string;
   providerName: string;
-  status: BookingExecutionRecordStatus;
+  status: BookingExecutionLifecycleStatus;
   code: BookingExecutionOutcomeCode;
   providerStatus?: BookingProviderResultStatus | BookingStatusResultStatus;
-  providerReference?: string;
-  /** Authoritative PNR from a schema-valid provider response — otherwise absent. */
-  pnr?: string;
-  failureCode?: string;
+  /** Only when returned by the provider — otherwise null. */
+  providerReference: string | null;
+  /** Authoritative PNR from a schema-valid provider response — otherwise null. */
+  pnr: string | null;
+  failureCode: string | null;
   /** A booking request may have reached the provider. */
   submitted: boolean;
   /** Automatic re-submission is forbidden (uncertain outcome / already submitted). */
   retryBlocked: boolean;
   createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  lastCheckedAt: string | null;
+  /** Provider submissions for this record (0 or 1 — never re-submitted). */
+  attemptCount: number;
+  reconciliationAttempts: number;
+  events: readonly BookingExecutionEvent[];
   updatedAt: string;
 }
 

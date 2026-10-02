@@ -16,6 +16,7 @@
  * requestVersion). Writes from an obsolete request are rejected
  * (STALE_TOOL_RESULT) and the obsolete loop stops.
  */
+import type { ReconciliationConfig } from '../../booking/lifecycle/reconciliation-config';
 import type { BookingProviderRegistry } from '../../booking/provider/booking-provider-registry';
 import type { BookingProviderConfig } from '../../booking/provider/booking-provider-config';
 import type { LLMProvider } from '../providers/llm-provider';
@@ -67,6 +68,8 @@ export interface OrchestratorOptions {
   /** Prompt 12: booking PROVIDER registry (production: disabled provider only) + server-side config. */
   bookingProviderRegistry?: BookingProviderRegistry;
   bookingProviderConfig?: BookingProviderConfig;
+  /** Prompt 13: bounded status reconciliation (deterministic config, injectable sleep for tests). */
+  bookingReconciliation?: { config?: Partial<ReconciliationConfig>; sleep?: (ms: number) => Promise<void> };
   /** Prompt 11: executor ADAPTER registry (production: disabled adapter only). */
   adapterRegistry?: BookingExecutorAdapterRegistry;
   /** Prompt 11: handoff session service override (tests). */
@@ -111,7 +114,7 @@ export class ConversationAgentOrchestrator {
   ) {
     this.runtime = new LLMToolCallingRuntime(llm, tools);
     this.applier = new ContextualTurnApplier(state);
-    this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock, providerRegistry: options.bookingProviderRegistry, providerConfig: options.bookingProviderConfig });
+    this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock, providerRegistry: options.bookingProviderRegistry, providerConfig: options.bookingProviderConfig, reconciliation: options.bookingReconciliation?.config, sleep: options.bookingReconciliation?.sleep });
     this.preparation = new BookingPreparationService(state, {
       policy: options.preparationPolicy, clock: options.clock, gateway: this.gateway,
       handoffSessions: options.handoffSessionService || new BookingHandoffSessionService({ registry: options.adapterRegistry, config: this.gateway.config, clock: options.clock })
@@ -215,6 +218,7 @@ export class ConversationAgentOrchestrator {
     const progress: string[] = [];
     let prep: PrepOutcome | undefined;
     let dupExecution: ExecutionLogRecord | undefined;
+    const postNotes: string[] = [];
     progress.push(...handoffSync.notes);
     if (!blockErr) {
       const searchOk = rt.steps.some(st => st.result.toolName === 'SEARCH_TRAINS' && st.status === 'ok');
@@ -243,7 +247,24 @@ export class ConversationAgentOrchestrator {
         // repeated "haan" after the handoff → gateway idempotency (same handoff, executor not re-invoked)
         dupExecution = await this.preparation.duplicateConfirmation(sessionId, ctx);
       }
-      this.preparation.evaluate(sessionId);
+      // Prompt 13: status question / unsafe retry → bounded provider status check ONLY (never resubmits)
+      if (rt.applyOutcomes.some(o => o.reconcileRequested)) {
+        const px = await this.preparation.reconcileExecution(sessionId, ctx);
+        postNotes.push(px.message);
+      }
+      // Prompt 13: explicit retry after an authoritative failure → fresh data + new review/confirmation/handoff
+      if (rt.applyOutcomes.some(o => o.retryAfterFailure)) {
+        prep = await this.preparation.retryAfterFailure(sessionId, ctx, calls => bound.runTools(calls));
+        if (prep) {
+          postNotes.push(...prep.notes);
+          for (const st of prep.steps) {
+            if (st.status !== 'ok') continue;
+            if (st.result.toolName === 'CHECK_AVAILABILITY') cards.push({ type: 'availability', data: { ...st.result.data, refreshedForReview: true } });
+            if (st.result.toolName === 'GET_FARE') cards.push({ type: 'fare', data: { ...st.result.data, refreshedForReview: true } });
+          }
+        }
+      }
+      if (!prep) this.preparation.evaluate(sessionId);
     }
     const sess = this.state.getSession(sessionId);
     const override = pendingOverride ?? prep?.pendingOverride;
@@ -251,7 +272,7 @@ export class ConversationAgentOrchestrator {
     const overrideValid = !override || !prep || prep.pendingOverride === override || sess.bookingState !== BookingState.AWAITING_CONFIRMATION || override.type === 'PASSENGER_DETAILS_REQUIRED' || override.type === 'CLARIFICATION_REQUIRED' || !!override.data?.correction;
     sess.pendingInteraction = { ...((overrideValid && override) || derivePendingInteraction(sess)), setAtTurnId: turnId };
 
-    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes);
+    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes);
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
       message, error: blockErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined), rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
@@ -260,12 +281,13 @@ export class ConversationAgentOrchestrator {
 
   // ---------------------------------------------------------------- composition
 
-  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = []): string {
+  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = []): string {
     const parts: string[] = [];
     const q = questionFor(s.pendingInteraction, s, mode);
     if (blockErr) {
       parts.push(...preNotes);
       parts.push(blockErr.message);
+      parts.push(...postNotes.filter(n => n && !blockErr.message.includes(n)));
       if (q && !/\?\s*$/.test(blockErr.message) && !blockErr.message.includes(q)) parts.push(q);
       return joinParts(parts);
     }

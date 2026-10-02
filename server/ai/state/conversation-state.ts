@@ -78,8 +78,13 @@ export class ConversationStateManager {
     if (!evidence?.bookingExecutionId || !evidence.providerName || s.bookingExecution?.bookingExecutionId !== evidence.bookingExecutionId) {
       return { ok: false, code: 'INVALID_STATE_TRANSITION', message: 'Execution transition requires a matching provider execution record.' };
     }
-    if (target === BookingState.BOOKING_CONFIRMED && evidence.providerStatus !== 'CONFIRMED') {
+    const rec = s.bookingExecution;
+    if (target === BookingState.BOOKING_CONFIRMED && (evidence.providerStatus !== 'CONFIRMED' || rec.status !== 'CONFIRMED')) {
       return { ok: false, code: 'INVALID_STATE_TRANSITION', message: 'BOOKING_CONFIRMED requires an authoritative CONFIRMED provider status.' };
+    }
+    // Prompt 13: leaving BOOKING_FAILED (explicit retry) only after an AUTHORITATIVE failure / cancellation
+    if (s.bookingState === BookingState.BOOKING_FAILED && rec.status !== 'FAILED' && rec.status !== 'CANCELLED') {
+      return { ok: false, code: 'INVALID_STATE_TRANSITION', message: 'Retry requires an authoritative FAILED / CANCELLED execution record.' };
     }
     const r = stateTransitionValidator.checkExecution(s.bookingState, target);
     if (r.ok && r.path.length) { s.bookingState = target; this.bump(sessionId); }

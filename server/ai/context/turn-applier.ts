@@ -18,7 +18,20 @@
  */
 import { classifyConfirmation, AMBIGUOUS_CONFIRMATION_PROMPT } from '../../booking/handoff/confirmation-policy';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
-import { messageForRecord, SUBMITTING_MESSAGE } from '../../booking/provider/booking-provider-execution-service';
+import { messageForRecord, SUBMITTING_MESSAGE, UNSAFE_RETRY_MESSAGE, ALREADY_CONFIRMED_MESSAGE, ALREADY_ACTIVE_MESSAGE, VOICE_INTERRUPTION_MESSAGE } from '../../booking/provider/booking-provider-execution-service';
+
+/** Prompt 13: deterministic intent while a booking execution owns the session. */
+export type LockedIntent = 'CANCEL' | 'STATUS' | 'RETRY' | 'OTHER';
+const CANCEL_RE = /\b(cancel|cancle|ruko|ruk jao|rok do|rokdo|band karo|band kar do|stop|mat karo|rehne do)\b|रुको|कैंसल/i;
+const STATUS_RE = /\b(status|kya hua|update|verify|check|confirm hua|hua ya nahi|ho gaya kya|ho gayi kya)\b/i;
+const RETRY_RE = /\b(phir se|fir se|phirse|firse|dobara|dubara|again|retry|re-try|book karo|book kar do|book kardo|book it|try karo)\b/i;
+export function classifyLockedIntent(raw: string, affirmativeLabel = false): LockedIntent {
+  const t = (raw || '').toLowerCase();
+  if (CANCEL_RE.test(t)) return 'CANCEL';
+  if (STATUS_RE.test(t)) return 'STATUS';
+  if (RETRY_RE.test(t) || affirmativeLabel) return 'RETRY';
+  return 'OTHER';
+}
 import type { BookingSession, PendingInteraction, BookingEventType } from '@shared/entities';
 import type { AgentDecision, OrchestratorError, OrchestratorErrorCode } from '../decisions/agent-decision';
 import type { ConversationStateManager } from '../state/conversation-state';
@@ -59,6 +72,10 @@ export interface ApplyOutcome {
   softError?: OrchestratorError;
   /** Confirmation repeated after the handoff exists → routed to gateway idempotency (no new handoff). */
   duplicateConfirmation?: boolean;
+  /** Prompt 13: run a bounded provider status check (never a resubmission). */
+  reconcileRequested?: boolean;
+  /** Prompt 13: explicit user retry after an authoritative FAILED / CANCELLED execution. */
+  retryAfterFailure?: boolean;
 }
 
 const ALLOWED_INTENTS = new Set(['GENERAL_RAILWAY_QUERY', 'BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'UNKNOWN']);
@@ -92,11 +109,39 @@ export class ContextualTurnApplier {
     // Prompt 12: once a booking provider owns the session (execution states), the
     // conversation can neither change booking details nor trigger anything — every turn
     // only reports the normalized provider record. Booking is never an LLM action.
+    // Prompt 13: lifecycle-aware handling, classified DETERMINISTICALLY from the raw text
+    // (never from an LLM label): cancel ≠ provider cancellation; retry never resubmits an
+    // unresolved / confirmed booking; status questions only trigger a status lookup.
     if (EXECUTION_LOCKED_STATES.has(S().bookingState)) {
       const rec = S().bookingExecution;
       const msg = rec ? messageForRecord(rec) : SUBMITTING_MESSAGE;
-      out.applied.push('BOOKING_EXECUTION_LOCKED');
-      return fail('BOOKING_EXECUTION_LOCKED', this.hasSubstantiveEntities(e) ? `${msg} Booking request provider ko bheji ja chuki hai — ab details change nahi ho sakti.` : msg);
+      const st = rec?.status;
+      const intent = classifyLockedIntent(ctx.rawText ?? '', !!e.executionRequested || !!e.affirmation || d.intent === 'CONFIRM_BOOKING');
+      const unresolved = st === 'UNKNOWN' || st === 'MANUAL_VERIFICATION_REQUIRED' || st === 'IN_PROGRESS' || st === 'REQUESTED';
+      if (intent === 'CANCEL') {
+        out.applied.push('PROVIDER_CANCELLATION_UNSUPPORTED');
+        emit('BOOKING_CANCEL_NOT_SUPPORTED', { bookingState: S().bookingState, executionStatus: st ?? null });
+        return fail('PROVIDER_CANCELLATION_UNSUPPORTED', unresolved || st === 'CONFIRMED' ? `${VOICE_INTERRUPTION_MESSAGE} ${msg}` : msg);
+      }
+      if (intent === 'STATUS' && unresolved && st !== 'REQUESTED') {
+        out.applied.push('BOOKING_STATUS_CHECK');
+        return { ...fail(st === 'IN_PROGRESS' ? 'EXECUTION_ALREADY_ACTIVE' : 'EXECUTION_UNKNOWN', 'Booking provider se status verify kar raha hoon.'), reconcileRequested: true };
+      }
+      if (intent === 'RETRY') {
+        if (st === 'CONFIRMED') return fail('EXECUTION_ALREADY_CONFIRMED', `${ALREADY_CONFIRMED_MESSAGE}${rec?.pnr ? ` PNR: ${rec.pnr}.` : ''}`);
+        if (st === 'UNKNOWN' || st === 'MANUAL_VERIFICATION_REQUIRED') {
+          out.applied.push('UNSAFE_RETRY_BLOCKED');
+          return { ...fail('UNSAFE_RETRY', UNSAFE_RETRY_MESSAGE), reconcileRequested: true };
+        }
+        if (st === 'IN_PROGRESS' || st === 'REQUESTED') return fail('EXECUTION_ALREADY_ACTIVE', ALREADY_ACTIVE_MESSAGE);
+        if ((st === 'FAILED' || st === 'CANCELLED') && S().bookingState === BookingState.BOOKING_FAILED && classifyLockedIntent(ctx.rawText ?? '') === 'RETRY') {
+          // explicit retry after an AUTHORITATIVE failure — fresh data + new review/confirmation/handoff
+          out.applied.push('RETRY_AFTER_FAILURE');
+          return { ...fail('EXECUTION_ALREADY_FAILED', 'Pichhli booking attempt provider ne fail ki thi — wahi request dobara nahi bheji jayegi. Nayi attempt ke liye fresh availability aur fare check kar raha hoon; naya review confirm karna hoga.'), retryAfterFailure: true };
+        }
+      }
+      out.applied.push('EXECUTION_LOCKED');
+      return fail('EXECUTION_LOCKED', this.hasSubstantiveEntities(e) ? `${msg} Booking request provider ko bheji ja chuki hai — ab details change nahi ho sakti.` : msg);
     }
     if (S().bookingState === BookingState.IRCTC_HANDOFF_READY && (e.executionRequested || e.affirmation || d.intent === 'CONFIRM_BOOKING')) {
       const rec = S().bookingExecution;

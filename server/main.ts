@@ -1,3 +1,4 @@
+import { parseReconciliationConfig } from './booking/lifecycle/reconciliation-config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { MockLLMProvider } from './ai/providers/mock-llm';
@@ -31,7 +32,8 @@ const orchestrator = new ConversationAgentOrchestrator(llmProvider, stateManager
   // Prompt 12: booking PROVIDER registry — production contains ONLY DisabledBookingProvider.
   // BOOKING_PROVIDER defaults to "disabled"; unknown names fail closed (no fallback).
   bookingProviderRegistry: createProductionBookingProviderRegistry(),
-  bookingProviderConfig: parseBookingProviderConfig(process.env)
+  bookingProviderConfig: parseBookingProviderConfig(process.env),
+  bookingReconciliation: { config: parseReconciliationConfig(process.env) }
 });
 const executionCapability = () => orchestrator.gateway.capability();
 const executorCapability = () => orchestrator.preparation.handoffSessions.capability();
@@ -146,6 +148,33 @@ server.post('/api/booking/execute', async (request, reply) => {
     manualVerificationRequired: px.manualVerificationRequired, state: s.bookingState, sessionVersion: s.sessionVersion,
     bookingExecution: bookingExecutionView(s.bookingExecution) ?? null, bookingProvider: bookingProviderView(), events, cards
   });
+});
+
+/**
+ * Prompt 13: explicit booking status verification — bounded provider status lookups only.
+ * NEVER submits a booking. The only way out of MANUAL_VERIFICATION_REQUIRED.
+ */
+server.post('/api/booking/reconcile', async (request, reply) => {
+  const body = (request.body as any) || {};
+  const sens = checkNoSensitiveData(body);
+  if (!sens.ok) return reply.status(400).send({ code: 'SENSITIVE_DATA_REJECTED', message: 'Password, OTP, CAPTCHA, card/UPI/bank details ya tokens yahan accept nahi kiye jaate.' });
+  const { sessionId } = body;
+  if (!sessionId || typeof sessionId !== 'string' || !stateManager.hasSession(sessionId)) return reply.status(404).send({ code: 'RECONCILIATION_UNAVAILABLE', message: 'Session nahi mila.' });
+  const cards: any[] = [];
+  const events: string[] = [];
+  const px = await orchestrator.preparation.reconcileExecution(sessionId, { turnId: `reconcile-${randomUUID()}`, mode: 'TEXT', cards, events, changes: [], requestId: randomUUID() });
+  const s = stateManager.getSession(sessionId);
+  return reply.send({
+    code: px.code, message: px.message, providerCalled: px.providerCalled, manualVerificationRequired: px.manualVerificationRequired,
+    state: s.bookingState, sessionVersion: s.sessionVersion, bookingExecution: bookingExecutionView(s.bookingExecution) ?? null, events, cards
+  });
+});
+
+/** Prompt 13: safe booking execution history (status, provider, reference, authoritative PNR, failure reason, reconciliation). */
+server.get('/api/session/:id/booking-history', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  return reply.send({ sessionId: id, history: orchestrator.preparation.bookingHistory(id) });
 });
 
 /** Structured, redacted turn history (observability; no secrets are ever stored). */

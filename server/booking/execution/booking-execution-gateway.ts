@@ -24,6 +24,7 @@
  * A duplicate confirmation of the same review returns the existing handoff and
  * never invokes the executor again (concurrent duplicates share one in-flight run).
  */
+import type { ReconciliationConfig } from '../lifecycle/reconciliation-config';
 import { BookingState } from '@shared/states';
 import type { BookingSession } from '@shared/entities';
 import type {
@@ -57,6 +58,9 @@ export type GatewayOutcome =
   | { ok: false; code: BookingExecutionErrorCode; detail?: string; capability: ExecutionCapability; log: ExecutionLogRecord };
 
 export interface GatewayOptions {
+  /** Prompt 13: bounded reconciliation config + injectable sleep (tests). */
+  reconciliation?: Partial<ReconciliationConfig>;
+  sleep?: (ms: number) => Promise<void>;
   registry?: BookingExecutorRegistry;
   config?: ExecutionConfig;
   clock?: () => number;
@@ -86,7 +90,7 @@ export class BookingExecutionGateway {
     this.config = opts.config || DEFAULT_EXECUTION_CONFIG;
     this.clock = opts.clock || (() => Date.now());
     this.handoffs = opts.handoffs || new BookingHandoffService({ ttlMs: this.config.handoffTtlMs });
-    this.bookingProviders = new BookingProviderExecutionService(state, { registry: opts.providerRegistry, config: opts.providerConfig, clock: this.clock });
+    this.bookingProviders = new BookingProviderExecutionService(state, { registry: opts.providerRegistry, config: opts.providerConfig, clock: this.clock, reconciliation: opts.reconciliation, sleep: opts.sleep });
   }
 
   /**

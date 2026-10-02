@@ -27,7 +27,11 @@ export enum BookingState {
   BOOKING_EXECUTION_REQUESTED = 'BOOKING_EXECUTION_REQUESTED',
   BOOKING_IN_PROGRESS = 'BOOKING_IN_PROGRESS',
   BOOKING_CONFIRMED = 'BOOKING_CONFIRMED',
-  BOOKING_FAILED = 'BOOKING_FAILED'
+  BOOKING_FAILED = 'BOOKING_FAILED',
+  // ---- Prompt 13: outcome of a submitted booking could not be established (timeout /
+  // lost connection / invalid response). NOT a failure — reconciliation required.
+  // Covers lifecycle UNKNOWN and MANUAL_VERIFICATION_REQUIRED (the record distinguishes).
+  BOOKING_STATUS_UNKNOWN = 'BOOKING_STATUS_UNKNOWN'
 }
 
 /**
@@ -39,7 +43,8 @@ export const EXECUTION_LOCKED_STATES: ReadonlySet<BookingState> = new Set([
   BookingState.BOOKING_EXECUTION_REQUESTED,
   BookingState.BOOKING_IN_PROGRESS,
   BookingState.BOOKING_CONFIRMED,
-  BookingState.BOOKING_FAILED
+  BookingState.BOOKING_FAILED,
+  BookingState.BOOKING_STATUS_UNKNOWN
 ]);
 
 /**
@@ -49,9 +54,13 @@ export const EXECUTION_LOCKED_STATES: ReadonlySet<BookingState> = new Set([
  */
 export const EXECUTION_TRANSITIONS: Readonly<Partial<Record<BookingState, readonly BookingState[]>>> = Object.freeze({
   [BookingState.IRCTC_HANDOFF_READY]: [BookingState.BOOKING_EXECUTION_REQUESTED],
-  // back to IRCTC_HANDOFF_READY only when the provider DEFINITELY did not book (external handoff / unavailable)
-  [BookingState.BOOKING_EXECUTION_REQUESTED]: [BookingState.BOOKING_IN_PROGRESS, BookingState.BOOKING_CONFIRMED, BookingState.BOOKING_FAILED, BookingState.IRCTC_HANDOFF_READY],
-  [BookingState.BOOKING_IN_PROGRESS]: [BookingState.BOOKING_CONFIRMED, BookingState.BOOKING_FAILED]
+  // back to IRCTC_HANDOFF_READY only for REQUIRES_EXTERNAL_HANDOFF (provider did not book)
+  [BookingState.BOOKING_EXECUTION_REQUESTED]: [BookingState.BOOKING_IN_PROGRESS, BookingState.BOOKING_FAILED, BookingState.IRCTC_HANDOFF_READY],
+  [BookingState.BOOKING_IN_PROGRESS]: [BookingState.BOOKING_CONFIRMED, BookingState.BOOKING_FAILED, BookingState.BOOKING_STATUS_UNKNOWN, BookingState.IRCTC_HANDOFF_READY],
+  // Prompt 13: only reconciliation (authoritative provider status) leaves UNKNOWN
+  [BookingState.BOOKING_STATUS_UNKNOWN]: [BookingState.BOOKING_CONFIRMED, BookingState.BOOKING_FAILED, BookingState.BOOKING_IN_PROGRESS],
+  // Prompt 13: explicit user retry after an AUTHORITATIVE failure → fresh data + new review/confirmation/handoff
+  [BookingState.BOOKING_FAILED]: [BookingState.PASSENGERS_READY, BookingState.COLLECTING_PASSENGER_DETAILS]
 });
 
 /**
@@ -137,7 +146,8 @@ export const VALID_BOOKING_TRANSITIONS: Record<BookingState, BookingState[]> = {
   [BookingState.BOOKING_EXECUTION_REQUESTED]: [],
   [BookingState.BOOKING_IN_PROGRESS]: [],
   [BookingState.BOOKING_CONFIRMED]: [],
-  [BookingState.BOOKING_FAILED]: []
+  [BookingState.BOOKING_FAILED]: [],
+  [BookingState.BOOKING_STATUS_UNKNOWN]: []
 };
 
 // Backwards compatible alias

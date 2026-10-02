@@ -53,7 +53,7 @@ async function freshHandoff(): Promise<string> {
   const sid = state.createSession().sessionId;
   for (const t of ['Amritsar se Delhi kal 2 log', '12497', 'CC', 'Rahul Sharma 31 male, Neha Sharma 28 female', 'haan book karo']) await orch.processTurn(sid, t, 'TEXT');
   expect(S(sid).bookingState).toBe(BookingState.IRCTC_HANDOFF_READY);
-  expect(S(sid).bookingExecution).toMatchObject({ status: 'DISABLED', code: 'BOOKING_EXECUTION_DISABLED', submitted: false });
+  expect(S(sid).bookingExecution).toMatchObject({ status: 'NOT_STARTED', code: 'BOOKING_EXECUTION_DISABLED', submitted: false });
   S(sid).bookingExecution = undefined;
   return sid;
 }
@@ -197,7 +197,7 @@ describe('P12 G2 — request, idempotency, lock, execution service', () => {
     const c = ctx();
     const o = await svc.execute(sid, c);
     expect(o).toMatchObject({ code: 'BOOKING_EXECUTION_DISABLED', providerCalled: false, duplicate: false });
-    expect(o.record).toMatchObject({ status: 'DISABLED', providerName: 'disabled', submitted: false });
+    expect(o.record).toMatchObject({ status: 'NOT_STARTED', providerName: 'disabled', submitted: false });   // P13: lifecycle status
     expect(c.emit.mock.calls.map((x: any) => x[0])).toEqual(['BOOKING_PROVIDER_SELECTED', 'BOOKING_PROVIDER_UNAVAILABLE']);
     expect(S(sid).bookingState).toBe(BookingState.IRCTC_HANDOFF_READY);
     expect(S(sid).handoffSession.status).toBe('READY');
@@ -215,7 +215,7 @@ describe('P12 G2 — request, idempotency, lock, execution service', () => {
     expect(o1.code).toBe('BOOKING_CONFIRMED');
     expect(p.lastRequest.idempotencyKey).toBe(S(sid).handoffSession.idempotencyKey);
     const o2 = await svc.execute(sid, ctx('rq-b'));
-    expect(o2).toMatchObject({ code: 'BOOKING_EXECUTION_DUPLICATE', duplicate: true, providerCalled: false });
+    expect(o2).toMatchObject({ code: 'EXECUTION_ALREADY_CONFIRMED', duplicate: true, providerCalled: false });   // P13
     expect(o2.record!.bookingExecutionId).toBe(o1.record!.bookingExecutionId);
     expect(p.calls).toBe(1);
     const sid2 = await freshHandoff();
@@ -232,14 +232,14 @@ describe('P12 G2 — request, idempotency, lock, execution service', () => {
     await new Promise(r => setTimeout(r, 5));
     expect(svc.isLocked(sid, S(sid).handoff.snapshot.handoffId)).toBe(true);
     const [b, c] = await Promise.all([svc.execute(sid, ctx('rq-2')), svc.execute(sid, ctx('rq-3'))]);
-    expect(b).toMatchObject({ code: 'BOOKING_EXECUTION_LOCKED', providerCalled: false });
-    expect(c).toMatchObject({ code: 'BOOKING_EXECUTION_LOCKED', providerCalled: false });
-    expect(S(sid).bookingState).toBe(BookingState.BOOKING_EXECUTION_REQUESTED);
+    expect(b).toMatchObject({ code: 'EXECUTION_LOCKED', providerCalled: false });
+    expect(c).toMatchObject({ code: 'EXECUTION_LOCKED', providerCalled: false });
+    expect(S(sid).bookingState).toBe(BookingState.BOOKING_IN_PROGRESS);   // P13: REQUESTED → IN_PROGRESS before the call
     release({ status: 'CONFIRMED', providerReference: 'REF-9', pnr: '2212345678' });
     expect((await first).code).toBe('BOOKING_CONFIRMED');
-    expect((await svc.execute(sid, ctx('rq-4'))).code).toBe('BOOKING_EXECUTION_DUPLICATE');
+    expect((await svc.execute(sid, ctx('rq-4'))).code).toBe('EXECUTION_ALREADY_CONFIRMED');
     expect(p.calls).toBe(1);
-    expect(svc.executionLog(sid).map(l => l.code)).toEqual(['BOOKING_EXECUTION_LOCKED', 'BOOKING_EXECUTION_LOCKED', 'BOOKING_CONFIRMED', 'BOOKING_EXECUTION_DUPLICATE']);
+    expect(svc.executionLog(sid).map(l => l.code)).toEqual(['EXECUTION_LOCKED', 'EXECUTION_LOCKED', 'BOOKING_CONFIRMED', 'EXECUTION_ALREADY_CONFIRMED']);
   });
   it('[12] execution states: generic path still locked; provider path needs a matching record and CONFIRMED evidence', async () => {
     for (const to of [BookingState.BOOKING_EXECUTION_REQUESTED, BookingState.BOOKING_IN_PROGRESS, BookingState.BOOKING_CONFIRMED, BookingState.BOOKING_FAILED]) {
@@ -250,7 +250,7 @@ describe('P12 G2 — request, idempotency, lock, execution service', () => {
     expect(EXECUTION_TRANSITIONS[BookingState.BOOKING_CONFIRMED]).toBeUndefined();          // terminal
     const sid = await freshHandoff();
     expect(state.applyProviderExecutionState(sid, BookingState.BOOKING_EXECUTION_REQUESTED, { bookingExecutionId: 'bx_forged', providerName: 'x' }).ok).toBe(false);
-    S(sid).bookingExecution = { bookingExecutionId: 'bx_1', providerName: 'test', status: 'SUBMITTING' };
+    S(sid).bookingExecution = { bookingExecutionId: 'bx_1', providerName: 'test', status: 'REQUESTED' };
     expect(state.applyProviderExecutionState(sid, BookingState.BOOKING_EXECUTION_REQUESTED, { bookingExecutionId: 'bx_1', providerName: 'test' }).ok).toBe(true);
     expect(state.applyProviderExecutionState(sid, BookingState.BOOKING_CONFIRMED, { bookingExecutionId: 'bx_1', providerName: 'test', providerStatus: 'ACCEPTED' }).ok).toBe(false);
     expect(state.tryTransition(sid, BookingState.REVIEW).ok).toBe(false);                    // no rewind out of execution

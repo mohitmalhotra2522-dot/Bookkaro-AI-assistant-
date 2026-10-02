@@ -179,7 +179,11 @@ export class BookingPreparationService {
    */
   syncHandoff(sessionId: string, ctx: PrepCtx): { notes: string[]; error?: OrchestratorError } {
     const s = this.state.getSession(sessionId);
-    if (EXECUTION_LOCKED_STATES.has(s.bookingState)) return { notes: [] };   // submitted to a provider — record is authoritative
+    if (EXECUTION_LOCKED_STATES.has(s.bookingState)) {
+      // submitted to a provider — record is authoritative; only the lazy TTL check runs (no polling)
+      this.gateway.bookingProviders.refreshStaleness(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'TURN', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
+      return { notes: [] };
+    }
     const now = this.clock();
     let c = this.gateway.handoffs.check(s, now);
     const hc = this.handoffSessions.check(s, now);
@@ -256,6 +260,42 @@ export class BookingPreparationService {
     const px = await this.gateway.executeBooking(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'API', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
     ctx.cards.push({ type: 'booking_execution', data: this.executionCard(px) });
     return px;
+  }
+
+  /** Prompt 13: explicit, bounded provider status verification (never a resubmission). */
+  async reconcileExecution(sessionId: string, ctx: PrepCtx): Promise<ProviderExecutionOutcome> {
+    const px = await this.gateway.bookingProviders.reconcile(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'STATUS_CHECK', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
+    ctx.cards.push({ type: 'booking_execution', data: this.executionCard(px) });
+    return px;
+  }
+
+  /**
+   * Prompt 13: explicit user retry after an AUTHORITATIVE provider failure. Nothing from the
+   * failed attempt is reused: handoff + confirmation + review are invalidated, availability
+   * and fare are dropped (fresh data mandatory), and a NEW review → NEW confirmation → NEW
+   * handoff (new idempotency key) is required before anything can reach a provider again.
+   */
+  async retryAfterFailure(sessionId: string, ctx: PrepCtx, runTools: RunRequiredTools): Promise<PrepOutcome | undefined> {
+    const s = this.state.getSession(sessionId);
+    const rec = s.bookingExecution;
+    if (s.bookingState !== BookingState.BOOKING_FAILED || !rec || (rec.status !== 'FAILED' && rec.status !== 'CANCELLED')) return undefined;
+    const target = passengerCollection.allComplete(s) ? BookingState.PASSENGERS_READY : BookingState.COLLECTING_PASSENGER_DETAILS;
+    if (!this.gateway.bookingProviders.lifecycle.leaveFailedForRetry(s, target)) return undefined;
+    this.invalidateHandoff(sessionId, ctx, 'INVALIDATED', 'RETRY_AFTER_FAILURE');
+    if (s.review?.valid) { s.review.valid = false; s.review.invalidatedReason = 'RETRY_AFTER_FAILURE'; }
+    s.confirmedReviewVersion = undefined;
+    s.reviewConfirmed = false;
+    s.irctcHandoffReady = false;
+    this.state.invalidate(sessionId, 'CLASS');                 // fresh availability + fare are mandatory
+    transitionLifecycle(s, 'PREPARING', 'RETRY_AFTER_FAILURE', new Date(this.clock()).toISOString());
+    this.emit(sessionId, ctx, 'BOOKING_RETRY_AFTER_FAILURE', { previousExecutionId: rec.bookingExecutionId, previousStatus: rec.status });
+    ctx.changes.push('retry:after_failure');
+    return this.advance(sessionId, ctx, runTools, {});
+  }
+
+  bookingHistory(sessionId: string) {
+    this.gateway.bookingProviders.refreshStaleness(sessionId, { requestId: 'history', source: 'API', turnId: 'history' });
+    return this.gateway.bookingProviders.history(sessionId);
   }
 
   private executionCard(px: ProviderExecutionOutcome) {

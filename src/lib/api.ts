@@ -46,6 +46,8 @@ export interface BookingProviderView {
 export interface BookingExecutionView {
   bookingExecutionId: string; providerName: string; status: string; code: string; providerStatus?: string;
   providerReference?: string; pnr?: string; failureCode?: string; submitted: boolean; retryBlocked: boolean; updatedAt: string;
+  createdAt?: string; startedAt?: string | null; completedAt?: string | null; lastCheckedAt?: string | null;
+  attemptCount?: number; reconciliationAttempts?: number; unresolved?: boolean; manualVerificationRequired?: boolean;
 }
 
 export interface ExecuteBookingResponse {
@@ -56,6 +58,16 @@ export interface ExecuteBookingResponse {
 /** Explicit execution request via the gateway → provider registry. Disabled provider in this build: nothing is booked. */
 export async function executeBooking(sessionId: string): Promise<ExecuteBookingResponse> {
   const res = await fetch('/api/booking/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId })
+  });
+  return res.json();
+}
+
+/** Prompt 13: explicit booking status verification (bounded provider status lookup — never a new booking). */
+export async function reconcileBooking(sessionId: string): Promise<{ code: string; message: string; providerCalled: boolean; manualVerificationRequired: boolean; state: string; bookingExecution: BookingExecutionView | null; cards: Array<{ type: string; data: any }> }> {
+  const res = await fetch('/api/booking/reconcile', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionId })

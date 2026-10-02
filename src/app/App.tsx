@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useChatStore } from '../state/chatStore';
-import { createSession, sendMessage, executeBooking } from '../lib/api';
+import { createSession, sendMessage, executeBooking, reconcileBooking } from '../lib/api';
 import { useVoice } from '../voice/useVoice';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { MicButton } from '../components/voice/MicButton';
@@ -86,6 +86,18 @@ const App: React.FC = () => {
       (r.cards || []).forEach((card: any) => addCard(card));
     } catch (e: any) {
       setError(e.message || 'Handoff status check nahi ho paaya.');
+    }
+  }, [sessionId, addMessage, addCard, setError]);
+
+  /** Prompt 13: explicit status verification — provider status lookup only, never a new booking. */
+  const runReconcile = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      const r = await reconcileBooking(sessionId);
+      addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: r.message, timestamp: Date.now() });
+      (r.cards || []).forEach((card: any) => addCard(card));
+    } catch (e: any) {
+      setError(e.message || 'Booking status verify nahi ho paaya.');
     }
   }, [sessionId, addMessage, addCard, setError]);
 
@@ -221,7 +233,16 @@ const App: React.FC = () => {
               );
             }
             const d: any = msg.cardData;
-            if (msg.cardType === ('booking_execution' as any)) return chip(d.execution?.status === 'CONFIRMED' ? '#e8f5e9' : '#eceff1', '#37474f', <>🔒 Booking provider <b>{d.execution?.providerName || d.provider?.providerName}</b>: <b>{d.code}</b>{d.duplicate ? ' · duplicate (no new request)' : ''}{d.execution?.status === 'CONFIRMED' && d.execution?.pnr ? <> · PNR <b>{d.execution.pnr}</b></> : ''}{d.manualVerificationRequired ? ' · manual provider verification required' : ''}</>, msg.id);
+            if (msg.cardType === ('booking_execution' as any)) return (
+              <div key={msg.id}>
+                {chip(d.execution?.status === 'CONFIRMED' ? '#e8f5e9' : d.execution?.unresolved ? '#fff8e1' : '#eceff1', '#37474f', <>🔒 Booking provider <b>{d.execution?.providerName || d.provider?.providerName}</b>: <b>{d.execution?.status || d.code}</b>{d.duplicate ? ' · duplicate (no new request)' : ''}{d.execution?.status === 'CONFIRMED' && d.execution?.pnr ? <> · PNR <b>{d.execution.pnr}</b></> : ''}{d.manualVerificationRequired ? ' · manual provider verification required' : ''}{d.execution?.reconciliationAttempts ? ` · status checks: ${d.execution.reconciliationAttempts}` : ''}</>, msg.id + '-c')}
+                {d.execution?.unresolved && (
+                  <div style={{ margin: '0 16px 8px' }}>
+                    <button onClick={runReconcile} style={{ fontSize: 12, padding: '6px 12px', borderRadius: 16, border: '1px solid #f9a825', background: '#fffde7', color: '#5d4037', cursor: 'pointer' }}>Status verify karein</button>
+                  </div>
+                )}
+              </div>
+            );
             if (msg.cardType === ('handoff_consume' as any)) return chip('#eceff1', '#37474f', <>🔒 Handoff execution: <b>{d.code}</b>{d.duplicate ? ' · duplicate (no new attempt)' : ''} · executor {d.executorName || 'none'} ({d.executorEnabled ? 'enabled' : 'disabled'}) · real booking: no</>, msg.id);
             if (msg.cardType === ('handoff_status' as any)) return chip('#fff3e0', '#e65100', <>⚠️ Handoff {d.handoffId} <b>{d.status}</b> ({d.reason}) — naya review confirm karna hoga</>, msg.id);
             if (msg.cardType === ('selected_train' as any)) return chip('#e3f2fd', '#0d47a1', <>🚆 Selected: <b>{d.trainNumber}</b> {d.trainName}</>, msg.id);

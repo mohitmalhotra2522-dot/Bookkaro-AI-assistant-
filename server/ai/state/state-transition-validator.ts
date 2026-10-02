@@ -38,6 +38,7 @@ export const STATE_ORDER: BookingState[] = [
   BookingState.BOOKING_EXECUTION_REQUESTED,
   BookingState.BOOKING_IN_PROGRESS,
   BookingState.BOOKING_CONFIRMED,
+  BookingState.BOOKING_STATUS_UNKNOWN,
   BookingState.BOOKING_FAILED
 ];
 
