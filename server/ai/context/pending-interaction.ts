@@ -16,6 +16,10 @@ export function derivePendingInteraction(s: BookingSession): PendingInteraction 
   switch (s.bookingState) {
     case BookingState.IRCTC_HANDOFF_READY:
     case BookingState.COMPLETE:
+    case BookingState.BOOKING_EXECUTION_REQUESTED:   // provider-owned states: nothing to ask
+    case BookingState.BOOKING_IN_PROGRESS:
+    case BookingState.BOOKING_CONFIRMED:
+    case BookingState.BOOKING_FAILED:
       return { type: 'NONE' };
     case BookingState.AWAITING_CONFIRMATION:
       return { type: 'CONFIRMATION_REQUIRED', data: { reviewVersion: s.review?.reviewVersion } };

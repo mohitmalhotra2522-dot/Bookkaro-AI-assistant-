@@ -17,7 +17,8 @@
  * + class and then run CHECK_AVAILABILITY in the same turn.
  */
 import { classifyConfirmation, AMBIGUOUS_CONFIRMATION_PROMPT } from '../../booking/handoff/confirmation-policy';
-import { BookingState } from '@shared/states';
+import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
+import { messageForRecord, SUBMITTING_MESSAGE } from '../../booking/provider/booking-provider-execution-service';
 import type { BookingSession, PendingInteraction, BookingEventType } from '@shared/entities';
 import type { AgentDecision, OrchestratorError, OrchestratorErrorCode } from '../decisions/agent-decision';
 import type { ConversationStateManager } from '../state/conversation-state';
@@ -88,7 +89,22 @@ export class ContextualTurnApplier {
     //    confirmation ONLY when state === AWAITING_CONFIRMATION and
     //    pendingInteraction === CONFIRMATION_REQUIRED. Version + freshness checks
     //    and the IRCTC_HANDOFF_READY transition are done by BookingPreparationService.
+    // Prompt 12: once a booking provider owns the session (execution states), the
+    // conversation can neither change booking details nor trigger anything — every turn
+    // only reports the normalized provider record. Booking is never an LLM action.
+    if (EXECUTION_LOCKED_STATES.has(S().bookingState)) {
+      const rec = S().bookingExecution;
+      const msg = rec ? messageForRecord(rec) : SUBMITTING_MESSAGE;
+      out.applied.push('BOOKING_EXECUTION_LOCKED');
+      return fail('BOOKING_EXECUTION_LOCKED', this.hasSubstantiveEntities(e) ? `${msg} Booking request provider ko bheji ja chuki hai — ab details change nahi ho sakti.` : msg);
+    }
     if (S().bookingState === BookingState.IRCTC_HANDOFF_READY && (e.executionRequested || e.affirmation || d.intent === 'CONFIRM_BOOKING')) {
+      const rec = S().bookingExecution;
+      if (rec?.submitted && rec.handoffId === S().handoff?.snapshot.handoffId) {
+        // this handoff already went to a provider (e.g. external handoff required) — never resubmitted
+        const o = fail('BOOKING_EXECUTION_DUPLICATE', messageForRecord(rec));
+        return { ...o, duplicateConfirmation: !e.executionRequested };
+      }
       const o = fail('BOOKING_EXECUTION_DISABLED', 'Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai — main ticket book, IRCTC login, submission ya payment nahi kar sakta.');
       return { ...o, duplicateConfirmation: !e.executionRequested };
     }

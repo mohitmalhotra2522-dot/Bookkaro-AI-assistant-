@@ -91,7 +91,7 @@ describe('G3 — confirmation → handoff → handoff session → disabled adapt
     await toAwaiting(sid);
     const r = await say(sid, 'haan book karo');
     expect(r.events).toEqual(['BOOKING_CONFIRMATION_REQUESTED', 'BOOKING_CONFIRMATION_CREATED', 'BOOKING_EXECUTION_REQUESTED', 'BOOKING_HANDOFF_CREATED',
-      'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'BOOKING_HANDOFF_SESSION_CREATED', 'IRCTC_HANDOFF_READY']);
+      'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'BOOKING_HANDOFF_SESSION_CREATED', 'IRCTC_HANDOFF_READY', 'BOOKING_PROVIDER_SELECTED', 'BOOKING_PROVIDER_UNAVAILABLE']);
     expect(r.responseMessage).toContain('Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai.');
     expect(r.responseMessage).not.toMatch(FAKE_SUCCESS);
     expect(r.responseMessage).not.toMatch(/Ticket booked|PNR generated|Booking confirmed/i);
@@ -364,7 +364,7 @@ describe('G3 — safety: no credentials / OTP / CAPTCHA / payment / PNR / fake s
     const r = await say(sid, 'haan book karo', 'VOICE');
     expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
     expect(r.events).toEqual(['BOOKING_CONFIRMATION_REQUESTED', 'BOOKING_CONFIRMATION_CREATED', 'BOOKING_EXECUTION_REQUESTED', 'BOOKING_HANDOFF_CREATED',
-      'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'BOOKING_HANDOFF_SESSION_CREATED', 'IRCTC_HANDOFF_READY']);
+      'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'BOOKING_HANDOFF_SESSION_CREATED', 'IRCTC_HANDOFF_READY', 'BOOKING_PROVIDER_SELECTED', 'BOOKING_PROVIDER_UNAVAILABLE']);
     expect(r.responseMessage).toContain(HANDOFF_READY_MESSAGE);
     expect(r.responseMessage.length).toBeLessThan(160);
     expect(S(sid).handoffSession).toMatchObject({ status: 'READY', executorCapability: { enabled: false } });

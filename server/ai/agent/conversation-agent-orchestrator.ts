@@ -16,6 +16,8 @@
  * requestVersion). Writes from an obsolete request are rejected
  * (STALE_TOOL_RESULT) and the obsolete loop stops.
  */
+import type { BookingProviderRegistry } from '../../booking/provider/booking-provider-registry';
+import type { BookingProviderConfig } from '../../booking/provider/booking-provider-config';
 import type { LLMProvider } from '../providers/llm-provider';
 import type { AgentDecision, OrchestratorError, TurnRecord, TurnToolRecord } from '../decisions/agent-decision';
 import { ConversationStateManager } from '../state/conversation-state';
@@ -62,6 +64,9 @@ export interface OrchestratorOptions {
   executionConfig?: ExecutionConfig;
   executorRegistry?: BookingExecutorRegistry;
   executionGateway?: BookingExecutionGateway;
+  /** Prompt 12: booking PROVIDER registry (production: disabled provider only) + server-side config. */
+  bookingProviderRegistry?: BookingProviderRegistry;
+  bookingProviderConfig?: BookingProviderConfig;
   /** Prompt 11: executor ADAPTER registry (production: disabled adapter only). */
   adapterRegistry?: BookingExecutorAdapterRegistry;
   /** Prompt 11: handoff session service override (tests). */
@@ -106,7 +111,7 @@ export class ConversationAgentOrchestrator {
   ) {
     this.runtime = new LLMToolCallingRuntime(llm, tools);
     this.applier = new ContextualTurnApplier(state);
-    this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock });
+    this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock, providerRegistry: options.bookingProviderRegistry, providerConfig: options.bookingProviderConfig });
     this.preparation = new BookingPreparationService(state, {
       policy: options.preparationPolicy, clock: options.clock, gateway: this.gateway,
       handoffSessions: options.handoffSessionService || new BookingHandoffSessionService({ registry: options.adapterRegistry, config: this.gateway.config, clock: options.clock })
@@ -234,7 +239,7 @@ export class ConversationAgentOrchestrator {
         if (st.result.toolName === 'GET_FARE') cards.push({ type: 'fare', data: { ...st.result.data, refreshedForReview: true } });
       }
     } else {
-      if (blockErr.code === 'BOOKING_EXECUTION_DISABLED' && rt.applyOutcomes.some(o => o.duplicateConfirmation)) {
+      if ((blockErr.code === 'BOOKING_EXECUTION_DISABLED' || blockErr.code === 'BOOKING_EXECUTION_DUPLICATE') && rt.applyOutcomes.some(o => o.duplicateConfirmation)) {
         // repeated "haan" after the handoff → gateway idempotency (same handoff, executor not re-invoked)
         dupExecution = await this.preparation.duplicateConfirmation(sessionId, ctx);
       }

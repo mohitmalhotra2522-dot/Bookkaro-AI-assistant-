@@ -67,6 +67,25 @@ export class ConversationStateManager {
     return r;
   }
 
+  /**
+   * Execution-state transition driven by an AUTHORITATIVE provider result (Prompt 12).
+   * Called ONLY by BookingProviderExecutionService; requires provider evidence and is
+   * validated against EXECUTION_TRANSITIONS. The generic paths above can never enter
+   * BOOKING_EXECUTION_REQUESTED / BOOKING_IN_PROGRESS / BOOKING_CONFIRMED / BOOKING_FAILED.
+   */
+  applyProviderExecutionState(sessionId: string, target: BookingState, evidence: { bookingExecutionId: string; providerName: string; providerStatus?: string }): TransitionCheck {
+    const s = this.getSession(sessionId);
+    if (!evidence?.bookingExecutionId || !evidence.providerName || s.bookingExecution?.bookingExecutionId !== evidence.bookingExecutionId) {
+      return { ok: false, code: 'INVALID_STATE_TRANSITION', message: 'Execution transition requires a matching provider execution record.' };
+    }
+    if (target === BookingState.BOOKING_CONFIRMED && evidence.providerStatus !== 'CONFIRMED') {
+      return { ok: false, code: 'INVALID_STATE_TRANSITION', message: 'BOOKING_CONFIRMED requires an authoritative CONFIRMED provider status.' };
+    }
+    const r = stateTransitionValidator.checkExecution(s.bookingState, target);
+    if (r.ok && r.path.length) { s.bookingState = target; this.bump(sessionId); }
+    return r;
+  }
+
   // ---- Versioning / requests / events (Prompt 8) ----
 
   bump(sessionId: string): number {

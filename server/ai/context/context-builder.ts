@@ -36,6 +36,12 @@ export interface LLMContext {
   /** Deterministic summary of compressed older turns (from BookingSession). */
   summary?: string;
   recentMessages: HistoryMsg[];
+  /**
+   * Prompt 12 — normalized, READ-ONLY booking execution summary (status / provider /
+   * failure category / authoritative PNR). The LLM cannot change it and has no tool to
+   * execute bookings. Never contains provider config, URLs, credentials or raw responses.
+   */
+  bookingExecution?: { providerName: string; status: string; code: string; failureCode?: string; providerReference?: string; pnr?: string; retryBlocked: boolean };
 }
 
 export const MAX_RECENT_MESSAGES = 12;
@@ -69,7 +75,14 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
       }))
     },
     summary: compressed ? summarizeFromSession(s) : undefined,
-    recentMessages: recent
+    recentMessages: recent,
+    ...(s.bookingExecution ? { bookingExecution: Object.freeze({
+      providerName: s.bookingExecution.providerName, status: s.bookingExecution.status, code: s.bookingExecution.code,
+      ...(s.bookingExecution.failureCode ? { failureCode: s.bookingExecution.failureCode } : {}),
+      ...(s.bookingExecution.providerReference ? { providerReference: s.bookingExecution.providerReference } : {}),
+      ...(s.bookingExecution.status === 'CONFIRMED' && s.bookingExecution.pnr ? { pnr: s.bookingExecution.pnr } : {}),
+      retryBlocked: s.bookingExecution.retryBlocked
+    }) } : {})
   };
 }
 

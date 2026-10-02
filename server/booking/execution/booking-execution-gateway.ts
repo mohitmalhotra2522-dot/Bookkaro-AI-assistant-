@@ -42,6 +42,9 @@ import { DEFAULT_EXECUTION_CONFIG, type ExecutionConfig } from './execution-conf
 import { findSensitiveKeys } from './execution-request';
 import { transitionLifecycle } from './booking-lifecycle';
 import { validateBookingData } from './booking-data-validator';
+import { BookingProviderExecutionService, type ProviderExecutionContext, type ProviderExecutionOutcome } from '../provider/booking-provider-execution-service';
+import type { BookingProviderRegistry } from '../provider/booking-provider-registry';
+import type { BookingProviderConfig } from '../provider/booking-provider-config';
 
 export interface GatewayContext {
   turnId: string;
@@ -58,6 +61,10 @@ export interface GatewayOptions {
   config?: ExecutionConfig;
   clock?: () => number;
   handoffs?: BookingHandoffService;
+  /** Prompt 12 — booking provider registry (production: disabled provider only). */
+  providerRegistry?: BookingProviderRegistry;
+  /** Prompt 12 — BOOKING_PROVIDER / REAL_BOOKING_ENABLED / timeout (server-side only). */
+  providerConfig?: BookingProviderConfig;
 }
 
 
@@ -65,6 +72,8 @@ export class BookingExecutionGateway {
   readonly registry: BookingExecutorRegistry;
   readonly config: ExecutionConfig;
   readonly handoffs: BookingHandoffService;
+  /** Prompt 12 — the ONLY path to a booking provider (never exposed to the LLM). */
+  readonly bookingProviders: BookingProviderExecutionService;
   private readonly clock: () => number;
   /** Execution policy is STRICTER than the review policy: availability AND fare must be FRESH. */
   private readonly executionReadiness = EXECUTION_READINESS;
@@ -77,6 +86,17 @@ export class BookingExecutionGateway {
     this.config = opts.config || DEFAULT_EXECUTION_CONFIG;
     this.clock = opts.clock || (() => Date.now());
     this.handoffs = opts.handoffs || new BookingHandoffService({ ttlMs: this.config.handoffTtlMs });
+    this.bookingProviders = new BookingProviderExecutionService(state, { registry: opts.providerRegistry, config: opts.providerConfig, clock: this.clock });
+  }
+
+  /**
+   * Prompt 12 — execute the CURRENT validated handoff through the configured booking provider.
+   * Validation, locking, idempotency, provider selection and result normalization are
+   * all inside BookingProviderExecutionService. Disabled provider → BOOKING_EXECUTION_DISABLED,
+   * nothing is sent, IRCTC_HANDOFF_READY stays final.
+   */
+  executeBooking(sessionId: string, ctx: ProviderExecutionContext): Promise<ProviderExecutionOutcome> {
+    return this.bookingProviders.execute(sessionId, ctx);
   }
 
   /** Current capability (no side effects) — for UI / API / logs. */

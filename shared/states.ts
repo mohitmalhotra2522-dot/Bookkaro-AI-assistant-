@@ -30,13 +30,29 @@ export enum BookingState {
   BOOKING_FAILED = 'BOOKING_FAILED'
 }
 
-/** States that can only be entered by a REAL, explicitly enabled executor (none exists). */
+/**
+ * States that can only be entered by the BookingProviderExecutionService on an
+ * AUTHORITATIVE provider response (Prompt 12). The generic transition validator
+ * rejects them for every other caller (LLM decisions, applier, preparation).
+ */
 export const EXECUTION_LOCKED_STATES: ReadonlySet<BookingState> = new Set([
   BookingState.BOOKING_EXECUTION_REQUESTED,
   BookingState.BOOKING_IN_PROGRESS,
   BookingState.BOOKING_CONFIRMED,
   BookingState.BOOKING_FAILED
 ]);
+
+/**
+ * Provider-result-driven execution transitions (Prompt 12) — checked by
+ * StateTransitionValidator.checkExecution(), used ONLY by the provider execution path.
+ * With the provider disabled none of these is ever taken: IRCTC_HANDOFF_READY stays final.
+ */
+export const EXECUTION_TRANSITIONS: Readonly<Partial<Record<BookingState, readonly BookingState[]>>> = Object.freeze({
+  [BookingState.IRCTC_HANDOFF_READY]: [BookingState.BOOKING_EXECUTION_REQUESTED],
+  // back to IRCTC_HANDOFF_READY only when the provider DEFINITELY did not book (external handoff / unavailable)
+  [BookingState.BOOKING_EXECUTION_REQUESTED]: [BookingState.BOOKING_IN_PROGRESS, BookingState.BOOKING_CONFIRMED, BookingState.BOOKING_FAILED, BookingState.IRCTC_HANDOFF_READY],
+  [BookingState.BOOKING_IN_PROGRESS]: [BookingState.BOOKING_CONFIRMED, BookingState.BOOKING_FAILED]
+});
 
 /**
  * Valid state transitions per specification. Any transition not listed is blocked.

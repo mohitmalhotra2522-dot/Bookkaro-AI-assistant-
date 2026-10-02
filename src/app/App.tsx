@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useChatStore } from '../state/chatStore';
-import { createSession, sendMessage, consumeHandoff } from '../lib/api';
+import { createSession, sendMessage, executeBooking } from '../lib/api';
 import { useVoice } from '../voice/useVoice';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { MicButton } from '../components/voice/MicButton';
@@ -77,11 +77,11 @@ const App: React.FC = () => {
     [sessionId, isLoading, addMessage, setLoading, setToolActivity, setContext, addCard, voice, setError, setSessionId]
   );
 
-  /** Explicit, user-initiated handoff consumption — always DISABLED in this build (no booking). */
-  const runConsume = useCallback(async (handoffSessionId: string) => {
-    if (!sessionId || !handoffSessionId) return;
+  /** Explicit, user-initiated execution request (gateway → provider registry). Disabled provider in this build. */
+  const runExecute = useCallback(async () => {
+    if (!sessionId) return;
     try {
-      const r = await consumeHandoff(sessionId, handoffSessionId);
+      const r = await executeBooking(sessionId);
       addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: r.message, timestamp: Date.now() });
       (r.cards || []).forEach((card: any) => addCard(card));
     } catch (e: any) {
@@ -182,9 +182,12 @@ const App: React.FC = () => {
               );
             }
             if (msg.cardType === 'handoff') {
+              const bx: any = msg.cardData.bookingExecution;
+              const ex: any = bx?.execution;
+              const confirmed = ex?.status === 'CONFIRMED';
               return (
                 <div key={msg.id} style={{ margin: '8px 16px', padding: 16, background: '#e8f5e9', borderRadius: 12, textAlign: 'center' }}>
-                  <div style={{ fontWeight: 600, color: '#2e7d32', marginBottom: 6 }}>📝 Booking details ready · real booking disabled (v{msg.cardData.reviewVersion})</div>
+                  <div style={{ fontWeight: 600, color: '#2e7d32', marginBottom: 6 }}>{confirmed ? '✅ Booking provider ne confirm kiya' : ex?.submitted ? `⏳ Booking provider: ${ex.status}` : '📝 Booking details ready · real booking disabled'} (v{msg.cardData.reviewVersion})</div>
                   <div style={{ fontSize: 13, color: '#424242' }}>{msg.cardData.message}</div>
                   {msg.cardData.handoffId && (
                     <div style={{ fontSize: 11, color: '#616161', marginTop: 8, fontFamily: 'monospace' }}>
@@ -199,18 +202,26 @@ const App: React.FC = () => {
                       {' · executor '}{msg.cardData.executorCapability?.executorName} ({msg.cardData.executorCapability?.enabled ? 'enabled' : 'disabled'}, real booking: {msg.cardData.executorCapability?.supportsRealBooking ? 'yes' : 'no'})
                     </div>
                   )}
-                  {msg.cardData.handoffSessionId && (
+                  {bx && (
+                    <div style={{ fontSize: 11, color: '#616161', marginTop: 4, fontFamily: 'monospace' }}>
+                      provider {bx.provider?.providerName} ({bx.provider?.available ? 'available' : 'unavailable'}, health {bx.provider?.health}) · {bx.code}
+                      {ex?.providerReference ? ` · ref ${ex.providerReference}` : ''}
+                    </div>
+                  )}
+                  {confirmed && ex?.pnr && <div style={{ fontSize: 14, fontWeight: 700, color: '#1b5e20', marginTop: 6 }}>PNR {ex.pnr}</div>}
+                  {msg.cardData.handoffSessionId && !ex?.submitted && (
                     <button
-                      onClick={() => runConsume(msg.cardData.handoffSessionId)}
+                      onClick={() => runExecute()}
                       style={{ marginTop: 10, padding: '6px 14px', borderRadius: 8, border: '1px solid #9e9e9e', background: '#fafafa', color: '#616161', fontSize: 12, cursor: 'pointer' }}
                     >
-                      Execute handoff (disabled)
+                      Booking provider status
                     </button>
                   )}
                 </div>
               );
             }
             const d: any = msg.cardData;
+            if (msg.cardType === ('booking_execution' as any)) return chip(d.execution?.status === 'CONFIRMED' ? '#e8f5e9' : '#eceff1', '#37474f', <>🔒 Booking provider <b>{d.execution?.providerName || d.provider?.providerName}</b>: <b>{d.code}</b>{d.duplicate ? ' · duplicate (no new request)' : ''}{d.execution?.status === 'CONFIRMED' && d.execution?.pnr ? <> · PNR <b>{d.execution.pnr}</b></> : ''}{d.manualVerificationRequired ? ' · manual provider verification required' : ''}</>, msg.id);
             if (msg.cardType === ('handoff_consume' as any)) return chip('#eceff1', '#37474f', <>🔒 Handoff execution: <b>{d.code}</b>{d.duplicate ? ' · duplicate (no new attempt)' : ''} · executor {d.executorName || 'none'} ({d.executorEnabled ? 'enabled' : 'disabled'}) · real booking: no</>, msg.id);
             if (msg.cardType === ('handoff_status' as any)) return chip('#fff3e0', '#e65100', <>⚠️ Handoff {d.handoffId} <b>{d.status}</b> ({d.reason}) — naya review confirm karna hoga</>, msg.id);
             if (msg.cardType === ('selected_train' as any)) return chip('#e3f2fd', '#0d47a1', <>🚆 Selected: <b>{d.trainNumber}</b> {d.trainName}</>, msg.id);

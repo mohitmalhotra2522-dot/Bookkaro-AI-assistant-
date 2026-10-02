@@ -1,3 +1,4 @@
+import type { BookingExecutionRecord } from './booking-provider';
 import type { BookingHandoffRecord, BookingLifecycleRecord, ExecutionAttemptRecord, HandoffStatus } from './booking-execution';
 import type { BookingConfirmation, BookingHandoffSession, HandoffSessionStatus } from './booking-handoff-session';
 /**
@@ -213,6 +214,12 @@ export interface BookingSession {
   handoffSession?: BookingHandoffSession;
   /** Status history of handoff sessions (snapshots never mutated). */
   handoffSessionHistory?: Array<{ handoffSessionId: string; bookingHandoffId: string; status: HandoffSessionStatus; statusReason?: string; at: string }>;
+
+  // ---- Booking provider execution (Prompt 12) — normalized records only ----
+  /** Execution record for the CURRENT handoff (provider status / reference / authoritative PNR). */
+  bookingExecution?: BookingExecutionRecord;
+  /** Earlier execution records (one per handoff). */
+  bookingExecutionHistory?: BookingExecutionRecord[];
 }
 
 /** Provenance attached to every provider result synced into the session. */
@@ -324,7 +331,16 @@ export type BookingEventType =
   | 'BOOKING_CONFIRMATION_CREATED'
   | 'BOOKING_CONFIRMATION_INVALIDATED'
   | 'BOOKING_HANDOFF_SESSION_CREATED'
-  | 'BOOKING_HANDOFF_EXECUTION_REQUESTED';
+  | 'BOOKING_HANDOFF_EXECUTION_REQUESTED'
+  // ---- Prompt 12: booking provider boundary ----
+  | 'BOOKING_PROVIDER_SELECTED'
+  | 'BOOKING_EXECUTION_STARTED'
+  | 'BOOKING_PROVIDER_RESPONSE_RECEIVED'
+  | 'BOOKING_CONFIRMED'
+  | 'BOOKING_FAILED'
+  | 'BOOKING_PROVIDER_UNAVAILABLE'
+  | 'BOOKING_STATUS_UNKNOWN'
+  | 'BOOKING_REQUIRES_EXTERNAL_HANDOFF';
 
 export interface BookingEvent {
   type: BookingEventType;

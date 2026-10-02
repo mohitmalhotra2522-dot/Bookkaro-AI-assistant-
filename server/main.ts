@@ -12,6 +12,9 @@ import { createProductionAdapterRegistry } from './booking/handoff/booking-execu
 import { checkNoSensitiveData } from './booking/handoff/sensitive-data-guard';
 import { HANDOFF_READY_MESSAGE } from './booking/booking-preparation-service';
 import { randomUUID } from 'crypto';
+import { parseBookingProviderConfig } from './booking/provider/booking-provider-config';
+import { createProductionBookingProviderRegistry } from './booking/provider/booking-provider-registry';
+import { bookingExecutionView } from './booking/provider/booking-provider-execution-service';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider)
 const llmProvider = new MockLLMProvider();
@@ -24,7 +27,11 @@ const executionConfig = parseExecutionConfig(process.env);
 const orchestrator = new ConversationAgentOrchestrator(llmProvider, stateManager, railwayTools, {
   executionConfig, executorRegistry: createProductionExecutorRegistry(),
   // Prompt 11: executor ADAPTER registry — production contains ONLY DisabledBookingExecutorAdapter.
-  adapterRegistry: createProductionAdapterRegistry()
+  adapterRegistry: createProductionAdapterRegistry(),
+  // Prompt 12: booking PROVIDER registry — production contains ONLY DisabledBookingProvider.
+  // BOOKING_PROVIDER defaults to "disabled"; unknown names fail closed (no fallback).
+  bookingProviderRegistry: createProductionBookingProviderRegistry(),
+  bookingProviderConfig: parseBookingProviderConfig(process.env)
 });
 const executionCapability = () => orchestrator.gateway.capability();
 const executorCapability = () => orchestrator.preparation.handoffSessions.capability();
@@ -34,6 +41,11 @@ const handoffSessionView = (hs: any) => hs ? {
   reviewVersion: hs.reviewVersion, sessionVersion: hs.sessionVersion, createdAt: hs.createdAt, expiresAt: hs.expiresAt,
   executorCapability: hs.executorCapability, executionAttempts: hs.executionAttempts, lastConsumeResult: hs.lastConsumeResult ?? null
 } : null;
+/** Safe provider status for clients: name + honest capabilities only (no baseUrl / config internals). */
+const bookingProviderView = () => {
+  const p = orchestrator.gateway.bookingProviders.providerStatus();
+  return { configured: p.configured, effective: p.effective, enabled: p.enabled, resolved: p.resolved, code: p.code ?? null, capabilities: p.capabilities };
+};
 const confirmationView = (c: any) => c ? { status: c.status, reviewVersion: c.reviewVersion, sessionVersion: c.sessionVersion, confirmedAt: c.confirmedAt, statusReason: c.statusReason ?? null } : null;
 
 const server = Fastify({ logger: false });
@@ -78,6 +90,8 @@ server.post('/api/chat', async (request, reply) => {
     handoffSession: handoffSessionView(ctx.handoffSession),
     confirmation: confirmationView(ctx.confirmation),
     executorCapability: executorCapability(),
+    bookingProvider: bookingProviderView(),
+    bookingExecution: bookingExecutionView(ctx.bookingExecution) ?? null,
     error: result.error ? { code: result.error.code, message: result.error.message } : null,
     events: result.events,
     cards: result.cards || [],
@@ -110,6 +124,30 @@ server.post('/api/handoff/consume', async (request, reply) => {
     handoffSession: handoffSessionView(s.handoffSession), executorCapability: executorCapability(), realBooking: false, cards });
 });
 
+/**
+ * Explicit booking execution request (Prompt 12) — BookingExecutionGateway →
+ * BookingProviderRegistry → provider. Same validation/lock/idempotency as the confirmation
+ * turn; duplicates return the existing record. With the production registry (disabled
+ * provider) nothing is sent: BOOKING_EXECUTION_DISABLED / BOOKING_PROVIDER_UNAVAILABLE.
+ * Credential-like fields in the body are rejected. NOT an LLM tool.
+ */
+server.post('/api/booking/execute', async (request, reply) => {
+  const body = (request.body as any) || {};
+  const sens = checkNoSensitiveData(body);
+  if (!sens.ok) return reply.status(400).send({ code: 'SENSITIVE_DATA_REJECTED', message: 'Password, OTP, CAPTCHA, card/UPI/bank details ya tokens yahan accept nahi kiye jaate.' });
+  const { sessionId } = body;
+  if (!sessionId || typeof sessionId !== 'string' || !stateManager.hasSession(sessionId)) return reply.status(404).send({ code: 'HANDOFF_NOT_FOUND', message: 'Session nahi mila.' });
+  const cards: any[] = [];
+  const events: string[] = [];
+  const px = await orchestrator.preparation.executeBookingProvider(sessionId, { turnId: `execute-${randomUUID()}`, mode: 'TEXT', cards, events, changes: [], requestId: randomUUID() });
+  const s = stateManager.getSession(sessionId);
+  return reply.send({
+    code: px.code, message: px.message, duplicate: px.duplicate, providerCalled: px.providerCalled, retryBlocked: px.retryBlocked,
+    manualVerificationRequired: px.manualVerificationRequired, state: s.bookingState, sessionVersion: s.sessionVersion,
+    bookingExecution: bookingExecutionView(s.bookingExecution) ?? null, bookingProvider: bookingProviderView(), events, cards
+  });
+});
+
 /** Structured, redacted turn history (observability; no secrets are ever stored). */
 server.get('/api/session/:id/turns', async (request, reply) => {
   const { id } = request.params as any;
@@ -127,9 +165,11 @@ server.get('/api/health', async (_, reply) => {
     ok: true,
     provider: railwayRegistry.getActiveId(),
     providerLabel: railwayRegistry.getActive().label,
-    orchestrator: 'ConversationAgentOrchestrator.v5 (Prompt 11 secure handoff session)',
+    orchestrator: 'ConversationAgentOrchestrator.v6 (Prompt 12 booking provider boundary)',
     executionCapability: executionCapability(),
-    executorCapability: executorCapability()
+    executorCapability: executorCapability(),
+    // static capability only — no live health check, never reported "healthy" without one
+    bookingProvider: bookingProviderView()
   });
 });
 
@@ -138,4 +178,5 @@ await server.listen({ port: PORT, host: '0.0.0.0' });
 console.log(`Railway AI Assistant server running on http://localhost:${PORT}`);
 console.log(`Active railway provider: ${railwayRegistry.getActiveId()} (${railwayRegistry.getActive().label})`);
 console.log(`Active LLM provider: mock-llm (deterministic tool-calling agent)`);
+console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

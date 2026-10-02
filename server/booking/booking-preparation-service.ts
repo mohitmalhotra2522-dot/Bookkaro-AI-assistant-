@@ -11,7 +11,7 @@
  * version reviews, guard confirmation. It NEVER books, logs in, submits,
  * pays, requests OTP/CAPTCHA or produces a PNR.
  */
-import { BookingState } from '@shared/states';
+import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import type { BookingSession, BookingEventType, PendingInteraction } from '@shared/entities';
 import type { ConversationStateManager } from '../ai/state/conversation-state';
 import type { OrchestratorError } from '../ai/decisions/agent-decision';
@@ -28,6 +28,7 @@ import { buildExecutionRequest } from './execution/execution-request';
 import { transitionLifecycle } from './execution/booking-lifecycle';
 import { BookingConfirmationService } from './handoff/booking-confirmation';
 import { BookingHandoffSessionService, type ConsumeHandoffOutcome } from './handoff/booking-handoff-session-service';
+import { EXECUTION_DISABLED_MESSAGE, NOTHING_SUBMITTED, bookingExecutionView, type ProviderExecutionOutcome } from './provider/booking-provider-execution-service';
 
 export interface PrepCtx {
   turnId: string;
@@ -50,6 +51,8 @@ export interface PrepOutcome {
   pendingOverride?: PendingInteraction;
   /** Execution-gateway log line for this turn (PII-free). */
   execution?: ExecutionLogRecord;
+  /** Prompt 12 — normalized booking-provider outcome for this turn. */
+  providerExecution?: ProviderExecutionOutcome;
 }
 
 export interface PrepOptions {
@@ -64,7 +67,7 @@ export interface PrepOptions {
 const idx = (s: BookingState) => STATE_ORDER.indexOf(s);
 const FP_PARTS = ['origin', 'destination', 'date', 'train', 'class', 'passengersCount', 'passengers', 'availability', 'fare'];
 
-export const HANDOFF_READY_MESSAGE = 'Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai.';
+export const HANDOFF_READY_MESSAGE = EXECUTION_DISABLED_MESSAGE;   // 'Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai.'
 export const HANDOFF_DUPLICATE_MESSAGE = 'Ye booking pehle hi confirm ho chuki hai — wahi booking handoff ready hai, naya handoff nahi banaya.';
 export const HANDOFF_EXPIRED_MESSAGE = 'Pichla booking handoff expire ho gaya. Fresh availability aur fare check karke naya review bana raha hoon.';
 export const HANDOFF_INVALIDATED_MESSAGE = 'Booking details badalne se pichla handoff cancel ho gaya — naya review confirm karna hoga.';
@@ -116,6 +119,7 @@ export class BookingPreparationService {
     const s = this.state.getSession(sessionId);
     const rv = s.review;
     if (!rv || !rv.valid) return false;
+    if (EXECUTION_LOCKED_STATES.has(s.bookingState)) return false;   // provider owns the session now
     const fp = reviewFingerprint(s);
     if (fp === rv.fingerprint) return false;
     let changed: string[] = [];
@@ -175,6 +179,7 @@ export class BookingPreparationService {
    */
   syncHandoff(sessionId: string, ctx: PrepCtx): { notes: string[]; error?: OrchestratorError } {
     const s = this.state.getSession(sessionId);
+    if (EXECUTION_LOCKED_STATES.has(s.bookingState)) return { notes: [] };   // submitted to a provider — record is authoritative
     const now = this.clock();
     let c = this.gateway.handoffs.check(s, now);
     const hc = this.handoffSessions.check(s, now);
@@ -220,7 +225,11 @@ export class BookingPreparationService {
     if (g.ok) {
       // resolves against the EXISTING READY handoff session — no new confirmation / session / attempt
       const hs = this.handoffSessions.create(this.state.getSession(sessionId), { requestId: ctx.requestId, emit: (t, d) => this.emit(sessionId, ctx, t, d) });
-      if (hs.ok) ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, true) });
+      if (hs.ok) {
+        // Prompt 12: same handoff → provider execution lock / existing record (never a second submission)
+        const px = await this.gateway.executeBooking(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'DUPLICATE_CONFIRM', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
+        ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, true, px) });
+      }
     }
     return g.log;
   }
@@ -238,13 +247,32 @@ export class BookingPreparationService {
     return r;
   }
 
+  /**
+   * Prompt 12 — explicit execution request for the CURRENT handoff (POST /api/booking/execute).
+   * Same gateway path as the confirmation turn: lock → validation → registry → provider.
+   * Duplicate / concurrent requests return the existing record. Never an LLM action.
+   */
+  async executeBookingProvider(sessionId: string, ctx: PrepCtx): Promise<ProviderExecutionOutcome> {
+    const px = await this.gateway.executeBooking(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'API', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
+    ctx.cards.push({ type: 'booking_execution', data: this.executionCard(px) });
+    return px;
+  }
+
+  private executionCard(px: ProviderExecutionOutcome) {
+    return {
+      code: px.code, duplicate: px.duplicate, providerCalled: px.providerCalled, retryBlocked: px.retryBlocked,
+      manualVerificationRequired: px.manualVerificationRequired, message: px.message,
+      execution: bookingExecutionView(px.record as any), provider: this.gateway.bookingProviders.providerStatus().capabilities
+    };
+  }
+
   /** Lifecycle mirrors the preparation flow (separate from the conversation state machine). */
   private syncLifecycle(sessionId: string) {
     const s = this.state.getSession(sessionId);
     const at = new Date(this.clock()).toISOString();
     const st = s.bookingState;
     const lc = s.bookingLifecycle?.status;
-    if (st === BookingState.IRCTC_HANDOFF_READY) return;
+    if (st === BookingState.IRCTC_HANDOFF_READY || EXECUTION_LOCKED_STATES.has(st)) return;
     if ((lc === 'EXECUTION_DISABLED' || lc === 'HANDOFF_CREATED' || lc === 'EXECUTION_FAILED') && s.handoff?.status !== 'READY') transitionLifecycle(s, 'INVALIDATED', 'handoff no longer ready', at);
     if (st === BookingState.AWAITING_CONFIRMATION && s.review?.valid) {
       if (s.bookingLifecycle?.status === 'READY_FOR_CONFIRMATION') return;
@@ -496,24 +524,31 @@ export class BookingPreparationService {
       return out;
     }
     this.emit(sessionId, ctx, 'IRCTC_HANDOFF_READY', { reviewVersion: cur, handoffId: g.handoff.snapshot.handoffId, executionStatus: g.execution.status, executionEnabled: false });
-    ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, false) });
-    out.notes.push(ctx.mode === 'VOICE' ? HANDOFF_READY_MESSAGE : `${HANDOFF_READY_MESSAGE} ${NO_EXECUTION_NOTE}`);
+    // 5) Prompt 12: BookingExecutionGateway → BookingProviderRegistry → provider (disabled → nothing sent)
+    const px = await this.gateway.executeBooking(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'CONFIRM', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
+    out.providerExecution = px;
+    ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, false, px) });
+    const pxMsg = px.message;
+    out.notes.push(ctx.mode === 'VOICE' || !NOTHING_SUBMITTED(px.record as any) ? pxMsg : `${pxMsg} ${NO_EXECUTION_NOTE}`);
     out.readiness = this.evaluate(sessionId, ctx);
     return out;
   }
 
-  private handoffCard(sessionId: string, g: Extract<GatewayOutcome, { ok: true }>, duplicate: boolean) {
+  private handoffCard(sessionId: string, g: Extract<GatewayOutcome, { ok: true }>, duplicate: boolean, px?: ProviderExecutionOutcome) {
     const s = this.state.getSession(sessionId);
     const h = g.handoff.snapshot;
+    const pxMsg = px?.message ?? HANDOFF_READY_MESSAGE;
+    const submitted = !!px?.record?.submitted;
     return {
-      status: 'IRCTC_HANDOFF_READY', payloadStatus: 'READY', handoffId: h.handoffId, handoffStatus: s.handoff?.status ?? g.handoff.status,
+      status: s.bookingState, payloadStatus: 'READY', handoffId: h.handoffId, handoffStatus: s.handoff?.status ?? g.handoff.status,
       reviewVersion: h.reviewVersion, createdAt: h.createdAt, expiresAt: h.expiresAt,
       executorName: g.execution.executorName, executionStatus: g.execution.status, executionReason: g.execution.reason,
       executionCapability: g.capability.reason, realBookingEnabled: g.capability.realBookingEnabled,
-      realBooking: false, executionEnabled: false, duplicate,
+      realBooking: px?.record?.status === 'CONFIRMED', executionEnabled: submitted, duplicate,
       handoffSessionId: s.handoffSession?.handoffSessionId, handoffSessionStatus: s.handoffSession?.status, handoffSessionExpiresAt: s.handoffSession?.expiresAt,
       executorCapability: s.handoffSession ? { ...s.handoffSession.executorCapability } : undefined, confirmationStatus: s.confirmation?.status,
-      message: duplicate ? `${HANDOFF_DUPLICATE_MESSAGE} ${HANDOFF_READY_MESSAGE}` : `${HANDOFF_READY_MESSAGE} ${NO_EXECUTION_NOTE}`
+      bookingExecution: px ? this.executionCard(px) : undefined,
+      message: duplicate ? `${HANDOFF_DUPLICATE_MESSAGE} ${pxMsg}` : (submitted ? pxMsg : `${pxMsg} ${NO_EXECUTION_NOTE}`)
     };
   }
 

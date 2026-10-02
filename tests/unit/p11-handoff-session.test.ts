@@ -239,7 +239,7 @@ describe('G2 — BookingHandoffValidator (14 checks)', () => {
     const t1 = structuredClone(s); t1.searchResults.resultId = 'sr-other';
     expect(v.validate(t1, hs, now)).toMatchObject({ code: 'INVALID_BOOKING_SNAPSHOT', detail: expect.stringContaining('INVALID_TRAIN') });
     const c1 = structuredClone(s);
-    const row: any = currentResults(c1).find((r: any) => r.resultId === c1.selectedTrain.resultId);
+    const row: any = (c1.searchResults.trains as any[]).find((r: any) => r.resultId === c1.selectedTrain.resultId);   // mutate the session's own row (currentResults() returns copies)
     for (const k of Object.keys(row)) if (Array.isArray(row[k]) && row[k].some((x: any) => (x?.classCode ?? x?.code ?? x) === 'CC')) row[k] = row[k].filter((x: any) => (x?.classCode ?? x?.code ?? x) !== 'CC');
     expect(v.validate(c1, hs, now)).toMatchObject({ code: 'INVALID_BOOKING_SNAPSHOT', detail: expect.stringContaining('INVALID_CLASS') });
     // freshness — reached in isolation with a far-future expiry

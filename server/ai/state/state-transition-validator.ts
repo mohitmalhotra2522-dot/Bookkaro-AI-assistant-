@@ -14,7 +14,7 @@
  *  5. IDLE → (COLLECTING_* | SEARCHING_TRAINS) is expanded into the explicit
  *     path IDLE → COLLECTING_JOURNEY → target, so no state is silently skipped.
  */
-import { BookingState, VALID_BOOKING_TRANSITIONS, EXECUTION_LOCKED_STATES } from '@shared/states';
+import { BookingState, VALID_BOOKING_TRANSITIONS, EXECUTION_LOCKED_STATES, EXECUTION_TRANSITIONS } from '@shared/states';
 
 /** Canonical ordering of the booking funnel (used to detect backward moves). */
 export const STATE_ORDER: BookingState[] = [
@@ -69,8 +69,9 @@ export class StateTransitionValidator {
     if (from === to) return { ok: true, path: [], kind: 'SAME' };
 
     // Hard guards (never relaxed)
-    // 0) Real booking execution is disabled: execution states can never be entered
-    //    (BOOKING_EXECUTION_REQUESTED is only emitted as an internal EVENT).
+    // 0) Execution states are never entered through the generic path (LLM / applier /
+    //    preparation). Only checkExecution() — used exclusively by the provider
+    //    execution service on an authoritative provider response — may enter them.
     if (EXECUTION_LOCKED_STATES.has(to)) {
       return this.reject(from, to, 'Real booking execution is disabled — execution states are locked.');
     }
@@ -100,6 +101,13 @@ export class StateTransitionValidator {
     }
 
     return this.reject(from, to, `Invalid state transition: ${from} → ${to}.`);
+  }
+
+  /** Provider-result transitions only (EXECUTION_TRANSITIONS). Never relaxes the generic guards. */
+  checkExecution(from: BookingState, to: BookingState): TransitionCheck {
+    if (from === to) return { ok: true, path: [], kind: 'SAME' };
+    if ((EXECUTION_TRANSITIONS[from] || []).includes(to)) return { ok: true, path: [to], kind: 'FORWARD' };
+    return this.reject(from, to, `Invalid execution transition: ${from} → ${to}.`);
   }
 
   canTransition(from: BookingState, to: BookingState): boolean {

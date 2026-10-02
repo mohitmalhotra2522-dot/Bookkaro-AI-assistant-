@@ -27,12 +27,28 @@ import { BookingExecutorAdapterRegistry, createProductionAdapterRegistry, isVali
 
 export const HANDOFF_SESSION_TRANSITIONS: Readonly<Record<HandoffSessionStatus, readonly HandoffSessionStatus[]>> = Object.freeze({
   CREATED: ['READY', 'FAILED'],
-  READY: ['EXPIRED', 'INVALIDATED', 'FAILED'],      // 'CONSUMED' intentionally absent in this milestone
+  READY: ['EXPIRED', 'INVALIDATED', 'FAILED'],      // 'CONSUMED' never via the generic path — only markHandoffSessionSubmitted() (P12 provider path)
   CONSUMED: [],
   EXPIRED: [],
   INVALIDATED: [],
   FAILED: []
 });
+
+/**
+ * Prompt 12: the provider execution service marks a READY handoff session CONSUMED right
+ * before a booking request may reach a provider — the handoff can never be submitted twice.
+ * Not reachable from setStatus() / the LLM / the applier. Returns false if not READY.
+ */
+export function markHandoffSessionSubmitted(s: BookingSession, bookingExecutionId: string, now: number): boolean {
+  const hs = s.handoffSession;
+  if (!hs || hs.status !== 'READY' || !bookingExecutionId) return false;
+  hs.status = 'CONSUMED';
+  hs.statusReason = 'SUBMITTED_TO_BOOKING_PROVIDER';
+  hs.statusChangedAt = new Date(now).toISOString();
+  hs.executionAttempts += 1;
+  (s.handoffSessionHistory ||= []).push({ handoffSessionId: hs.handoffSessionId, bookingHandoffId: hs.bookingHandoffId, status: 'CONSUMED', statusReason: hs.statusReason, at: hs.statusChangedAt });
+  return true;
+}
 
 export interface HandoffEventCtx { requestId?: string; emit?: (type: any, data?: Record<string, any>) => void }
 

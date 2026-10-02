@@ -141,7 +141,7 @@ describe('G3 — preparation → fresh data → review → confirmation', () => 
     const r = await say(sid, 'haan', 'TEXT', { reviewVersion: 1 });
     expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
     // Prompt 10: confirmation now flows through BookingExecutionGateway → DisabledBookingExecutor
-    expect(r.events).toEqual(['BOOKING_CONFIRMATION_REQUESTED', 'BOOKING_CONFIRMATION_CREATED', 'BOOKING_EXECUTION_REQUESTED', 'BOOKING_HANDOFF_CREATED', 'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'BOOKING_HANDOFF_SESSION_CREATED', 'IRCTC_HANDOFF_READY']);
+    expect(r.events).toEqual(['BOOKING_CONFIRMATION_REQUESTED', 'BOOKING_CONFIRMATION_CREATED', 'BOOKING_EXECUTION_REQUESTED', 'BOOKING_HANDOFF_CREATED', 'BOOKING_LIFECYCLE_UPDATED', 'BOOKING_EXECUTION_DISABLED', 'BOOKING_HANDOFF_SESSION_CREATED', 'IRCTC_HANDOFF_READY', 'BOOKING_PROVIDER_SELECTED', 'BOOKING_PROVIDER_UNAVAILABLE']);
     expect(r.responseMessage).toContain('Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai.');
     expect(r.responseMessage).not.toMatch(/ticket (book ho gaya|booked)|booking (successful|confirmed)|PNR/i);
     expect(r.cards!.find((c: any) => c.type === 'handoff')!.data).toMatchObject({ realBooking: false, executionEnabled: false, reviewVersion: 1 });

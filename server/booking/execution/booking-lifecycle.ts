@@ -14,27 +14,31 @@ export const LIFECYCLE_TRANSITIONS: Readonly<Record<BookingLifecycleStatus, read
   READY_FOR_CONFIRMATION: ['CONFIRMED_BY_USER', 'PREPARING', 'INVALIDATED'],
   CONFIRMED_BY_USER: ['HANDOFF_CREATED', 'PREPARING', 'INVALIDATED'],
   HANDOFF_CREATED: ['EXECUTION_DISABLED', 'EXECUTION_STARTED', 'EXECUTION_FAILED', 'INVALIDATED'],
-  EXECUTION_DISABLED: ['INVALIDATED'],
+  // P12: a configured provider may run after the (disabled) P10 executor step
+  EXECUTION_DISABLED: ['INVALIDATED', 'EXECUTION_STARTED'],
   EXECUTION_STARTED: ['EXECUTION_SUCCESS', 'EXECUTION_FAILED'],
   EXECUTION_SUCCESS: [],
   EXECUTION_FAILED: ['INVALIDATED', 'PREPARING'],
   INVALIDATED: ['PREPARING', 'READY_FOR_CONFIRMATION']
 });
 
-/** Only a REAL executor (none exists in this milestone) could ever enter these. */
+/**
+ * Only the provider execution path (Prompt 12, { providerAuthorized: true }) may enter these,
+ * and only after a provider was actually invoked. No real provider exists in this project.
+ */
 export const REAL_EXECUTION_LIFECYCLE: ReadonlySet<BookingLifecycleStatus> = new Set(['EXECUTION_STARTED', 'EXECUTION_SUCCESS']);
 
-export function canTransitionLifecycle(from: BookingLifecycleStatus | null, to: BookingLifecycleStatus): boolean {
-  if (REAL_EXECUTION_LIFECYCLE.has(to)) return false;           // locked in this milestone
+export function canTransitionLifecycle(from: BookingLifecycleStatus | null, to: BookingLifecycleStatus, opts: { providerAuthorized?: boolean } = {}): boolean {
+  if (REAL_EXECUTION_LIFECYCLE.has(to) && !opts.providerAuthorized) return false;   // provider path only
   if (from === null) return to === 'PREPARING' || to === 'READY_FOR_CONFIRMATION';
   return LIFECYCLE_TRANSITIONS[from].includes(to);
 }
 
 /** Apply a lifecycle transition. Same-status is a no-op. Illegal transitions are rejected (returns false). */
-export function transitionLifecycle(s: BookingSession, to: BookingLifecycleStatus, reason?: string, at = new Date().toISOString()): boolean {
+export function transitionLifecycle(s: BookingSession, to: BookingLifecycleStatus, reason?: string, at = new Date().toISOString(), opts: { providerAuthorized?: boolean } = {}): boolean {
   const from = s.bookingLifecycle?.status ?? null;
   if (from === to) return true;
-  if (!canTransitionLifecycle(from, to)) return false;
+  if (!canTransitionLifecycle(from, to, opts)) return false;
   if (!s.bookingLifecycle) s.bookingLifecycle = { status: to, history: [] };
   s.bookingLifecycle.status = to;
   s.bookingLifecycle.history.push({ from, to, at, ...(reason ? { reason } : {}) });
