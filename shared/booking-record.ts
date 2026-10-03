@@ -9,6 +9,7 @@
  * It never contains credentials, OTP, CAPTCHA, payment data, passenger names or raw
  * provider payloads. The PNR comes ONLY from a schema-valid provider response.
  */
+import type { CancellationStatus, ModificationStatus, RefundStatus } from './booking-lifecycle-action';
 
 export const POST_BOOKING_STATUSES = ['CONFIRMED', 'PENDING', 'FAILED', 'UNKNOWN', 'CANCELLED', 'EXTERNAL_HANDOFF_REQUIRED'] as const;
 export type PostBookingStatus = typeof POST_BOOKING_STATUSES[number];
@@ -31,7 +32,25 @@ export type PostBookingErrorCode =
   | 'BOOKING_CONTEXT_MISSING'
   | 'BOOKING_ACCESS_DENIED';
 
-export type BookingStatusSource = 'PROVIDER_EXECUTION' | 'PROVIDER_RECONCILIATION';
+export type BookingStatusSource = 'PROVIDER_EXECUTION' | 'PROVIDER_RECONCILIATION' | 'PROVIDER_ACTION';
+
+/** Prompt 15 — evidence for lifecycle-action updates (cancellation / modification / refund). */
+export interface BookingActionEvidence {
+  /** PROVIDER_ACTION = authoritative provider action / status result; ACTION_OUTCOME_UNCERTAIN = only UNKNOWN / MANUAL states. */
+  source: 'PROVIDER_ACTION' | 'ACTION_OUTCOME_UNCERTAIN';
+  actionId: string;
+  providerStatus: string | null;
+}
+
+/** Post-modification CURRENT representation. The original booking fields stay untouched (history). */
+export interface BookingCurrentRepresentation {
+  journeyDate: string;
+  travelClass: string;
+  passengersCount: number;
+  modificationId: string;
+  updatedAt: string;
+}
+export interface BookingRefundSummary { amount: number | null; currency: string | null; checkedAt: string }
 
 export interface BookingJourney { origin: string; destination: string; originName?: string; destinationName?: string }
 export interface BookingTrain { trainNumber: string; trainName?: string; departure?: string; arrival?: string }
@@ -72,6 +91,13 @@ export interface BookingRecord {
   failureCode: string | null;
   lastUpdatedAt: string;
   liveMeta: BookingLiveMeta;
+  // ---- Prompt 15: SEPARATE lifecycle statuses (each changes only with provider action evidence) ----
+  cancellationStatus: CancellationStatus;
+  modificationStatus: ModificationStatus;
+  refundStatus: RefundStatus;
+  refundSummary: BookingRefundSummary | null;
+  /** null until a provider CONFIRMS a modification; original fields above are never rewritten. */
+  current: BookingCurrentRepresentation | null;
 }
 
 /** Output of BookingResultNormalizer — validated, provider-derived fields only. */
@@ -123,6 +149,11 @@ export interface BookingDetailsResponse {
   bookingCreatedAt: string;
   lastUpdatedAt: string;
   failureCode: string | null;
+  /** Prompt 15 — separate lifecycle statuses + post-modification current view (original kept above). */
+  cancellationStatus?: CancellationStatus;
+  modificationStatus?: ModificationStatus;
+  refundStatus?: RefundStatus;
+  current?: BookingCurrentRepresentation | null;
   source: 'BACKEND_BOOKING_RECORD';
 }
 

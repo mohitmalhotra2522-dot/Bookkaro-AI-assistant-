@@ -44,6 +44,7 @@ import { passengerCollection, passengerLabel } from '../../booking/passenger-col
 import { derivePendingInteraction, questionFor } from './pending-interaction';
 import { compareArrival, durationMinutes, absoluteArrival, shortName, humanDate } from './response-formatter';
 import type { PostBookingService, PostBookingTurn } from '../../booking/post-booking/post-booking-service';
+import type { BookingLifecycleActionService, LifecycleTurn, LifecyclePlan } from '../../booking/lifecycle-actions/booking-lifecycle-action-service';
 
 export interface ApplyCtx {
   turnId: string;
@@ -81,9 +82,13 @@ export interface ApplyOutcome {
   postBooking?: boolean;
   /** Prompt 14: only these tools may run for this decision (read-only post-booking lookups). */
   allowedTools?: readonly string[];
+  /** Prompt 15: lifecycle-action turn (cancel / modify / refund) — answered ONLY by the backend service. */
+  lifecycle?: boolean;
+  /** Prompt 15: provider work the orchestrator runs after the applier (never an LLM tool). */
+  lifecyclePlan?: LifecyclePlan;
 }
 
-const ALLOWED_INTENTS = new Set(['GENERAL_RAILWAY_QUERY', 'BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'UNKNOWN']);
+const ALLOWED_INTENTS = new Set(['GENERAL_RAILWAY_QUERY', 'BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'CANCEL_BOOKING', 'MODIFY_BOOKING', 'CHECK_REFUND_STATUS', 'UNKNOWN']);
 const ALLOWED_ACTIONS = new Set(['ASK_CLARIFICATION', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'REQUEST_CONFIRMATION', 'PREPARE_IRCTC_HANDOFF', 'REFINE_RESULTS', 'COMPARE_TRAINS', 'NO_ACTION']);
 
 const idx = (s: BookingState) => STATE_ORDER.indexOf(s);
@@ -95,7 +100,9 @@ export class ContextualTurnApplier {
   /** Per-turn memo so a multi-iteration tool loop classifies / resolves a post-booking query once. */
   private pbMemo = new Map<string, PostBookingTurn>();
 
-  constructor(private readonly state: ConversationStateManager, private readonly postBooking?: PostBookingService) {}
+  private lcMemo = new Map<string, LifecycleTurn>();
+
+  constructor(private readonly state: ConversationStateManager, private readonly postBooking?: PostBookingService, private readonly lifecycleActions?: BookingLifecycleActionService) {}
 
   apply(sessionId: string, d: AgentDecision, ctx: ApplyCtx): ApplyOutcome {
     const out: ApplyOutcome = { notes: [], blockTools: false, applied: [] };
@@ -108,6 +115,31 @@ export class ContextualTurnApplier {
     // 0) Structural validation of untrusted LLM output
     if (!d || typeof d !== 'object' || !ALLOWED_INTENTS.has(d.intent) || !ALLOWED_ACTIONS.has(d.action)) {
       return fail('INVALID_CONTEXT', 'Maaf kijiye, request samajh nahi aayi. Thoda alag tareeke se batayein?');
+    }
+
+    // 0a) Prompt 15 — booking lifecycle actions (cancel / modify / refund status). Classified from the
+    //     user's OWN words; the LLM label (d.lifecycleAction) is only a validated hint. Cancellation /
+    //     modification are executed ONLY by BookingLifecycleActionService after validation and an
+    //     explicit confirmation on a later turn — never by an LLM tool call.
+    if (this.lifecycleActions && ctx.rawText) {
+      let lc = this.lcMemo.get(ctx.turnId);
+      if (!lc) {
+        lc = this.lifecycleActions.handleTurn(sessionId, ctx.rawText, { turnId: ctx.turnId, mode: ctx.mode, emit, llmAction: (d as any).lifecycleAction });
+        this.lcMemo.clear();
+        this.lcMemo.set(ctx.turnId, lc);
+      }
+      if (lc.type === 'DIRECT') {
+        out.applied.push('LIFECYCLE_ANSWER');
+        return { ...out, blockTools: true, postBooking: true, lifecycle: true, directAnswer: lc.answer };
+      }
+      if (lc.type === 'ERROR') {
+        out.applied.push('LIFECYCLE_REJECTED');
+        return { ...fail(lc.code as OrchestratorErrorCode, lc.message), postBooking: true, lifecycle: true };
+      }
+      if (lc.type === 'ASYNC') {
+        out.applied.push('LIFECYCLE_ACTION');
+        return { ...out, blockTools: true, postBooking: true, lifecycle: true, lifecyclePlan: lc.plan };
+      }
     }
 
     // 0b) Prompt 14 — post-booking questions are classified from the user's OWN words and answered

@@ -13,10 +13,12 @@
  */
 import { randomBytes } from 'node:crypto';
 import type {
+  BookingActionEvidence, BookingCurrentRepresentation, BookingRefundSummary,
   BookingLiveMeta, BookingProviderEvidence, BookingRecord, NormalizedBookingResult, PostBookingErrorCode, PostBookingStatus
 } from '@shared/booking-record';
 import { POST_BOOKING_STATUSES } from '@shared/booking-record';
 import { PNR_RE } from './pnr-validator';
+import type { CancellationStatus, ModificationStatus, RefundStatus } from '@shared/booking-lifecycle-action';
 
 export type StoreError = { ok: false; code: PostBookingErrorCode; message: string };
 export type StoreResult<T> = { ok: true; record: T; created?: boolean; changed?: boolean } | StoreError;
@@ -45,7 +47,22 @@ export interface BookingHistoryStore {
   markUnknown(sessionId: string, bookingId: string, ev: BookingProviderEvidence): StoreResult<Readonly<BookingRecord>>;
   markCancelled(sessionId: string, bookingId: string, ev: BookingProviderEvidence): StoreResult<Readonly<BookingRecord>>;
   updateLiveMeta(sessionId: string, bookingId: string, meta: BookingLiveMeta): StoreResult<Readonly<BookingRecord>>;
+  // ---- Prompt 15: lifecycle-action updates (evidence-guarded; history never rewritten) ----
+  updateCancellationStatus(sessionId: string, bookingId: string, next: CancellationStatus, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>>;
+  /** Provider-confirmed cancellation: cancellationStatus CANCELLED + bookingStatus CANCELLED (source PROVIDER_ACTION). */
+  applyCancellation(sessionId: string, bookingId: string, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>>;
+  updateModificationStatus(sessionId: string, bookingId: string, next: ModificationStatus, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>>;
+  /** Provider-confirmed modification: sets the CURRENT representation only; original fields stay. */
+  applyModification(sessionId: string, bookingId: string, current: Omit<BookingCurrentRepresentation, 'updatedAt'>, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>>;
+  updateRefundStatus(sessionId: string, bookingId: string, next: RefundStatus, summary: Omit<BookingRefundSummary, 'checkedAt'> | null, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>>;
 }
+
+const CANCEL_STATUSES: readonly CancellationStatus[] = ['NOT_REQUESTED', 'PENDING', 'CANCELLED', 'FAILED', 'UNKNOWN', 'MANUAL_VERIFICATION_REQUIRED'];
+const MODIFY_STATUSES: readonly ModificationStatus[] = ['NOT_REQUESTED', 'PENDING', 'MODIFIED', 'FAILED', 'UNKNOWN', 'MANUAL_VERIFICATION_REQUIRED'];
+const REFUND_STATUSES: readonly RefundStatus[] = ['NOT_AVAILABLE', 'NOT_INITIATED', 'PENDING', 'PROCESSED', 'FAILED', 'UNKNOWN'];
+/** Statuses that need an authoritative PROVIDER_ACTION result with the matching provider status. */
+const CANCEL_EVIDENCE: Partial<Record<CancellationStatus, string>> = { PENDING: 'PENDING', CANCELLED: 'CANCELLED', FAILED: 'FAILED' };
+const MODIFY_EVIDENCE: Partial<Record<ModificationStatus, string>> = { PENDING: 'PENDING', MODIFIED: 'MODIFIED', FAILED: 'FAILED' };
 
 function deepFreeze<T>(o: T): T {
   if (o && typeof o === 'object' && !Object.isFrozen(o)) {
@@ -99,7 +116,9 @@ export class InMemoryBookingHistoryStore implements BookingHistoryStore {
       providerReference: n.providerReference, pnr: n.bookingStatus === 'CONFIRMED' ? n.pnr : null,
       confirmedAt: n.bookingStatus === 'CONFIRMED' ? at : null,
       bookingStatus: n.bookingStatus, statusSource: n.statusSource, failureCode: n.failureCode,
-      lastUpdatedAt: at, liveMeta: {}
+      lastUpdatedAt: at, liveMeta: {},
+      cancellationStatus: 'NOT_REQUESTED', modificationStatus: 'NOT_REQUESTED', refundStatus: 'NOT_AVAILABLE',
+      refundSummary: null, current: null
     });
     this.index(rec);
     this.trim(n.sessionId);
@@ -203,6 +222,84 @@ export class InMemoryBookingHistoryStore implements BookingHistoryStore {
   }
 
   // ---------------------------------------------------------------------------
+  // Prompt 15 — lifecycle-action updates
+  // ---------------------------------------------------------------------------
+
+  private actionGuard(sessionId: string, bookingId: string, ev: BookingActionEvidence, next: string, required?: string): StoreResult<Readonly<BookingRecord>> {
+    const g = this.getBookingById(sessionId, bookingId);
+    if (!g.ok) return g;
+    if (!ev || typeof ev.actionId !== 'string' || !ev.actionId || (ev.source !== 'PROVIDER_ACTION' && ev.source !== 'ACTION_OUTCOME_UNCERTAIN')) {
+      return err('AUTHORITATIVE_DATA_REQUIRED', 'Lifecycle update requires provider action evidence.');
+    }
+    if (required !== undefined && (ev.source !== 'PROVIDER_ACTION' || ev.providerStatus !== required)) {
+      return err('AUTHORITATIVE_DATA_REQUIRED', `${next} requires an authoritative provider ${required} result.`);
+    }
+    if (required === undefined && ev.source === 'ACTION_OUTCOME_UNCERTAIN' && next !== 'UNKNOWN' && next !== 'MANUAL_VERIFICATION_REQUIRED') {
+      return err('AUTHORITATIVE_DATA_REQUIRED', 'Uncertain outcomes may only record UNKNOWN / MANUAL_VERIFICATION_REQUIRED.');
+    }
+    return g;
+  }
+
+  updateCancellationStatus(sessionId: string, bookingId: string, next: CancellationStatus, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>> {
+    if (!CANCEL_STATUSES.includes(next) || next === 'NOT_REQUESTED') return err('INVALID_BOOKING_STATUS', 'Invalid cancellation status.');
+    if (next === 'CANCELLED') return this.applyCancellation(sessionId, bookingId, ev);
+    const g = this.actionGuard(sessionId, bookingId, ev, next, CANCEL_EVIDENCE[next]);
+    if (!g.ok) return g;
+    const cur = g.record;
+    if (cur.cancellationStatus === 'CANCELLED' || cur.bookingStatus === 'CANCELLED') return err('BOOKING_RECORD_NOT_MUTABLE', 'Booking already cancelled — cancellation status ab nahi badal sakta.');
+    if (cur.cancellationStatus === next) return { ok: true, record: cur, changed: false };
+    return this.write(cur, { cancellationStatus: next, lastUpdatedAt: this.iso() });
+  }
+
+  applyCancellation(sessionId: string, bookingId: string, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>> {
+    const g = this.actionGuard(sessionId, bookingId, ev, 'CANCELLED', 'CANCELLED');
+    if (!g.ok) return g;
+    const cur = g.record;
+    if (cur.cancellationStatus === 'CANCELLED' && cur.bookingStatus === 'CANCELLED') return { ok: true, record: cur, changed: false };
+    if (cur.bookingStatus !== 'CONFIRMED' && cur.bookingStatus !== 'CANCELLED') return err('INVALID_BOOKING_STATUS', `Booking ${cur.bookingStatus} — provider cancellation cannot apply.`);
+    // History preserved: journey / train / createdAt / providerReference / PNR / fare untouched.
+    return this.write(cur, { bookingStatus: 'CANCELLED', statusSource: 'PROVIDER_ACTION', cancellationStatus: 'CANCELLED', lastUpdatedAt: this.iso() });
+  }
+
+  updateModificationStatus(sessionId: string, bookingId: string, next: ModificationStatus, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>> {
+    if (!MODIFY_STATUSES.includes(next) || next === 'NOT_REQUESTED') return err('INVALID_BOOKING_STATUS', 'Invalid modification status.');
+    if (next === 'MODIFIED') return err('AUTHORITATIVE_DATA_REQUIRED', 'MODIFIED only via applyModification with provider evidence.');
+    const g = this.actionGuard(sessionId, bookingId, ev, next, MODIFY_EVIDENCE[next]);
+    if (!g.ok) return g;
+    const cur = g.record;
+    if (cur.bookingStatus === 'CANCELLED') return err('BOOKING_RECORD_NOT_MUTABLE', 'Cancelled booking — modification status ab nahi badal sakta.');
+    if (cur.modificationStatus === next) return { ok: true, record: cur, changed: false };
+    return this.write(cur, { modificationStatus: next, lastUpdatedAt: this.iso() });
+  }
+
+  applyModification(sessionId: string, bookingId: string, current: Omit<BookingCurrentRepresentation, 'updatedAt'>, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>> {
+    const g = this.actionGuard(sessionId, bookingId, ev, 'MODIFIED', 'MODIFIED');
+    if (!g.ok) return g;
+    const cur = g.record;
+    if (cur.bookingStatus !== 'CONFIRMED') return err('INVALID_BOOKING_STATUS', `Booking ${cur.bookingStatus} — modification cannot apply.`);
+    if (!current || !/^\d{4}-\d{2}-\d{2}$/.test(current.journeyDate) || typeof current.travelClass !== 'string' || !current.travelClass
+      || !Number.isInteger(current.passengersCount) || current.passengersCount < 1 || !current.modificationId) {
+      return err('INVALID_BOOKING_RESULT', 'Invalid modified booking representation.');
+    }
+    const at = this.iso();
+    return this.write(cur, {
+      modificationStatus: 'MODIFIED', lastUpdatedAt: at,
+      current: { journeyDate: current.journeyDate, travelClass: current.travelClass, passengersCount: current.passengersCount, modificationId: current.modificationId, updatedAt: at }
+    });
+  }
+
+  updateRefundStatus(sessionId: string, bookingId: string, next: RefundStatus, summary: Omit<BookingRefundSummary, 'checkedAt'> | null, ev: BookingActionEvidence): StoreResult<Readonly<BookingRecord>> {
+    if (!REFUND_STATUSES.includes(next) || next === 'NOT_AVAILABLE') return err('INVALID_BOOKING_STATUS', 'Invalid refund status.');
+    const g = this.actionGuard(sessionId, bookingId, ev, next, next === 'UNKNOWN' ? undefined : next);
+    if (!g.ok) return g;
+    const at = this.iso();
+    const clean: BookingRefundSummary | null = summary
+      ? { amount: typeof summary.amount === 'number' && Number.isFinite(summary.amount) && summary.amount >= 0 ? summary.amount : null, currency: typeof summary.currency === 'string' ? summary.currency.slice(0, 3) : null, checkedAt: at }
+      : { amount: null, currency: null, checkedAt: at };
+    return this.write(g.record, { refundStatus: next, refundSummary: clean, lastUpdatedAt: at });
+  }
+
+  // ---------------------------------------------------------------------------
 
   private guard(sessionId: string, bookingId: string, ev: BookingProviderEvidence): StoreResult<Readonly<BookingRecord>> {
     const g = this.getBookingById(sessionId, bookingId);
@@ -214,7 +311,8 @@ export class InMemoryBookingHistoryStore implements BookingHistoryStore {
   }
 
   /** Copy-on-write: only the listed MUTABLE fields can be passed here. */
-  private write(cur: Readonly<BookingRecord>, patch: Partial<Pick<BookingRecord, 'bookingStatus' | 'statusSource' | 'failureCode' | 'lastUpdatedAt' | 'pnr' | 'providerReference' | 'confirmedAt' | 'liveMeta'>>): StoreResult<Readonly<BookingRecord>> {
+  private write(cur: Readonly<BookingRecord>, patch: Partial<Pick<BookingRecord, 'bookingStatus' | 'statusSource' | 'failureCode' | 'lastUpdatedAt' | 'pnr' | 'providerReference' | 'confirmedAt' | 'liveMeta'
+    | 'cancellationStatus' | 'modificationStatus' | 'refundStatus' | 'refundSummary' | 'current'>>): StoreResult<Readonly<BookingRecord>> {
     const next = deepFreeze({ ...cur, ...patch, liveMeta: { ...(patch.liveMeta ?? cur.liveMeta) } }) as BookingRecord;
     this.byId.set(cur.bookingId, next);
     this.index(next);

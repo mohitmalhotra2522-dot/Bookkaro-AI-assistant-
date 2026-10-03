@@ -211,7 +211,7 @@ export class BoundToolRuntime {
         this.allowedTools = outcome.allowedTools;
         if (outcome.blockTools) {
           // a deterministic backend answer (post-booking record) is never mixed with LLM wording
-          return done(outcome.error?.message || (outcome.directAnswer ? '' : (decision.finalMessage || decision.clarification || '')), 'blocked', outcome.error);
+          return done(outcome.error?.message || (outcome.directAnswer || outcome.lifecycle ? '' : (decision.finalMessage || decision.clarification || '')), 'blocked', outcome.error);
         }
       }
 

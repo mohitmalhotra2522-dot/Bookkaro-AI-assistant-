@@ -36,6 +36,8 @@ import { derivePendingInteraction, questionFor } from '../context/pending-intera
 import { searchSummary, factFromTool, liveToolMessage, LIVE_TOOLS } from '../context/response-formatter';
 import { PostBookingService } from '../../booking/post-booking/post-booking-service';
 import type { BookingHistoryStore } from '../../booking/post-booking/booking-history-store';
+import { BookingLifecycleActionService, type LifecycleActionServiceOptions } from '../../booking/lifecycle-actions/booking-lifecycle-action-service';
+import type { LifecycleActionErrorCode } from '@shared/booking-lifecycle-action';
 import { maskPnrsInText, maskPnrDeep } from '../../booking/post-booking/pnr-validator';
 import { currentResults } from '../context/train-reference-resolver';
 import { BookingPreparationService, type PrepOutcome } from '../../booking/booking-preparation-service';
@@ -79,6 +81,8 @@ export interface OrchestratorOptions {
   handoffSessionService?: BookingHandoffSessionService;
   /** Prompt 14: post-booking history store (default: in-memory, session-scoped). */
   bookingHistoryStore?: BookingHistoryStore;
+  /** Prompt 15: lifecycle-action tuning (timeouts, reconciliation, confirmation TTL) — tests only. */
+  lifecycleActions?: Partial<Pick<LifecycleActionServiceOptions, 'timeoutMs' | 'confirmationTtlMs' | 'reconcile' | 'sleep' | 'today'>>;
 }
 
 export interface AgentTurnResult {
@@ -112,6 +116,8 @@ export class ConversationAgentOrchestrator {
   readonly gateway: BookingExecutionGateway;
   /** Prompt 14: post-booking read model + controlled history queries (backend only — never an LLM tool). */
   readonly postBooking: PostBookingService;
+  /** Prompt 15: cancellation / modification / refund status — backend-controlled (never an LLM tool). */
+  readonly lifecycleActions: BookingLifecycleActionService;
 
   constructor(
     private readonly llm: LLMProvider,
@@ -124,7 +130,11 @@ export class ConversationAgentOrchestrator {
     // Prompt 14: BookingRecords are derived ONLY from the P13 lifecycle (single writer of execution status)
     this.postBooking = new PostBookingService(state, { store: options.bookingHistoryStore, clock: options.clock });
     this.postBooking.attach(this.gateway.bookingProviders.lifecycle);
-    this.applier = new ContextualTurnApplier(state, this.postBooking);
+    this.lifecycleActions = new BookingLifecycleActionService(state, {
+      store: this.postBooking.store, providers: { registry: this.gateway.bookingProviders.registry, config: this.gateway.bookingProviders.config },
+      clock: options.clock, ...(options.lifecycleActions || {})
+    });
+    this.applier = new ContextualTurnApplier(state, this.postBooking, this.lifecycleActions);
     this.preparation = new BookingPreparationService(state, {
       policy: options.preparationPolicy, clock: options.clock, gateway: this.gateway,
       handoffSessions: options.handoffSessionService || new BookingHandoffSessionService({ registry: options.adapterRegistry, config: this.gateway.config, clock: options.clock })
@@ -237,6 +247,15 @@ export class ConversationAgentOrchestrator {
     progress.push(...handoffSync.notes);
     // Prompt 14: a post-booking answer / read-only lookup never progresses the booking flow
     const postBookingTurn = rt.applyOutcomes.some(o => o.postBooking);
+    // Prompt 15: lifecycle action plan (validated by the applier) → provider work, backend only
+    let lifecycleErr: OrchestratorError | undefined;
+    const lcPlan = !blockErr ? rt.applyOutcomes.find(o => o.lifecyclePlan)?.lifecyclePlan : undefined;
+    if (lcPlan) {
+      const lr = await this.lifecycleActions.run(sessionId, lcPlan, { turnId, mode, emit: (type, data) => { this.state.emit(sessionId, type, turnId, data); events.push(type); } });
+      progress.push(lr.message);
+      if (lr.card) cards.push(lr.card);
+      if (lr.error) lifecycleErr = { code: lr.error.code as LifecycleActionErrorCode, message: lr.error.message };
+    }
     if (postBookingTurn && !blockErr) {
       this.preparation.evaluate(sessionId);
     } else if (!blockErr) {
@@ -294,7 +313,7 @@ export class ConversationAgentOrchestrator {
     const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes);
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-      message, error: blockErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined), rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
+      message, error: blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined), rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
       execution: prep?.execution || dupExecution });
   }
 
@@ -320,11 +339,13 @@ export class ConversationAgentOrchestrator {
     }
     const nonSearch = rt.steps.filter(st => st.result.toolName !== 'SEARCH_TRAINS');
     const searchFailed = rt.steps.some(st => st.result.toolName === 'SEARCH_TRAINS' && st.status !== 'ok');
-    const llmFinalUseful = !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
+    // Prompt 15: lifecycle turns are phrased ONLY by the backend service (never LLM wording)
+    const lifecycleTurn = rt.applyOutcomes.some(o => o.lifecycle);
+    const llmFinalUseful = !lifecycleTurn && !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
     // Prompt 14: PNR / live status answers are ALWAYS deterministic phrasing of the provider result
     // (or its validated error) — LLM wording can never add or upgrade a status.
     if (nonSearch.some(st => LIVE_TOOLS.has(st.result.toolName))) parts.push(liveToolMessage(nonSearch, mode));
-    else if (llmFinalUseful) parts.push(factGuard(rt.finalMessage, rt.steps, mode));
+    else if (llmFinalUseful) parts.push(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode)));
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
       if (st.result.toolName === 'CHECK_AVAILABILITY') cards.push({ type: 'availability', data: st.result.data });
@@ -451,6 +472,19 @@ function joinParts(parts: string[]): string {
  * the provider said RAC/Waitlist) or mentions a ₹ amount absent from the fare
  * result, it is replaced by deterministic phrasing of the actual results.
  */
+/**
+ * Prompt 15: the LLM can never claim a lifecycle outcome. Sentences claiming a cancellation,
+ * modification (date / class / passenger change) or refund are removed from LLM wording —
+ * those facts are phrased only by BookingLifecycleActionService from provider results.
+ */
+const LIFECYCLE_CLAIM_RE = /(cancel(?:led)?\s+(?:ho\s+(?:gay[ai]|chuk[ai])|kar\s+di(?:ya)?|kar\s+diya\s+gaya|confirm)|cancellation\s+(?:confirm|complete|successful|ho\s+gay)|booking\s+(?:is\s+)?cancelled|(?:date|class|passenger|naam|age|booking)\s+(?:change|update|modify|modified|upgrade)\s*(?:ho\s+(?:gay[ai]|chuk[ai])|kar\s+di(?:ya)?|successful|confirm)|refund\s+(?:mil\s+gaya|processed|credited|aa\s+gaya|ho\s+gaya|received|initiate\s+ho\s+gaya)|₹\s?\d+\s+(?:extra|refund))/i;
+export function lifecycleClaimGuard(text: string): string {
+  if (!text || !LIFECYCLE_CLAIM_RE.test(text)) return text;
+  const kept = text.split(/(?<=[.!?।])\s+/).filter(sn => !LIFECYCLE_CLAIM_RE.test(sn));
+  kept.push('Cancellation, modification ya refund ka status sirf booking provider confirm karta hai — main ise assume nahi karta.');
+  return kept.join(' ');
+}
+
 export function factGuard(message: string, steps: ToolCallStep[], mode: 'TEXT' | 'VOICE'): string {
   const ok = steps.filter(st => st.status === 'ok' && st.result.toolName !== 'SEARCH_TRAINS');
   if (!ok.length) return message;

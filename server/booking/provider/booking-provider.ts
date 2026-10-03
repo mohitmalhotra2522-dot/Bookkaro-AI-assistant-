@@ -12,6 +12,10 @@
  * Only DisabledBookingProvider exists in this project. No real booking API is assumed.
  */
 import type { BookingProviderCapabilities, BookingProviderRequest, BookingProviderResult, BookingStatusResult, ProviderHealth, ProviderFailureCode } from '@shared/booking-provider';
+import type {
+  ProviderCancellationRequest, ProviderCancellationResult, ProviderModificationRequest, ProviderModificationResult,
+  ProviderEligibilityRequest, ProviderEligibilityResult, ProviderActionStatusResult, ProviderRefundStatusResult
+} from '@shared/booking-lifecycle-action';
 
 export type BookingProviderKind = 'DISABLED' | 'TEST' | 'REAL';
 
@@ -30,6 +34,17 @@ export interface BookingProvider {
   getBookingStatus?(reference: string, options: ProviderCallOptions): Promise<BookingStatusResult>;
   /** Only if the provider has a REAL health check. Never faked. */
   checkHealth?(options: ProviderCallOptions): Promise<ProviderHealth>;
+
+  // ---- Prompt 15: lifecycle ACTIONS — each OPTIONAL; implemented only if the provider really
+  // supports it (capability = declared flag in getCapabilities().actions AND method present).
+  // Reached ONLY via BookingLifecycleActionService after BookingActionValidator — never an LLM tool.
+  cancelBooking?(request: Readonly<ProviderCancellationRequest>, options: ProviderCallOptions): Promise<ProviderCancellationResult>;
+  checkCancellationEligibility?(request: Readonly<ProviderEligibilityRequest>, options: ProviderCallOptions): Promise<ProviderEligibilityResult>;
+  getCancellationStatus?(request: Readonly<{ bookingId: string; providerReference: string; idempotencyKey: string }>, options: ProviderCallOptions): Promise<ProviderActionStatusResult>;
+  modifyBooking?(request: Readonly<ProviderModificationRequest>, options: ProviderCallOptions): Promise<ProviderModificationResult>;
+  checkModificationEligibility?(request: Readonly<ProviderEligibilityRequest>, options: ProviderCallOptions): Promise<ProviderEligibilityResult>;
+  getModificationStatus?(request: Readonly<{ bookingId: string; providerReference: string; idempotencyKey: string; modificationId: string }>, options: ProviderCallOptions): Promise<ProviderActionStatusResult>;
+  getRefundStatus?(request: Readonly<{ bookingId: string; providerReference: string }>, options: ProviderCallOptions): Promise<ProviderRefundStatusResult>;
 }
 
 /**

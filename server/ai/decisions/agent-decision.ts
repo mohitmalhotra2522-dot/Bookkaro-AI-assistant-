@@ -12,6 +12,7 @@
  */
 import type { ToolCall } from '../tools/tool-registry';
 import type { PostBookingErrorCode } from '@shared/booking-record';
+import type { LifecycleActionErrorCode } from '@shared/booking-lifecycle-action';
 
 export type AgentIntent =
   | 'GENERAL_RAILWAY_QUERY'
@@ -26,6 +27,10 @@ export type AgentIntent =
   | 'SHOW_REVIEW'
   | 'CONFIRM_BOOKING'
   | 'CANCEL_FLOW'
+  // Prompt 15: lifecycle INTENTS only — the LLM identifies, the backend validates + executes
+  | 'CANCEL_BOOKING'
+  | 'MODIFY_BOOKING'
+  | 'CHECK_REFUND_STATUS'
   | 'UNKNOWN';
 
 export type AgentAction =
@@ -135,6 +140,13 @@ export interface AgentDecision {
   toolCalls: ToolCall[];
   /** Final assistant text (only present when the LLM is done calling tools). */
   finalMessage?: string;
+  /**
+   * Prompt 15: OPTIONAL lifecycle-action label (BookingLifecycleAction enum). Untrusted hint only —
+   * parsed against the closed enum (unknown → UNSUPPORTED_ACTION) and never executed on its own.
+   */
+  lifecycleAction?: string;
+  /** Prompt 15: optional natural booking reference ("12014 wali") — resolved by the backend only. */
+  bookingReference?: string;
 }
 
 export type OrchestratorErrorCode =
@@ -213,6 +225,7 @@ export type OrchestratorErrorCode =
   | 'BOOKING_DATA_CHANGED'
   // ---- Prompt 14: post-booking / PNR ----
   | PostBookingErrorCode
+  | LifecycleActionErrorCode
   | 'LIVE_STATUS_UNAVAILABLE'
   | 'LIVE_STATUS_TIMEOUT'
   | 'LIVE_STATUS_PROVIDER_ERROR';

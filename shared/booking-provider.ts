@@ -28,6 +28,12 @@ export interface BookingProviderCapabilities {
   /** Static health as known WITHOUT a live check. Only a real health check may say AVAILABLE. */
   health: ProviderHealth;
   reason?: string;
+  /**
+   * Prompt 15: declared lifecycle-action support (BOOK / CANCEL_BOOKING / CHANGE_CLASS / GET_REFUND_STATUS …).
+   * A capability counts ONLY if declared true here AND the provider implements the method —
+   * see resolveProviderActionCapabilities(). Missing → false (fail closed).
+   */
+  actions?: Partial<Record<import('./booking-lifecycle-action').ProviderActionCapability, boolean>>;
 }
 
 /** Built ONLY from the BookingHandoff / BookingHandoffSession snapshot + authoritative backend state. */

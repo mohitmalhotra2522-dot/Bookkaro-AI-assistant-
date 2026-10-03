@@ -1,3 +1,4 @@
+import { classifyLifecycleIntent } from '../../booking/lifecycle-actions/lifecycle-action-intent';
 import type { LLMProvider, LLMTurnInput, LLMTurnResult, TurnToolResultView } from './llm-provider';
 import type { AgentDecision, TrainReference, InfoRequest, ResultRefinement, ExtractedEntities, PassengerRef, PassengerUpdateRaw } from '../decisions/agent-decision';
 import type { ToolCall, RegisteredToolName } from '../tools/tool-registry';
@@ -111,6 +112,15 @@ export class MockLLMProvider implements LLMProvider {
     if (NON_RAILWAY_RE.test(t) && !/\b(train|railway|ticket|fare|kiraya)\b/.test(t)) return this.final('UNKNOWN', 'Main railway booking aur train jaankari mein hi madad kar sakta hoon.');
     // Prompt 14: post-booking lookups — the LLM only PROPOSES read-only tool calls; the backend
     // grounds the PNR / train number (user's words or the booking record) and answers deterministically.
+    // Prompt 15: lifecycle actions — the (mock) LLM only IDENTIFIES the intent; no tool exists for
+    // cancel / modify / refund. The backend acts on the user's words after validation + confirmation.
+    if (!turn.length && (input.context as any)?.postBooking) {
+      const li = classifyLifecycleIntent(raw);
+      if (li) {
+        const intent = li.family === 'CANCEL' ? 'CANCEL_BOOKING' : li.family === 'REFUND' ? 'CHECK_REFUND_STATUS' : 'MODIFY_BOOKING';
+        return { ...this.final(intent as any, ''), lifecycleAction: li.action === 'ACTION_STATUS' ? 'NO_ACTION' : li.action };
+      }
+    }
     const pb = this.postBookingDecision(raw, t, input, turn);
     if (pb) return pb;
 

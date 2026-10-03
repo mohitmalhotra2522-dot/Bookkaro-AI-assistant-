@@ -37,6 +37,7 @@ export interface PostBookingContextView {
   bookings: Array<{
     bookingId: string; status: string; trainNumber: string; trainName?: string; origin: string; destination: string;
     journeyDate: string; travelClass: string; passengersCount: number; fareTotal: number | null; pnrAvailable: boolean; bookingCreatedAt: string;
+    cancellationStatus: string; modificationStatus: string; refundStatus: string; current?: { journeyDate: string; travelClass: string; passengersCount: number };
   }>;
   pendingClarification?: { kind: PostBookingQueryKind; candidates: Array<{ bookingId: string; trainNumber: string; journeyDate: string }> };
 }
@@ -173,6 +174,8 @@ export class PostBookingService {
       journey: { ...r.journey }, train: { ...r.train }, travelClass: r.travelClass, passengersCount: r.passengersSummary.count,
       fare: r.fareSummary ? { total: r.fareSummary.total, ...(r.fareSummary.perPassenger !== undefined ? { perPassenger: r.fareSummary.perPassenger } : {}), currency: r.fareSummary.currency } : null,
       journeyDate: r.journeyDate, bookingCreatedAt: r.bookingCreatedAt, lastUpdatedAt: r.lastUpdatedAt, failureCode: r.failureCode,
+      cancellationStatus: r.cancellationStatus, modificationStatus: r.modificationStatus, refundStatus: r.refundStatus,
+      current: r.current ? { ...r.current } : null,
       source: 'BACKEND_BOOKING_RECORD'
     };
   }
@@ -191,12 +194,14 @@ export class PostBookingService {
     if (!recs.length && !pend) return undefined;
     return Object.freeze({
       source: 'AUTHORITATIVE_BACKEND_CONTEXT' as const, kind: 'BOOKING_HISTORY' as const, readOnly: true as const,
-      rules: 'Backend-owned booking records (read-only). Never infer or invent a PNR, fare, confirmation, seat, coach or status that is not listed. PNR values are not included: use CHECK_PNR with bookingId for a fresh PNR status. Booking cannot be executed, cancelled or modified via tools.',
+      rules: 'Backend-owned booking records (read-only). Never infer or invent a PNR, fare, confirmation, seat, coach or status that is not listed. PNR values are not included: use CHECK_PNR with bookingId for a fresh PNR status. Booking cannot be executed, cancelled or modified via tools — cancellation / modification / refund are backend-controlled lifecycle actions; never claim cancelled / modified / refunded unless cancellationStatus / modificationStatus / refundStatus says so.',
       activeBookingId: s?.activeBookingId ?? null,
       bookings: recs.slice(0, 10).map(r => ({
         bookingId: r.bookingId, status: r.bookingStatus, trainNumber: r.train.trainNumber, ...(r.train.trainName ? { trainName: r.train.trainName } : {}),
         origin: r.journey.origin, destination: r.journey.destination, journeyDate: r.journeyDate, travelClass: r.travelClass,
-        passengersCount: r.passengersSummary.count, fareTotal: r.fareSummary?.total ?? null, pnrAvailable: !!r.pnr, bookingCreatedAt: r.bookingCreatedAt
+        passengersCount: r.passengersSummary.count, fareTotal: r.fareSummary?.total ?? null, pnrAvailable: !!r.pnr, bookingCreatedAt: r.bookingCreatedAt,
+        cancellationStatus: r.cancellationStatus, modificationStatus: r.modificationStatus, refundStatus: r.refundStatus,
+        ...(r.current ? { current: { journeyDate: r.current.journeyDate, travelClass: r.current.travelClass, passengersCount: r.current.passengersCount } } : {})
       })),
       ...(pend ? { pendingClarification: { kind: pend.kind, candidates: recs.filter(r => pend.candidateIds.includes(r.bookingId)).map(r => ({ bookingId: r.bookingId, trainNumber: r.train.trainNumber, journeyDate: r.journeyDate })) } } : {})
     });
@@ -313,7 +318,26 @@ export class PostBookingService {
     return `${r.train.trainNumber}${r.train.trainName ? ' ' + r.train.trainName : ''} · ${route} · ${humanDate(r.journeyDate)} · ${r.travelClass} · ${r.passengersSummary.count} passenger${r.passengersSummary.count > 1 ? 's' : ''}`;
   }
 
+  /** Prompt 15: separate lifecycle statuses, phrased only from record fields (never assumed). */
+  lifecycleNote(r: Readonly<BookingRecord>): string {
+    const out: string[] = [];
+    switch (r.cancellationStatus) {
+      case 'PENDING': out.push('Cancellation request provider ke paas pending hai — booking abhi cancelled nahi maani ja sakti.'); break;
+      case 'UNKNOWN': case 'MANUAL_VERIFICATION_REQUIRED': out.push('Cancellation request ka final status abhi verify nahi hua hai.'); break;
+      case 'FAILED': out.push('Pichli cancellation request provider ne reject ki thi.'); break;
+      case 'CANCELLED': out.push('Refund status alag hai — "refund status" pooch sakte hain.'); break;
+    }
+    if (r.modificationStatus === 'MODIFIED' && r.current) out.push(`Provider-confirmed change: ab ${humanDate(r.current.journeyDate)} · ${r.current.travelClass} · ${r.current.passengersCount} passenger(s) (original details history mein preserved).`);
+    else if (r.modificationStatus === 'PENDING') out.push('Modification request provider ke paas pending hai — change abhi confirm nahi hua.');
+    else if (r.modificationStatus === 'UNKNOWN' || r.modificationStatus === 'MANUAL_VERIFICATION_REQUIRED') out.push('Modification request ka final status abhi verify nahi hua hai.');
+    return out.length ? ' ' + out.join(' ') : '';
+  }
+
   statusAnswer(r: Readonly<BookingRecord>, mode: 'TEXT' | 'VOICE'): string {
+    return this.baseStatusAnswer(r, mode) + (mode === 'TEXT' ? this.lifecycleNote(r) : '');
+  }
+
+  private baseStatusAnswer(r: Readonly<BookingRecord>, mode: 'TEXT' | 'VOICE'): string {
     const d = this.describe(r, mode);
     switch (r.bookingStatus) {
       case 'CONFIRMED': return mode === 'VOICE' ? `Haan, booking provider ne ${d} ki booking confirm ki hai.` : `Haan — booking provider ne yeh booking confirm ki hai: ${d}. ${r.pnr ? 'PNR available hai ("PNR kya hai?" pooch sakte hain).' : 'PNR provider ne abhi nahi diya.'}`;
@@ -329,7 +353,7 @@ export class PostBookingService {
     if (mode === 'VOICE') return `${this.describe(r, mode)} — status: ${STATUS_LABEL[r.bookingStatus]}.`;
     const fare = r.fareSummary ? ` Fare (booking ke waqt verify): ₹${r.fareSummary.total}.` : '';
     const pnr = r.pnr ? ` PNR: ${maskPnr(r.pnr)} (poora PNR: "PNR kya hai?").` : ' PNR: available nahi.';
-    return `Booking: ${this.describe(r, mode)}. Status: ${STATUS_LABEL[r.bookingStatus]}.${fare}${pnr}`;
+    return `Booking: ${this.describe(r, mode)}. Status: ${STATUS_LABEL[r.bookingStatus]}.${fare}${pnr}${this.lifecycleNote(r)}`;
   }
 
   historyAnswer(recs: readonly Readonly<BookingRecord>[], mode: 'TEXT' | 'VOICE'): string {

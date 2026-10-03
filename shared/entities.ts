@@ -228,6 +228,18 @@ export interface BookingSession {
   activeBookingId?: string;
   /** Open booking-reference clarification ("12014 wali ya 14542 wali?"). */
   postBookingClarification?: { kind: 'PNR_STATUS' | 'LIVE_STATUS' | 'PNR_VALUE' | 'BOOKING_STATUS' | 'BOOKING_DETAILS' | 'HISTORY'; candidateIds: string[]; setAtTurnId: string };
+
+  // ---- Booking lifecycle actions (Prompt 15) — ids/status only; action records live in the backend store ----
+  /** Destructive action awaiting the user's explicit confirmation on a LATER turn (never the same turn). */
+  pendingLifecycleAction?: { actionId: string; setAtTurnId: string; expiresAt: number };
+  /** Open lifecycle clarification (which booking / which date / which class). */
+  lifecycleClarification?: {
+    action: string; candidateIds: string[]; setAtTurnId: string;
+    awaiting?: 'BOOKING' | 'DATE' | 'CLASS'; retry?: boolean;
+    changes?: { journeyDate?: string; travelClass?: string };
+  };
+  /** Most recent lifecycle action (duplicate "haan" / retries are answered from it, never re-sent). */
+  lastLifecycleAction?: { actionId: string; bookingId: string; actionType: string; status: string; resultStatus: string | null; at: number };
 }
 
 /** Provenance attached to every provider result synced into the session. */
@@ -366,7 +378,19 @@ export type BookingEventType =
   | 'PNR_ATTACHED'
   | 'PNR_STATUS_CHECKED'
   | 'BOOKING_HISTORY_QUERIED'
-  | 'BOOKING_LIVE_STATUS_REQUESTED';
+  | 'BOOKING_LIVE_STATUS_REQUESTED'
+  // Prompt 15 — lifecycle actions (no PNR, no passenger values, no secrets)
+  | 'BOOKING_ACTION_REQUESTED'
+  | 'BOOKING_ACTION_CONFIRMATION_REQUIRED'
+  | 'BOOKING_ACTION_CONFIRMED_BY_USER'
+  | 'BOOKING_ACTION_SUBMITTED'
+  | 'BOOKING_ACTION_RESULT'
+  | 'BOOKING_ACTION_REJECTED'
+  | 'BOOKING_ACTION_ABANDONED'
+  | 'BOOKING_ACTION_RECONCILED'
+  | 'BOOKING_CANCELLATION_CONFIRMED'
+  | 'BOOKING_MODIFICATION_CONFIRMED'
+  | 'REFUND_STATUS_CHECKED';
 
 export interface BookingEvent {
   type: BookingEventType;

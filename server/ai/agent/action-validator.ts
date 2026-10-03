@@ -22,7 +22,7 @@ export class ActionValidator {
     if (!decision || typeof decision !== 'object' || !decision.intent || !decision.action) {
       return { ok: false, error: { code: 'INVALID_LLM_OUTPUT', message: 'LLM output is not a valid AgentDecision.' } };
     }
-    const allowedIntents: AgentDecision['intent'][] = ['GENERAL_RAILWAY_QUERY','BOOK_TRAIN','SEARCH_TRAINS','SELECT_TRAIN','SELECT_CLASS','UPDATE_JOURNEY','UPDATE_DATE','UPDATE_PASSENGERS','COLLECT_PASSENGER_DETAILS','SHOW_REVIEW','CONFIRM_BOOKING','CANCEL_FLOW','UNKNOWN'];
+    const allowedIntents: AgentDecision['intent'][] = ['GENERAL_RAILWAY_QUERY','BOOK_TRAIN','SEARCH_TRAINS','SELECT_TRAIN','SELECT_CLASS','UPDATE_JOURNEY','UPDATE_DATE','UPDATE_PASSENGERS','COLLECT_PASSENGER_DETAILS','SHOW_REVIEW','CONFIRM_BOOKING','CANCEL_FLOW','CANCEL_BOOKING','MODIFY_BOOKING','CHECK_REFUND_STATUS','UNKNOWN'];
     const allowedActions: AgentDecision['action'][] = ['ASK_CLARIFICATION','SEARCH_TRAINS','SELECT_TRAIN','SELECT_CLASS','UPDATE_JOURNEY','UPDATE_DATE','UPDATE_PASSENGERS','COLLECT_PASSENGER_DETAILS','SHOW_REVIEW','REQUEST_CONFIRMATION','PREPARE_IRCTC_HANDOFF','NO_ACTION'];
     if (!allowedIntents.includes(decision.intent)) return { ok: false, error: { code: 'UNKNOWN_INTENT', message: 'Unknown intent.' } };
     if (!allowedActions.includes(decision.action)) return { ok: false, error: { code: 'UNSUPPORTED_ACTION', message: 'Unsupported action.' } };

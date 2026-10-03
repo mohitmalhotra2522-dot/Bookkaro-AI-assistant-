@@ -187,6 +187,15 @@ server.get('/api/session/:id/bookings/:bookingId', async (request, reply) => {
   return reply.send({ sessionId: id, booking: r.details });
 });
 
+/** Prompt 15: lifecycle actions (cancel / modify / refund checks) — read-only, session-scoped, no PNR / provider payloads.
+ *  There is deliberately NO endpoint that executes a cancellation or modification: those run only through the
+ *  conversation path (validator + explicit confirmation on a later turn). */
+server.get('/api/session/:id/booking-actions', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ code: 'BOOKING_NOT_FOUND', message: 'Session nahi mila.' });
+  return reply.send({ sessionId: id, actions: orchestrator.lifecycleActions.listActions(id), log: orchestrator.lifecycleActions.actionLog(id) });
+});
+
 /** Structured, redacted turn history (observability; no secrets are ever stored). */
 server.get('/api/session/:id/turns', async (request, reply) => {
   const { id } = request.params as any;
