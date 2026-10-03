@@ -33,10 +33,12 @@ export function classifyLockedIntent(raw: string, affirmativeLabel = false): Loc
   return 'OTHER';
 }
 import type { BookingSession, PendingInteraction, BookingEventType } from '@shared/entities';
-import type { AgentDecision, OrchestratorError, OrchestratorErrorCode } from '../decisions/agent-decision';
+import type { AgentDecision, ExtractedEntities, OrchestratorError, OrchestratorErrorCode } from '../decisions/agent-decision';
 import type { ConversationStateManager } from '../state/conversation-state';
 import { STATE_ORDER } from '../state/state-transition-validator';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
+import { ContextPatchValidator, classPreferenceFamily, type PatchReview } from '../conversation/context-patch';
+import type { ContextPatch, RejectedPatch } from '@shared/conversation-context';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { TrainReferenceResolver, currentResults, type ResultTrain } from './train-reference-resolver';
 import { ClassReferenceResolver } from './class-reference-resolver';
@@ -56,6 +58,9 @@ export interface ApplyCtx {
   rawText?: string;
   /** Request id of the turn (audit correlation). */
   requestId?: string;
+  /** Prompt 16: validated context patches / rejected LLM proposals of this turn (observability). */
+  contextPatches?: ContextPatch[];
+  rejectedPatches?: RejectedPatch[];
 }
 
 export interface ApplyOutcome {
@@ -101,6 +106,9 @@ export class ContextualTurnApplier {
   private pbMemo = new Map<string, PostBookingTurn>();
 
   private lcMemo = new Map<string, LifecycleTurn>();
+
+  /** Prompt 16: LLM entities → validated ContextPatches (grounding / conflicts / resolvers). */
+  private patches = new ContextPatchValidator();
 
   constructor(private readonly state: ConversationStateManager, private readonly postBooking?: PostBookingService, private readonly lifecycleActions?: BookingLifecycleActionService) {}
 
@@ -165,6 +173,53 @@ export class ContextualTurnApplier {
       if (pb.type === 'INFO') {
         out.applied.push('POST_BOOKING_LOOKUP');
         return { ...out, blockTools: false, postBooking: true, allowedTools: pb.allowedTools };
+      }
+    }
+
+    // 0c) Prompt 16 — ContextPatch validation: LLM entities are PROPOSALS. Grounding against the user's
+    //     own words + the authoritative session (conflict → clarification), DateResolver over any
+    //     LLM-computed date, ambiguous stations never guessed. Single writer stays below.
+    const proposedStations = { originRaw: e.originRaw, destinationRaw: e.destinationRaw, stationOnlyRaw: e.stationOnlyRaw };
+    const review: PatchReview = EXECUTION_LOCKED_STATES.has(S().bookingState)
+      ? { ok: true, patches: [], rejected: [] }          // locked: the P12/P13 lock answer below wins
+      : this.patches.review(S(), e, ctx.rawText || '');
+    if (ctx.contextPatches) ctx.contextPatches.push(...review.patches);
+    if (ctx.rejectedPatches) ctx.rejectedPatches.push(...review.rejected);
+    if (!review.ok) {
+      emit('CONTEXT_PATCH_REJECTED', { code: review.code, fields: review.rejected.map(r => r.field) });
+      return fail(review.code, review.message, review.pending);
+    }
+    const deferredClarify = review.clarify;
+    // 0d) Prompt 16 — the same grounding for SEARCH_TRAINS ARGUMENTS: a station/date the user never said must
+    //     not silently overwrite the session through the post-search sync (conflict → ask, no search);
+    //     an LLM-computed date contradicting the user's expression is replaced by that expression.
+    if (!EXECUTION_LOCKED_STATES.has(S().bookingState)) {
+      for (const tc of d.toolCalls || []) {
+        if (tc?.name !== 'SEARCH_TRAINS' || !tc.arguments || typeof tc.arguments !== 'object') continue;
+        const a = tc.arguments as Record<string, any>;
+        const pe: ExtractedEntities = {};
+        if (typeof a.origin === 'string' && a.origin) pe.originRaw = a.origin;
+        if (typeof a.destination === 'string' && a.destination) pe.destinationRaw = a.destination;
+        if (typeof a.date === 'string' && a.date) pe.dateRaw = a.date;
+        // values identical to the LLM's ORIGINAL entity proposals were already reviewed above
+        // (including ones the review removed, e.g. an ambiguous station handled by deferredClarify)
+        const same = (v?: string, ...w: Array<string | undefined>) => !!v && w.some(x => !!x && x.toLowerCase() === v.toLowerCase());
+        if (same(pe.originRaw, proposedStations.originRaw, proposedStations.stationOnlyRaw)) delete pe.originRaw;
+        if (same(pe.destinationRaw, proposedStations.destinationRaw, proposedStations.stationOnlyRaw)) delete pe.destinationRaw;
+        if (!pe.originRaw && !pe.destinationRaw && !pe.dateRaw) continue;
+        const before = pe.dateRaw;
+        const r2 = this.patches.review(S(), pe, ctx.rawText || '');
+        if (!r2.ok) {
+          if (ctx.rejectedPatches) ctx.rejectedPatches.push(...r2.rejected);
+          emit('CONTEXT_PATCH_REJECTED', { code: r2.code, fields: r2.rejected.map(r => r.field), source: 'TOOL_ARGUMENTS' });
+          return fail(r2.code, r2.message, r2.pending);
+        }
+        if (r2.clarify && !deferredClarify) return fail(r2.clarify.code, r2.clarify.message, r2.clarify.pending);
+        const overridden = r2.rejected.find(r => r.code === 'LLM_DATE_OVERRIDDEN');
+        if (overridden && pe.dateRaw && pe.dateRaw !== before) {
+          a.date = pe.dateRaw;   // DateResolver (via the tool validator) resolves the user's own expression
+          if (ctx.rejectedPatches) ctx.rejectedPatches.push(overridden);
+        }
       }
     }
 
@@ -307,7 +362,7 @@ export class ContextualTurnApplier {
       else if (pend === 'DESTINATION_REQUIRED' || (s.origin && !s.destination)) e.destinationRaw = st.code;
       else if (s.destination && !s.origin) e.originRaw = st.code;
       else {
-        return fail('AMBIGUOUS_ROUTE', `${shortName(st.name)} se chalna hai ya ${shortName(st.name)} jaana hai?`,
+        return fail('AMBIGUOUS_ROUTE', `${shortName(st.name)} ko origin rakhna hai ya destination?`,
           { type: 'CLARIFICATION_REQUIRED', data: { kind: 'STATION_ROLE', code: st.code, name: st.name } });
       }
     }
@@ -326,6 +381,18 @@ export class ContextualTurnApplier {
       out.notes.push(...r.notes);
       out.applied.push(...r.applied);
     }
+
+    // 7b) Prompt 16 — class / time PREFERENCE before a train is chosen ("AC chahiye") — stored, never a selection
+    if (e.preferredClassRaw || e.preferredTimeRaw) {
+      const s = S();
+      const fam = e.preferredClassRaw ? classPreferenceFamily(String(e.preferredClassRaw)) : null;
+      if (fam && fam !== s.preferredClass) { s.preferredClass = fam; ctx.changes.push('preferredClass'); out.applied.push('CLASS_PREFERENCE_SET'); }
+      const tw = e.preferredTimeRaw ? String(e.preferredTimeRaw).toUpperCase() : null;
+      if (tw && ['MORNING', 'AFTERNOON', 'EVENING', 'NIGHT', 'ANY'].includes(tw) && tw !== s.preferredTime) { s.preferredTime = tw as any; ctx.changes.push('preferredTime'); out.applied.push('TIME_PREFERENCE_SET'); }
+      if (fam || tw) this.state.bump(sessionId);
+    }
+    // ambiguous station: the turn's other valid slots are applied above; now ask (never guess)
+    if (deferredClarify) return fail(deferredClarify.code, deferredClarify.message, deferredClarify.pending);
 
     // 8) Train reference
     if (e.trainRef) {

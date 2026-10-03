@@ -95,6 +95,9 @@ server.post('/api/chat', async (request, reply) => {
     bookingProvider: bookingProviderView(),
     bookingExecution: bookingExecutionView(ctx.bookingExecution) ?? null,
     error: result.error ? { code: result.error.code, message: result.error.message } : null,
+    // Prompt 16: structured response (validated facts only; speechText for TTS) + derived context (PNR masked)
+    assistantResponse: result.assistantResponse,
+    conversationContext: result.conversationContext,
     events: result.events,
     cards: result.cards || [],
     context: { ...ctx, eventLog: (ctx.eventLog || []).slice(-15) },

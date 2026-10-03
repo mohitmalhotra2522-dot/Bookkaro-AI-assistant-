@@ -91,6 +91,58 @@ export class ConversationStateManager {
     return r;
   }
 
+  /**
+   * Prompt 16 — start a NEW active journey (explicit new booking). Validated by
+   * StateTransitionValidator.checkReset(). Clears ONLY the active-journey / planning context:
+   * journey A's route, date, passengers, train, class, results, review and pending questions never
+   * leak into journey B. BookingHistoryStore records (and bookingRecordIds) are untouched; a
+   * terminal execution record is archived to bookingExecutionHistory (same pattern as P13).
+   */
+  resetForNewJourney(sessionId: string): TransitionCheck & { cleared?: string[] } {
+    const s = this.getSession(sessionId);
+    const r = stateTransitionValidator.checkReset(s.bookingState);
+    if (!r.ok) return r;
+    const cleared: string[] = [];
+    const clear = (k: keyof BookingSession, v: any = undefined) => {
+      const cur = (s as any)[k];
+      if (cur !== undefined && cur !== null && !(Array.isArray(cur) && !cur.length)) cleared.push(String(k));
+      (s as any)[k] = v;
+    };
+    const now = new Date().toISOString();
+    // a READY handoff / handoff session belongs to the abandoned journey → status-only invalidation
+    const h: any = s.handoff;
+    if (h && h.status === 'READY') {
+      h.status = 'INVALIDATED'; h.statusReason = 'NEW_JOURNEY_STARTED'; h.statusChangedAt = now;
+      (s.handoffHistory ||= []).push({ handoffId: h.snapshot.handoffId, status: 'INVALIDATED', statusReason: 'NEW_JOURNEY_STARTED', at: now });
+    }
+    const hs: any = s.handoffSession;
+    if (hs && (hs.status === 'CREATED' || hs.status === 'READY')) {
+      hs.status = 'INVALIDATED'; hs.statusReason = 'NEW_JOURNEY_STARTED';
+      (s.handoffSessionHistory ||= []).push({ handoffSessionId: hs.handoffSessionId, bookingHandoffId: hs.bookingHandoffId, status: 'INVALIDATED', statusReason: 'NEW_JOURNEY_STARTED', at: now });
+    }
+    if (s.bookingExecution) {
+      (s.bookingExecutionHistory ||= []).push(s.bookingExecution);
+      if (s.bookingExecutionHistory.length > 20) s.bookingExecutionHistory.splice(0, s.bookingExecutionHistory.length - 20);
+      clear('bookingExecution');
+    }
+    for (const k of ['origin', 'originName', 'destination', 'destinationName', 'date', 'passengersCount', 'preferredClass', 'preferredTime',
+      'searchResults', 'lastSearch', 'searchMeta', 'selectedTrain', 'selectedClass', 'selectedJourney', 'fare', 'availability',
+      'lastTrainInfo', 'lastTimetable', 'focusTrainNumber', 'previousTrainNumber', 'review', 'readiness', 'confirmation',
+      'confirmedReviewVersion', 'carryOverSelection', 'lastPassengerRefId', 'activeBookingId', 'postBookingClarification',
+      'pendingLifecycleAction', 'lifecycleClarification', 'lastLifecycleAction', 'lastDetectedChanges'] as Array<keyof BookingSession>) clear(k);
+    clear('availableTrains', []);
+    clear('passengers', []);
+    s.currentPassengerIndex = 0;
+    s.reviewConfirmed = false;
+    s.irctcHandoffReady = false;
+    s.pendingInteraction = { type: 'NONE' };
+    s.bookingState = BookingState.IDLE;
+    // any displayIndex minted for journey A is now stale
+    s.searchResultsVersion = (s.searchResultsVersion || 0) + 1;
+    this.bump(sessionId);
+    return { ...r, cleared };
+  }
+
   // ---- Versioning / requests / events (Prompt 8) ----
 
   bump(sessionId: string): number {

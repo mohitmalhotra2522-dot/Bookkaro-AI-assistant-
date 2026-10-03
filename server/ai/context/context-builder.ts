@@ -17,7 +17,7 @@ import type { BookingSession } from '@shared/entities';
 import { currentResults } from './train-reference-resolver';
 import type { PostBookingContextView } from '../../booking/post-booking/post-booking-service';
 
-export interface HistoryMsg { role: 'user' | 'assistant' | 'tool'; content: string; toolCallId?: string; toolName?: string }
+export interface HistoryMsg { role: 'user' | 'assistant' | 'tool'; content: string; toolCallId?: string; toolName?: string; /** Prompt 16: active journey the message belongs to */ journeyId?: string }
 
 export interface LLMContext {
   /** Authoritative snapshot (safe fields only; no secrets ever stored). */
@@ -48,6 +48,12 @@ export interface LLMContext {
    * Contains NO PNR values (only pnrAvailable), no credentials, no raw provider data.
    */
   postBooking?: PostBookingContextView;
+  /**
+   * Prompt 16 — STRUCTURED conversation context (ConversationContextSummarizer): active journey,
+   * displayed result set, pending question, missing slots, verified flags. Deterministic; built
+   * from BookingSession — never an LLM-written summary, never PNR values / names / secrets.
+   */
+  conversationContext?: Readonly<Record<string, any>>;
 }
 
 export const MAX_RECENT_MESSAGES = 12;

@@ -83,6 +83,12 @@ export interface RuntimeHooks {
   onLiveTool?: (phase: 'REQUESTED' | 'RESULT', name: string, args: Record<string, any>, result?: { success: boolean; error?: { code: string } }) => void;
 }
 
+function stableJson(v: any): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+  return `{${Object.keys(v).sort().map(k => `${JSON.stringify(k)}:${stableJson(v[k])}`).join(',')}}`;
+}
+
 export interface ToolRuntimeResult {
   /** Final assistant message produced by the LLM after the loop. */
   finalMessage: string;
@@ -98,6 +104,8 @@ export interface ToolRuntimeResult {
   llmLatencyMs: number;
   /** If stopReason='error' or tool_limit, a structured error. */
   error?: OrchestratorError;
+  /** Prompt 16: identical tool calls skipped within this turn (result already attached). */
+  deduplicated?: number;
   /** Total loop latency (ms). */
   latencyMs: number;
 }
@@ -179,9 +187,19 @@ export class BoundToolRuntime {
     let llmLatencyMs = 0;
     const H = this.hooks;
     this.userText = userText;
+    // Prompt 16: in-turn dedup — an identical call (same tool + args + session context) whose valid
+    // result is already attached to THIS turn is not sent again. Each new turn always calls the provider
+    // fresh (no cross-turn cache), so explicit live requests ("abhi availability", "latest PNR") stay fresh.
+    const doneCalls = new Map<string, TurnToolResultView>();
+    let deduplicated = 0;
+    const sigOf = (tc: ToolCall) => {
+      const sx: any = this.getSession();
+      const t: any = sx.selectedTrain;
+      return `${tc?.name}|${stableJson(tc?.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
+    };
     const done = (finalMessage: string, stopReason: ToolRuntimeResult['stopReason'], error?: OrchestratorError): ToolRuntimeResult => ({
       finalMessage, finalDecision: lastDecision || dummyDecision(), steps, stopReason, error,
-      latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs
+      latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs, deduplicated
     });
 
     for (let iter = 0; iter < this.maxIterations; iter++) {
@@ -223,7 +241,18 @@ export class BoundToolRuntime {
 
       // Execute each tool call sequentially (later tools may depend on earlier results).
       for (const tc of toolCalls) {
+        const sig = sigOf(tc);
+        const prior = doneCalls.get(sig);
+        if (prior) {
+          deduplicated++;
+          turnResults.push({ ...prior, callId: tc.callId });
+          localHistory.push({ role: 'tool', content: JSON.stringify({ ok: true, deduplicated: true, sameAs: prior.callId }), toolCallId: tc.callId, toolName: tc.name });
+          H.emit?.('TOOL_CALL_DEDUPLICATED', { toolName: tc.name });
+          continue;
+        }
+        const before = turnResults.length;
         const r = await this.executeCall(tc, iter, turnResults, localHistory, steps);
+        if (turnResults.length > before && turnResults[turnResults.length - 1].ok) doneCalls.set(sig, turnResults[turnResults.length - 1]);
         if (r.stale) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Late result from an obsolete request was ignored.' });
         if (r.error) lastError = r.error;
       }

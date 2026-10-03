@@ -16,6 +16,8 @@ export interface InspectorMeta {
   events?: string[];
   error?: { code: string; message: string } | null;
   executionCapability?: { realBookingEnabled: boolean; effectiveExecutor: string; reason: string };
+  /** Prompt 16 — derived conversation context (journey / pending question / results / booking ref / masked PNR). */
+  conversation?: { activeJourneyId: string; pendingQuestion: string | null; missingFields: string[]; activeBookingId: string | null; activePnrMasked: string | null; resultSetId: string | null; resultCount: number; clarification: string | null; rejectedClaims: number };
 }
 
 export const SessionInspector: React.FC<{ ctx: any; meta: InspectorMeta }> = ({ ctx, meta }) => {
@@ -61,6 +63,7 @@ export const SessionInspector: React.FC<{ ctx: any; meta: InspectorMeta }> = ({ 
           {cell('realBooking', meta.executionCapability ? `${meta.executionCapability.realBookingEnabled ? 'flag on' : 'OFF'} → ${meta.executionCapability.effectiveExecutor} (${meta.executionCapability.reason})` : undefined)}
           {cell('sessionV', meta.sessionVersion ?? c.sessionVersion)}
           {cell('searchV', meta.searchResultsVersion ?? c.searchResultsVersion)}
+          {meta.conversation && <div style={{ gridColumn: '1 / -1' }}>{cell('context', `${meta.conversation.activeJourneyId} · q=${meta.conversation.pendingQuestion || '—'}${meta.conversation.missingFields.length ? ` · missing ${meta.conversation.missingFields.join('/')}` : ''} · results ${meta.conversation.resultSetId ? `${String(meta.conversation.resultSetId).slice(0, 8)}…×${meta.conversation.resultCount}` : '—'}${meta.conversation.activeBookingId ? ` · booking ${String(meta.conversation.activeBookingId).slice(0, 10)}…` : ''}${meta.conversation.activePnrMasked ? ` · PNR ${meta.conversation.activePnrMasked}` : ''}${meta.conversation.rejectedClaims ? ` · ${meta.conversation.rejectedClaims} claim(s) removed` : ''}`, !!meta.conversation.rejectedClaims)}</div>}
           <div style={{ gridColumn: '1 / -1' }}>{cell('ask', meta.pendingQuestion)}</div>
           <div style={{ gridColumn: '1 / -1' }}>{cell('tools', meta.toolActivity)}</div>
           <div style={{ gridColumn: '1 / -1' }}>{cell('events', meta.events?.length ? meta.events.join(', ') : undefined)}</div>

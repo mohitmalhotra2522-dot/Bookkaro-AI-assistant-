@@ -98,7 +98,11 @@ export function questionFor(p: PendingInteraction | undefined, s: BookingSession
     case 'CLARIFICATION_REQUIRED': {
       if (p.data?.kind === 'STATION_ROLE') {
         const n = stationLabel(p.data.code, p.data.name);
-        return `${n} se chalna hai ya ${n} jaana hai?`;
+        return `${n} ko origin rakhna hai ya destination?`;
+      }
+      if (p.data?.kind === 'STATION_CHOICE') {
+        const c = (p.data.candidates || []).map((x: any) => String(x.name || x.code).replace(/ Junction$/, ''));
+        return c.length > 1 ? `${c.slice(0, -1).join(', ')} ya ${c[c.length - 1]} — kaunsa station?` : 'Kaunsa station?';
       }
       return p.hint || 'Thoda spasht batayein?';
     }

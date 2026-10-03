@@ -57,6 +57,8 @@ const REWIND_TARGETS: ReadonlySet<BookingState> = new Set([
 ]);
 
 /** States from which no rewind is allowed (terminal for this milestone). */
+const RESET_BLOCKED_FROM: ReadonlySet<BookingState> = new Set([BookingState.BOOKING_EXECUTION_REQUESTED, BookingState.BOOKING_IN_PROGRESS, BookingState.BOOKING_STATUS_UNKNOWN]);
+
 const NO_REWIND_FROM: ReadonlySet<BookingState> = new Set([BookingState.COMPLETE, ...EXECUTION_LOCKED_STATES]);
 
 export type TransitionCheck =
@@ -105,6 +107,18 @@ export class StateTransitionValidator {
   }
 
   /** Provider-result transitions only (EXECUTION_TRANSITIONS). Never relaxes the generic guards. */
+  /**
+   * Prompt 16 — explicit NEW JOURNEY reset (user said "new booking" / "ek aur ticket"). Allowed only
+   * from planning states and from AUTHORITATIVELY terminal booking states. Never while a provider
+   * execution may be in flight (EXECUTION_REQUESTED / IN_PROGRESS / STATUS_UNKNOWN).
+   */
+  checkReset(from: BookingState): TransitionCheck {
+    if (RESET_BLOCKED_FROM.has(from)) {
+      return this.reject(from, BookingState.IDLE, 'A booking execution is still being verified — a new journey cannot start yet.');
+    }
+    return { ok: true, path: from === BookingState.IDLE ? [] : [BookingState.IDLE], kind: from === BookingState.IDLE ? 'SAME' : 'REWIND' };
+  }
+
   checkExecution(from: BookingState, to: BookingState): TransitionCheck {
     if (from === to) return { ok: true, path: [], kind: 'SAME' };
     if ((EXECUTION_TRANSITIONS[from] || []).includes(to)) return { ok: true, path: [to], kind: 'FORWARD' };

@@ -70,10 +70,10 @@ function cleanNameValue(v: string): string | undefined {
 }
 const EXEC_RE = /\b(payment|pay kar|pay karo|pay kardo|paise bhej|paise de do|submit kar|submit karo|submit kardo|irctc (pe |par )?login|login kar|login karo)\b/i;
 
-const STATION_RE = /\b(new delhi|amritsar|ludhiana|delhi|chandigarh|jalandhar|asr|ldh|ndls|cdg|juc)\b/g;
+const STATION_RE = /\b(new delhi|amritsar|ludhiana|delhi|chandigarh|jalandhar|ambala cantt|ambala city|ambala|asr|ldh|ndls|cdg|juc|umb|ubc)\b/g;
 const STATION_CODE: Record<string, string> = {
   'new delhi': 'NDLS', delhi: 'NDLS', ndls: 'NDLS', amritsar: 'ASR', asr: 'ASR', ludhiana: 'LDH', ldh: 'LDH',
-  chandigarh: 'CDG', cdg: 'CDG', jalandhar: 'JUC', juc: 'JUC'
+  chandigarh: 'CDG', cdg: 'CDG', jalandhar: 'JUC', juc: 'JUC', 'ambala cantt': 'UMB', umb: 'UMB', 'ambala city': 'UBC', ubc: 'UBC'
 };
 const DATE_RES: RegExp[] = [
   /\b(day after tomorrow|aaj|today|kal|tomorrow|parso|parson)\b/g,
@@ -140,7 +140,7 @@ export class MockLLMProvider implements LLMProvider {
     }
     const ctxPb: any = (input.context as any)?.postBooking;
     const isPnr = /\bpnr\b/.test(t);
-    const isLive = /\b(track|tracking|live status|live location|running status|kahan pahunchi|kaha pahunchi|kitni late)\b|\babhi (kaha|kahan|kidhar)\b/.test(t) && /\b(train|gaadi|gadi|track|live|running|\d{5})\b/.test(t);
+    const isLive = /\b(track|tracking|live status|live location|running status|kahan pahunchi|kaha pahunchi|kitni late)\b|\babhi (kaha|kahan|kidhar)\b|\b(kaha|kahan|kidhar) hai\b/.test(t) && /\b(train|gaadi|gadi|track|live|running|\d{5})\b/.test(t);
     if (isPnr) {
       const cand = extractPnrCandidate(raw);
       if (cand) return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [this.call('CHECK_PNR', { pnr: cand })]);
@@ -207,7 +207,21 @@ export class MockLLMProvider implements LLMProvider {
       return null;
     };
     const between = (a: { end: number }, b: { start: number }) => t.slice(a.end, b.start);
-    if (stations.length >= 2 && NEG_RE.test(between(stations[0], stations[1]))) {
+    // Prompt 16: answer to "Ambala Cantt (UMB) ya Ambala City (UBC) — kaunsa?" (the LLM never picks one itself)
+    const choice = pending === 'CLARIFICATION_REQUIRED' && pendingData?.kind === 'STATION_CHOICE' && stations.length <= 1;
+    let chosen: string | undefined;
+    if (choice) {
+      chosen = stations[0] && stations[0].w !== 'ambala' ? stations[0].w : undefined;
+      if (!chosen) {
+        const c = (pendingData.candidates || []).find((x: any) => (/\bcantt?\b/.test(t) && /cantt/i.test(x.name)) || (/\bcity\b/.test(t) && /city/i.test(x.name)));
+        if (c) chosen = String(c.code);
+      }
+    }
+    if (choice && chosen) {
+      if (pendingData.role === 'origin') u.originRaw = chosen;
+      else if (pendingData.role === 'destination') u.destinationRaw = chosen;
+      else u.stationOnlyRaw = chosen;
+    } else if (stations.length >= 2 && NEG_RE.test(between(stations[0], stations[1]))) {
       // "Delhi nahi Ludhiana" — correction of whichever slot holds the old value
       const oldC = STATION_CODE[stations[0].w], newW = stations[1].w;
       if (s.origin === oldC && s.destination !== oldC) u.originRaw = newW;
@@ -324,6 +338,8 @@ export class MockLLMProvider implements LLMProvider {
     if (/\b(fare|kiraya|kiraaya|किराया|price|kitne ka|kitna paisa|kitne paise|cost|rate)\b/.test(t)) u.infoRequests.push('FARE');
     if (/\b(timetable|time table|schedule|stops|stoppage|kahan kahan rukti)\b/.test(t)) u.infoRequests.push('TIMETABLE');
     if (this.isInfoOnly(t, cls) && !u.infoRequests.length) { u.infoRequests.push('TRAIN_INFO'); u.infoTrainNumber = nums[0]; }
+    // Prompt 16: a side question ("Waise 12014 kal chalti hai?") is NOT a journey change — no slot proposals
+    if (this.isInfoOnly(t, cls)) { delete u.dateRaw; delete u.originRaw; delete u.destinationRaw; delete u.stationOnlyRaw; delete u.trainRef; }
     if (!u.infoRequests.length && /\b(iske baare|iski jaankari|iski details)\b/.test(t)) u.infoRequests.push('TRAIN_INFO');
     if (u.infoRequests.includes('TIMETABLE') && nums.length === 1) u.infoTrainNumber = nums[0];
     // order matters for multi-step chains
@@ -362,7 +378,7 @@ export class MockLLMProvider implements LLMProvider {
   }
 
   private isInfoOnly(t: string, cls: string | null): boolean {
-    return /\b\d{5}\b/.test(t) && /\b(batao|bataiye|info|details?|jaankari|jankari|ke baare)\b/.test(t) && !cls
+    return /\b\d{5}\b/.test(t) && /\b(batao|bataiye|info|details?|jaankari|jankari|ke baare|chalti|chalta|kab chalti|runs?|running days)\b/.test(t) && !cls
       && !/\b(availability|seats?|fare|kiraya|price|timetable|schedule)\b/.test(t);
   }
 
@@ -490,6 +506,23 @@ export class MockLLMProvider implements LLMProvider {
     const hasResults = (s.searchResults?.trains?.length || 0) > 0;
 
     // Context-dependent short replies
+    const pi = s.pendingInteraction;
+    if ((u.affirm || u.negate) && pi?.type === 'CLARIFICATION_REQUIRED' && pi.data?.kind === 'CONTEXT_CONFLICT') {
+      if (u.negate) return this.final('UPDATE_JOURNEY', 'Theek hai, jo pehle tha wahi rakhte hain.');
+      // the user CONFIRMED the backend's question → propose exactly that value (backend re-validates)
+      const f = String(pi.data.field), v = String(pi.data.proposedCode);
+      const ce: ExtractedEntities = f === 'origin' ? { originRaw: v } : f === 'destination' ? { destinationRaw: v } : f === 'date' ? { dateRaw: v } : { passengersCountRaw: v };
+      const o = f === 'origin' ? v : s.origin, dd = f === 'destination' ? v : s.destination, dt = f === 'date' ? v : s.date;
+      const calls: ToolCall[] = [];
+      if (o && dd && dt) {
+        const args: Record<string, any> = { origin: o, destination: dd, date: dt };
+        const pc = f === 'passengersCount' ? parseInt(v, 10) : s.passengersCount;
+        if (pc) args.passengersCount = pc;
+        if (s.preferredClass && s.preferredClass !== 'ANY') args.preferredClass = s.preferredClass;
+        calls.push(this.call('SEARCH_TRAINS', args));
+      }
+      return this.d(f === 'date' ? 'UPDATE_DATE' : 'UPDATE_JOURNEY', calls.length ? 'SEARCH_TRAINS' : 'UPDATE_JOURNEY', ce, calls);
+    }
     if (u.affirm) {
       if (st === BookingState.AWAITING_CONFIRMATION) return this.d('CONFIRM_BOOKING', 'PREPARE_IRCTC_HANDOFF', { affirmation: true });
       if (st === BookingState.REVIEW) return this.d('CONFIRM_BOOKING', 'REQUEST_CONFIRMATION', { affirmation: true });

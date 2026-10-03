@@ -32,6 +32,11 @@ import { v4 as uuid } from '../orchestrator/utils';
 import { ContextualTurnApplier, type ApplyCtx, type ApplyOutcome } from '../context/turn-applier';
 import { RequestGuard } from '../context/request-guard';
 import { buildLLMContext, type HistoryMsg } from '../context/context-builder';
+import { ConversationContextManager, pendingQuestionOf, summarizeContext } from '../conversation/conversation-context';
+import { normalizeUtterance } from '../conversation/input-normalizer';
+import { guardResponseFacts } from '../conversation/response-fact-guard';
+import { buildAssistantResponse } from '../conversation/assistant-response';
+import type { AssistantResponse, ConversationContext, ContextPatch, RejectedPatch } from '@shared/conversation-context';
 import { derivePendingInteraction, questionFor } from '../context/pending-interaction';
 import { searchSummary, factFromTool, liveToolMessage, LIVE_TOOLS } from '../context/response-formatter';
 import { PostBookingService } from '../../booking/post-booking/post-booking-service';
@@ -97,6 +102,20 @@ export interface AgentTurnResult {
   error?: OrchestratorError;
   events: string[];
   turnLog: TurnRecord;
+  /** Prompt 16: structured response (text + concise validated speechText) and derived context. */
+  assistantResponse: AssistantResponse;
+  conversationContext: ConversationContext;
+}
+
+/** Prompt 16: per-turn observability extras carried to finish(). */
+interface TurnExtras {
+  interruption?: boolean;
+  contextBefore?: ReturnType<typeof summarizeContext>;
+  pqBefore?: ReturnType<typeof pendingQuestionOf>;
+  patches?: ContextPatch[];
+  rejectedPatches?: RejectedPatch[];
+  rejectedClaims?: string[];
+  backendActions?: string[];
 }
 
 const SENSITIVE_REPLY = 'Main kabhi password, OTP, CAPTCHA, CVV, card, UPI PIN ya IRCTC credentials nahi maangta. Kripya aisi jaankari share na karein.';
@@ -118,6 +137,8 @@ export class ConversationAgentOrchestrator {
   readonly postBooking: PostBookingService;
   /** Prompt 15: cancellation / modification / refund status — backend-controlled (never an LLM tool). */
   readonly lifecycleActions: BookingLifecycleActionService;
+  /** Prompt 16: derived conversation context + tiny conversational memory (never authoritative). */
+  readonly context = new ConversationContextManager();
 
   constructor(
     private readonly llm: LLMProvider,
@@ -153,7 +174,12 @@ export class ConversationAgentOrchestrator {
     this.turnStartNames.set(sessionId, (s0.passengers || []).map(p => p.name).filter((n): n is string => !!n));
     const stateBefore = s0.bookingState;
     const pendingBefore = s0.pendingInteraction?.type || 'NONE';
-    const normalizedInput = normalizeInput(userText);
+    // Prompt 16: Input Normalizer — barge-in prefix ("Ruko, …") + explicit new-booking phrase
+    const utter = normalizeUtterance(normalizeInput(userText));
+    const normalizedInput = utter.text;
+    const contextBefore = summarizeContext(this.context.snapshot(s0, this.activeBookingOf(sessionId)), s0);
+    const pqBefore = pendingQuestionOf(s0.pendingInteraction);
+    const extra = { interruption: utter.interruption, contextBefore, pqBefore } as TurnExtras;
     // Sensitive input is never persisted verbatim (history / turn log).
     const sensitiveInput = containsSensitiveRequest(normalizedInput);
     const safeInput = sensitiveInput ? '[REDACTED SENSITIVE INPUT]' : normalizedInput;
@@ -199,13 +225,41 @@ export class ConversationAgentOrchestrator {
         message: NON_RAILWAY_REPLY, rejection: 'UNKNOWN_INTENT', rt: null, decision: null, changes: [] });
     }
 
+    // ---- Prompt 16: explicit NEW BOOKING → new active journey (history store untouched) ----
+    let llmInput = normalizedInput;
+    if (utter.newBooking) {
+      const nj = this.startNewJourney(sessionId, turnId, events);
+      if (!nj.ok) {
+        const err: OrchestratorError = { code: 'ACTION_NOT_ALLOWED', message: nj.message };
+        return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
+          message: err.message, error: err, rejection: 'ACTION_NOT_ALLOWED', rt: null, decision: null, changes: [], extra });
+      }
+      extra.backendActions = ['NEW_JOURNEY_STARTED'];
+      if (!utter.remainder) {
+        const sN = this.state.getSession(sessionId);
+        sN.pendingInteraction = { type: 'ORIGIN_REQUIRED', data: { route: true }, setAtTurnId: turnId };
+        const prev = this.postBooking.store.getBookingsForSession(sessionId).length;
+        const msg = `Theek hai, nayi booking shuru karte hain${prev ? ' — pichli booking history safe hai' : ''}. Kahan se kahan jaana hai?`;
+        return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
+          message: msg, rt: null, decision: null, changes: ['newJourney'], extra });
+      }
+      llmInput = utter.remainder;
+    }
+
     // ---- Tool-calling loop with per-decision deterministic application ----
-    const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges, rawText: normalizedInput, requestId };
+    const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges, rawText: llmInput, requestId, contextPatches: [], rejectedPatches: [] };
+    extra.patches = ctx.contextPatches; extra.rejectedPatches = ctx.rejectedPatches;
     let pendingOverride: PendingInteraction | undefined;
     const bound = this.runtime.bind(guard.getSession, guard.commit, {
       requestId,
       isStale: () => guard.isStale(),
-      buildContext: () => buildLLMContext(this.state.getSession(sessionId), this.getHistory(sessionId), undefined, this.postBooking.contextFor(sessionId)),
+      buildContext: () => {
+        // Prompt 16: structured context package — authoritative session view + structured conversation
+        // context + journey-scoped recent turns (never the unlimited transcript)
+        const sc = this.state.getSession(sessionId);
+        return { ...buildLLMContext(sc, this.getHistory(sessionId), undefined, this.postBooking.contextFor(sessionId)),
+          conversationContext: summarizeContext(this.context.snapshot(sc, this.activeBookingOf(sessionId)), sc) };
+      },
       emit: (type, data) => { if (!guard.isStale()) { this.state.emit(sessionId, type, turnId, data); events.push(type); } },
       grounding: (text: string) => this.postBooking.grounding(sessionId, text),
       onLiveTool: (phase, name, args, result) => {
@@ -221,7 +275,7 @@ export class ConversationAgentOrchestrator {
     });
     let rt: ToolRuntimeResult;
     try {
-      rt = await bound.run(normalizedInput, mode, this.getHistory(sessionId));
+      rt = await bound.run(llmInput, mode, this.getHistory(sessionId));
     } catch (e: any) {
       const err: OrchestratorError = { code: e?.code === 'INVALID_STATE_TRANSITION' ? 'INVALID_STATE_TRANSITION' : 'TOOL_FAILED', message: 'Maaf kijiye, ye step abhi complete nahi ho paaya. Kripya dobara try karein.' };
       return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
@@ -310,16 +364,24 @@ export class ConversationAgentOrchestrator {
     const overrideValid = !override || !prep || prep.pendingOverride === override || sess.bookingState !== BookingState.AWAITING_CONFIRMATION || override.type === 'PASSENGER_DETAILS_REQUIRED' || override.type === 'CLARIFICATION_REQUIRED' || !!override.data?.correction;
     sess.pendingInteraction = { ...((overrideValid && override) || derivePendingInteraction(sess)), setAtTurnId: turnId };
 
-    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes);
+    extra.rejectedClaims = [];
+    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims);
+    extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
       message, error: blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined), rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
-      execution: prep?.execution || dupExecution });
+      execution: prep?.execution || dupExecution, extra });
   }
 
   // ---------------------------------------------------------------- composition
 
-  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = []): string {
+  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = []): string {
+    // Prompt 16: LLM wording may phrase authoritative facts only (invented train / fare / PNR / availability removed)
+    const factCheck = (text: string): string => {
+      const g = guardResponseFacts(text, { session: s, steps: rt.steps, records: this.postBooking.store.getBookingsForSession(s.sessionId) as any });
+      rejectedClaims.push(...g.rejected);
+      return g.text;
+    };
     const parts: string[] = [];
     const q = questionFor(s.pendingInteraction, s, mode);
     if (blockErr) {
@@ -345,7 +407,11 @@ export class ConversationAgentOrchestrator {
     // Prompt 14: PNR / live status answers are ALWAYS deterministic phrasing of the provider result
     // (or its validated error) — LLM wording can never add or upgrade a status.
     if (nonSearch.some(st => LIVE_TOOLS.has(st.result.toolName))) parts.push(liveToolMessage(nonSearch, mode));
-    else if (llmFinalUseful) parts.push(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode)));
+    else if (llmFinalUseful) {
+      const guarded = factCheck(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode)));
+      if (guarded) parts.push(guarded);
+      else if (rejectedClaims.length) parts.push('Ye jaankari abhi provider se verify nahi hui hai, isliye main ise confirm nahi kar sakta.');
+    }
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
       if (st.result.toolName === 'CHECK_AVAILABILITY') cards.push({ type: 'availability', data: st.result.data });
@@ -359,7 +425,7 @@ export class ConversationAgentOrchestrator {
     if (rt.stopReason === 'tool_limit' && rt.error) parts.push(rt.error.message);
     const joined = parts.join(' ');
     if (q && !joined.includes(q)) parts.push(q);
-    if (!parts.length) parts.push(rt.finalDecision.clarification || 'Main train search, selection, availability aur fare mein madad kar sakta hoon.');
+    if (!parts.length) parts.push((rt.finalDecision.clarification && factCheck(rt.finalDecision.clarification)) || 'Main train search, selection, availability aur fare mein madad kar sakta hoon.');
     return joinParts(parts);
   }
 
@@ -371,8 +437,10 @@ export class ConversationAgentOrchestrator {
     message: string; error?: OrchestratorError; rejection?: string; stale?: boolean;
     rt: ToolRuntimeResult | null; decision: AgentDecision | null; changes: string[]; prepSteps?: ToolCallStep[];
     execution?: ExecutionLogRecord;
+    extra?: TurnExtras;
   }): AgentTurnResult {
     const s = this.state.getSession(a.sessionId);
+    const x: TurnExtras = a.extra || {};
     if (!a.stale && a.message) this.pushHistory(a.sessionId, { role: 'assistant', content: maskPnrsInText(a.message) });
     const steps: ToolCallStep[] = [...(a.rt?.steps || []), ...(a.prepSteps || [])];
     // Observability privacy: passenger names are masked in the turn record.
@@ -408,8 +476,26 @@ export class ConversationAgentOrchestrator {
       handoffSessionStatus: s.handoffSession?.status,
       confirmationStatus: s.confirmation?.status,
       bookingLifecycle: s.bookingLifecycle?.status,
-      latencyMs: Date.now() - a.startedAt
+      latencyMs: Date.now() - a.startedAt,
+      // ---- Prompt 16 observability (structured; no names / PNR values / secrets) ----
+      pendingQuestionBefore: x.pqBefore ?? pendingQuestionOf({ type: a.pendingBefore as any }),
+      pendingQuestionAfter: a.stale ? (x.pqBefore ?? null) : pendingQuestionOf(s.pendingInteraction),
+      contextChanges: (x.patches || []).map(p => ({ field: p.field, kind: p.kind, value: p.value, previous: p.previous, invalidates: [...p.invalidates], resolvedBy: p.resolvedBy })),
+      rejectedProposals: (x.rejectedPatches || []).map(r => ({ field: r.field, code: r.code })),
+      rejectedClaims: x.rejectedClaims || [],
+      backendActions: x.backendActions || [],
+      resultSetId: (s.searchResults as any)?.resultId ?? s.searchMeta?.resultId ?? null,
+      activeJourneyId: this.context.activeJourneyId(a.sessionId),
+      interruption: !!x.interruption,
+      contextBefore: x.contextBefore,
+      contextAfter: undefined
     };
+    if (!a.stale) {
+      this.context.noteTools(a.sessionId, steps, s);
+      this.context.noteIntents(a.sessionId, a.decision?.intent, pendingQuestionOf(s.pendingInteraction) || (a.error ? 'ERROR' : 'ANSWER'));
+    }
+    const conversationContext = this.context.snapshot(s, this.activeBookingOf(a.sessionId));
+    turnLog.contextAfter = summarizeContext(conversationContext, s);
     const th = this.turns.get(a.sessionId) || [];
     th.push(turnLog);
     if (th.length > MAX_TURN_HISTORY) th.splice(0, th.length - MAX_TURN_HISTORY);
@@ -426,17 +512,45 @@ export class ConversationAgentOrchestrator {
       stale: a.stale,
       error: a.error,
       events: a.events,
-      turnLog
+      turnLog,
+      assistantResponse: buildAssistantResponse({
+        text: a.stale ? '' : a.message, mode: a.mode, state: s.bookingState, pendingQuestion: conversationContext.pendingQuestion,
+        question: questionFor(s.pendingInteraction, s, a.mode), cards: a.cards, steps, error: a.error ? { code: a.error.code, message: a.error.message } : null,
+        rejectedClaims: x.rejectedClaims || []
+      }),
+      conversationContext
     };
+  }
+
+  /** Prompt 16: explicit new journey — validated reset; BookingHistoryStore records are preserved. */
+  private startNewJourney(sessionId: string, turnId: string, events: string[]): { ok: true; journeyId: string } | { ok: false; message: string } {
+    const r = this.state.resetForNewJourney(sessionId);
+    if (!r.ok) return { ok: false, message: 'Pichli booking ka status abhi verify ho raha hai — uske final hone ke baad nayi booking shuru karenge.' };
+    const journeyId = this.context.startNewJourney(sessionId);
+    this.state.emit(sessionId, 'NEW_JOURNEY_STARTED', turnId, { journeyId, cleared: r.cleared || [] });
+    events.push('NEW_JOURNEY_STARTED');
+    return { ok: true, journeyId };
+  }
+
+  /** Active booking (for "iska" / masked PNR in context) — from the authoritative history store only. */
+  private activeBookingOf(sessionId: string): { bookingId: string; pnr: string | null } | null {
+    const s = this.state.getSession(sessionId);
+    const recs = this.postBooking.store.getBookingsForSession(sessionId);
+    const r = (s.activeBookingId && recs.find(x => x.bookingId === s.activeBookingId)) || null;
+    return r ? { bookingId: r.bookingId, pnr: r.pnr ?? null } : null;
   }
 
   private pushHistory(sid: string, m: HistoryMsg) {
     const h = this.history.get(sid) || [];
-    h.push(m);
+    h.push({ ...m, journeyId: this.context.activeJourneyId(sid) });
     if (h.length > 60) h.splice(0, h.length - 60);
     this.history.set(sid, h);
   }
-  private getHistory(sid: string): HistoryMsg[] { return this.history.get(sid) || []; }
+  /** Prompt 16: LLM history is scoped to the ACTIVE journey (journey A turns never leak into journey B). */
+  private getHistory(sid: string): HistoryMsg[] {
+    const j = this.context.activeJourneyId(sid);
+    return (this.history.get(sid) || []).filter(m => !m.journeyId || m.journeyId === j);
+  }
 }
 
 // ------------------------------------------------------------------ helpers

@@ -58,14 +58,22 @@ const App: React.FC = () => {
           state: resp.state, pendingType: resp.pendingInteraction?.type, pendingQuestion: resp.pendingQuestion,
           sessionVersion: resp.sessionVersion, searchResultsVersion: resp.searchResultsVersion,
           toolActivity: resp.toolActivity, events: resp.events, error: resp.error,
-          executionCapability: resp.executionCapability
+          executionCapability: resp.executionCapability,
+          conversation: resp.conversationContext ? {
+            activeJourneyId: resp.conversationContext.activeJourneyId, pendingQuestion: resp.conversationContext.pendingQuestion,
+            missingFields: resp.conversationContext.missingFields || [], activeBookingId: resp.conversationContext.activeBookingId,
+            activePnrMasked: resp.conversationContext.activePnrMasked, resultSetId: resp.conversationContext.displayedResults?.resultSetId ?? null,
+            resultCount: resp.conversationContext.displayedResults?.items?.length || 0,
+            clarification: resp.assistantResponse?.clarification ?? null, rejectedClaims: resp.assistantResponse?.rejectedClaims?.length || 0
+          } : undefined
         });
         if (resp.toolActivity) setToolActivity(resp.toolActivity);
         addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: resp.message, timestamp: Date.now() });
         setContext(resp.context);
         resp.cards.forEach((card: any) => addCard(card));
         if (mode === 'VOICE') {
-          voice.speak(resp.message);
+          // Prompt 16: concise validated speechText (same facts as the text reply); falls back to the text
+          voice.speak(resp.assistantResponse?.speechText || resp.message);
         }
       } catch (e: any) {
         setError(e.message || 'कुछ गलत हुआ।');

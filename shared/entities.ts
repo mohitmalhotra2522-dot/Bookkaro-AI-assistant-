@@ -324,6 +324,10 @@ export type BookingEventType =
   | 'BOOKING_CONFIRMATION_REQUESTED'
   | 'TOOL_FAILED'
   | 'SESSION_INVALIDATED'
+  // Prompt 16 — conversation context
+  | 'CONTEXT_PATCH_REJECTED'
+  | 'NEW_JOURNEY_STARTED'
+  | 'TOOL_CALL_DEDUPLICATED'
   | 'STALE_RESULT_REJECTED'
   | 'CORRECTION_APPLIED'
   // ---- Prompt 9: booking preparation ----

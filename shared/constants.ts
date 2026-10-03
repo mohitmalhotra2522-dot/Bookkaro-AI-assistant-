@@ -17,8 +17,19 @@ export const STATION_ALIASES: Record<string, { code: string; name: string }> = {
   chandigarh: { code: 'CDG', name: 'Chandigarh' },
   cdg: { code: 'CDG', name: 'Chandigarh' },
   jalandhar: { code: 'JUC', name: 'Jalandhar City' },
-  juc: { code: 'JUC', name: 'Jalandhar City' }
+  juc: { code: 'JUC', name: 'Jalandhar City' },
+  // Prompt 16: two real stations share the name "Ambala" — the bare name is AMBIGUOUS (never guessed)
+  'ambala cantt': { code: 'UMB', name: 'Ambala Cantt Junction' },
+  'ambala city': { code: 'UBC', name: 'Ambala City' }
 };
+
+/**
+ * Prompt 16 — station names that map to MORE THAN ONE station. The backend asks the user
+ * (AMBIGUOUS_STATION) instead of picking one; the LLM never chooses a station code.
+ */
+export const AMBIGUOUS_STATION_NAMES: Readonly<Record<string, ReadonlyArray<{ code: string; name: string }>>> = Object.freeze({
+  ambala: [{ code: 'UMB', name: 'Ambala Cantt Junction' }, { code: 'UBC', name: 'Ambala City' }]
+});
 
 export const SUPPORTED_TRAVEL_CLASSES = {
   '1A': 'AC First Class',

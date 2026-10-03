@@ -158,6 +158,9 @@ export type OrchestratorErrorCode =
   | 'AMBIGUOUS_ROUTE'
   | 'AMBIGUOUS_DATE'
   | 'AMBIGUOUS_STATION'
+  /** Prompt 16 */
+  | 'CONTEXT_CONFLICT'
+  | 'MISSING_CONTEXT'
   | 'AMBIGUOUS_REFERENCE'
   | 'INVALID_TRAIN_SELECTION'
   | 'INVALID_TRAIN_REFERENCE'
@@ -301,5 +304,17 @@ export interface TurnRecord {
   reviewVersion?: number;
   confirmationVersion?: number;
   stateAfter: string;
+  // ---- Prompt 16 observability ----
+  pendingQuestionBefore?: string | null;
+  pendingQuestionAfter?: string | null;
+  contextChanges?: Array<{ field: string; kind: string; value: string | number | null; previous: string | number | null; invalidates: string[]; resolvedBy?: string }>;
+  rejectedProposals?: Array<{ field: string; code: string }>;
+  rejectedClaims?: string[];
+  backendActions?: string[];
+  resultSetId?: string | null;
+  activeJourneyId?: string;
+  interruption?: boolean;
+  contextBefore?: Readonly<Record<string, any>>;
+  contextAfter?: Readonly<Record<string, any>>;
   latencyMs: number;
 }
