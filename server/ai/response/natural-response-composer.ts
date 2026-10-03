@@ -23,6 +23,10 @@ import { detectLanguageStyle, type LanguageStyle } from '@shared/voice/language-
 import { railwayResponseGrounding } from '../tool-runtime/railway-response-grounding';
 import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
+import {
+  buildFactIndex, judgeTimes, judgeComparison, isClassListClaim, repairClassList, judgeClassList, judgeFareScope,
+  classifyPaxCount, isSessionish, derivedTrainCounts, isGeneralKnowledgeClaim, classifyClaim, type ClaimProvenance, type TimeVerdict, type FareFact, type PaxClass
+} from './claim-facts';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -63,6 +67,11 @@ export interface NaturalComposeInput {
    * mentioning cities, train types, days or small numbers that are part of a general explanation.
    */
   general?: boolean;
+  /**
+   * Prompt 25 Part 10: a separate wording call is allowed only when material information arrived after the agent
+   * spoke (or the provider has no agent-authored replies). false → no second LLM call; the backend reply is used.
+   */
+  allowWordingCall?: boolean;
 }
 
 export interface NaturalComposeResult {
@@ -76,6 +85,12 @@ export interface NaturalComposeResult {
   /** Prompt 23: AGENT = the native agent's own final answer (validated); WORDING = separate spoken-wording call. */
   authoredBy?: 'AGENT' | 'WORDING';
   general?: boolean;
+  /** Prompt 25 Part 12: internal provenance of every accepted sentence (never sent to the user). */
+  provenance?: ClaimProvenance[];
+  /** Prompt 25: sentences kept with a meaning-preserving repair (CLASS_LIST disambiguation). */
+  repaired?: number;
+  /** Prompt 25 Part 10: whether a second (wording) LLM call was made. */
+  wordingCall?: boolean;
 }
 
 const SAFETY = new Set(['FORBIDDEN_ACTION', 'SENSITIVE_REQUEST_REJECTED', 'SENSITIVE_DATA_REJECTED', 'BOOKING_ACCESS_DENIED', 'INVALID_LLM_OUTPUT', 'SESSION_VERSION_CONFLICT']);
@@ -113,6 +128,34 @@ const SHORT_Q: Record<string, string> = {
   TRAIN_SELECTION_REQUIRED: 'Kaunsi train chahiye?', CLASS_SELECTION_REQUIRED: 'Kaunsi class chahiye?',
   REVIEW_APPROVAL_REQUIRED: 'Confirm karna hai?', CONFIRMATION_REQUIRED: 'Confirm karna hai?'
 };
+/** Prompt 25 Part 7: the backend's OWN appended question follows the user's language (the LLM's text is never rewritten). */
+const SHORT_Q_EN: Record<string, string> = {
+  ORIGIN_REQUIRED: 'Where will you be travelling from?', DESTINATION_REQUIRED: 'Where would you like to go?',
+  DATE_REQUIRED: 'Which date would you like to travel?', PASSENGERS_REQUIRED: 'How many passengers?',
+  TRAIN_SELECTION_REQUIRED: 'Which train would you like?', CLASS_SELECTION_REQUIRED: 'Which class would you like?',
+  PASSENGER_DETAILS_REQUIRED: 'Could you share the passenger details — name, age and gender?',
+  REVIEW_APPROVAL_REQUIRED: 'Shall I go ahead and confirm?', CONFIRMATION_REQUIRED: 'Shall I go ahead and confirm?'
+};
+/** A sentence that already asks the user for something ("…bata dijiye.", "Please share…") — no second question. */
+const ASKS_RE = /(\?|\b(bata\s?(o|iye|ie|ein|yein|dijiye|dein|do|dena)|batayein|bataiye|batao|share (karein|kijiye|kar dijiye)|let me know|tell me|please (confirm|share|tell|choose|select|provide)|chun (lijiye|lein|lo)|select kar(ein|iye| lijiye)|confirm kar(ein|iye| dijiye))\b[^.!?]*[.!]?\s*$)/i;
+const POS_AVAIL_PRESENT_RE = /\b(seats? (available|khaali|mil (jaayegi|jayegi|jaegi))|available (hain|hai|h)\b)/i;
+const GK_AVAIL_PHRASE = /\b(seats? (available|milegi|mil jayegi|hai)|confirm(ed)? seat|seat confirm|cnf milega|pakki seat)\b/gi;
+const LEAD_CONJ = /^(aur|and|lekin|but|par|magar|ya|or|also|bhi|toh|to|so)\b[,\s]+/i;
+/**
+ * Prompt 25 Part 11: markdown lists become plain sentences BEFORE splitting, so a list marker can never survive as an
+ * orphan sentence ("1."); a heading line ending in ":" becomes a sentence.
+ */
+export function toSentences(text: string): string[] {
+  const lines = String(text || '')
+    .replace(/([:.!?])[ \t]+(\d{1,2})[.)][ \t]+(?=\S)/g, (_m, p) => `${p}\n`)
+    .split(/\n+/)
+    .map(l => l.replace(/^\s*(?:\d{1,2}[.)]|[-*•])\s+/, '').trim())
+    .filter(Boolean)
+    .map(l => (/[:;,–—-]$/.test(l) ? `${l.replace(/[:;,–—-]+$/, '').trim()}.` : /[.!?।]$/.test(l) ? l : `${l}.`));
+  return lines.flatMap(l => splitSentences(l)).map(x => x.trim()).filter(Boolean);
+}
+/** A leftover with no words ("1.", "-", "₹.", "…") is a fragment, never a sentence. */
+const isFragment = (t: string) => !/[A-Za-z\u0900-\u097F]{2,}/.test(t);
 
 /** Numbers that are authoritative for this turn (IDs / timestamps / versions are skipped). */
 function collectNumbers(into: Set<number>, v: any, depth = 0, key = '') {
@@ -152,6 +195,8 @@ export class NaturalResponseComposer {
     if (i.error?.code === 'LLM_UNAVAILABLE') return fallback('LLM_UNAVAILABLE');
     const agentText = typeof i.agentText === 'string' && i.agentText.trim() ? i.agentText.trim() : null;
     if (!agentText && typeof i.llm.generateSpokenResponse !== 'function') return fallback('PROVIDER_NO_SPOKEN_RESPONSE');
+    // Prompt 25 Part 10: no second LLM call for formatting / polishing / a non-semantic state move
+    if (!agentText && i.allowWordingCall === false) return fallback('NO_MATERIAL_CHANGE');
     const mode = i.mode || 'VOICE';
     const general = !!i.general && !!agentText;
 
@@ -185,7 +230,10 @@ export class NaturalResponseComposer {
     const confirmationTurn = s.bookingState === BookingState.IRCTC_HANDOFF_READY && i.stateBefore !== BookingState.IRCTC_HANDOFF_READY;
     const reviewTurn = s.bookingState === BookingState.AWAITING_CONFIRMATION;
     const streamable = !!i.onSegment && !confirmationTurn && !reviewTurn;
-    const question = i.pendingQuestion ? (SHORT_Q[String(s.pendingInteraction?.type || '')] || SHORT_Q[i.pendingQuestionCode || ''] || i.pendingQuestion) : null;
+    const pendingType = String(s.pendingInteraction?.type || '');
+    const question = !i.pendingQuestion ? null
+      : language === 'ENGLISH' && SHORT_Q_EN[pendingType] ? SHORT_Q_EN[pendingType]
+      : (SHORT_Q[pendingType] || SHORT_Q[i.pendingQuestionCode || ''] || i.pendingQuestion);
     // Part 18 — voice stays concise: never longer than the text reply (short replies may take a natural lead-in)
     const maxLen = general ? (mode === 'TEXT' ? 900 : 320)
       : agentText ? (mode === 'TEXT' ? 600 : 260)
@@ -211,72 +259,124 @@ export class NaturalResponseComposer {
     const paxCounts = new Set<number>([s.passengersCount, (s.passengers || []).length, ...(i.userText.match(/\b\d{1,2}\b/g) || []).map(Number)].filter((n): n is number => typeof n === 'number'));
     const countOf = (w: string) => /^\d+$/.test(w) ? Number(w) : COUNT_WORD[w.toLowerCase()];
     const fareNums = new Set<number>();
-    collectFare(fareNums, { fare: s.fare, review: (s.review as any)?.snapshot, trains, steps: views.filter(v => v.ok).map(v => v.toolName === 'GET_FARE' ? { fare: v.data } : { data: v.data }) });
+    // Prompt 25 Part 5: ₹ amounts are fares only from GET_FARE (session quote / this turn) and the verified review
+    collectFare(fareNums, { fare: s.fare, review: (s.review as any)?.snapshot, steps: views.filter(v => v.ok && v.toolName === 'GET_FARE').map(v => ({ fare: v.data })) });
+    const idx = buildFactIndex(s, views as any);
+    for (const n of idx.farePax) paxCounts.add(n);
+    const seatStatusFor = (t: string) => { const m = [...new Set(t.match(CLASS_RE) || [])]; return statuses.some(x => x.status && (!m.length || m.includes(x.cls))); };
     for (const m of `${i.backendReply} ${i.deterministicSpeech}`.matchAll(/₹\s?([\d,]+(?:\.\d+)?)/g)) fareNums.add(Number(m[1].replace(/,/g, '')));
 
     const accepted: string[] = [];
     const rejected: NaturalComposeResult['rejected'] = [];
     let streamed = 0;
     const len = () => accepted.join(' ').length;
-    const hasQ = () => accepted.some(a => a.includes('?'));
+    const hasQ = () => accepted.some(a => a.includes('?')) || (!!accepted.length && ASKS_RE.test(accepted[accepted.length - 1]));
 
-    const judge = (sentence: string): string | null => {
-      const t = sentence.trim();
+    // Prompt 25: per-sentence evidence → claim type / provenance; `text` may carry a meaning-preserving repair
+    type Hits = { time?: TimeVerdict; fare?: FareFact; classList?: boolean; pax?: PaxClass; avail?: boolean; count?: boolean; text?: string };
+    const judge = (sentence: string, hits: Hits = {}): string | null => {
+      let t = sentence.trim();
       if (!t) return 'EMPTY';
       if (containsChainOfThought(t)) return 'CHAIN_OF_THOUGHT';
       if (soundsRobotic(t)) return 'ROBOTIC_PHRASING';
+      // Prompt 25 Part 1: a general explanation (no train / class / date / fare / session anchor) is general knowledge in
+      // ANY turn — judged for what it can falsely claim, never for merely containing a number
+      const gk = general || isGeneralKnowledgeClaim(t, idx);
       // class codes ("3A", "2S") are checked as classes, not as free numbers
-      if (general) {
+      if (gk) {
         // general explanation: specific identifiers are still never invented
         for (const m of t.match(/\b\d{5}\b/g) || []) if (!knownTrainNums.has(m) && !userTrainNums.has(m)) return `UNGROUNDED_TRAIN_NUMBER:${m}`;
         if (/\b\d{10}\b/.test(t)) return 'UNGROUNDED_NUMBER:PNR_LIKE';
-        if (/\b\d{1,2}[:.]\d{2}\b/.test(t)) return 'UNGROUNDED_TIME';
+        // Prompt 25 Part 3: a time is checked as a structured claim (train ↔ departure / arrival), not banned outright
+        const tv = judgeTimes(t, idx, false);
+        if (tv.reason) return tv.reason.startsWith('TIME_MISMATCH') && general ? 'UNGROUNDED_TIME' : tv.reason;
+        hits.time = tv;
       } else {
         for (const m of t.replace(CLASS_RE, ' ').match(/\d+(?:\.\d+)?/g) || []) if (!nums.has(Number(m))) return `UNGROUNDED_NUMBER:${m}`;
         for (const c of t.match(CLASS_RE) || []) if (!classes.has(c)) return `UNGROUNDED_CLASS:${c}`;
       }
       if (/₹|\brs\.?\s*\d|\brupay/i.test(t) && !fareKnown) return 'UNGROUNDED_FARE';
+      // Prompt 25 Part 4: CLASS_LIST ≠ SEAT_AVAILABILITY — "CC aur 2S available" without an availability result is the
+      // provider's class list → kept with unambiguous wording; a seat claim still needs CHECK_AVAILABILITY
+      if (!gk && isClassListClaim(t) && !seatStatusFor(t)) { t = repairClassList(t); hits.classList = true; hits.text = t; }
       // general: explaining WL / RAC / seats is fine; a concrete availability claim (train / day / "available hai") is not
-      if (general ? (!availKnown && (POS_AVAIL_RE.test(t) || (AVAIL_RE.test(t) && /\b\d{5}\b|\b(aaj|today|kal|tomorrow|parso)\b/i.test(t))))
+      // (Prompt 25: "cancellation hone par seat confirm ho jaati hai" explains RAC — confirm / pakki phrasing is a claim only when anchored)
+      if (gk ? (!availKnown && (POS_AVAIL_PRESENT_RE.test(t) || ((AVAIL_RE.test(t) || POS_AVAIL_RE.test(t)) && /\b\d{5}\b|\b(aaj|today|kal|tomorrow|parso)\b/i.test(t))))
         : (AVAIL_RE.test(t) && !/availability (check|dekh|verify)/i.test(t) && !availKnown)) return 'UNGROUNDED_AVAILABILITY';
       if (SUCCESS_RE.test(t) && !NEGATION_RE.test(t)) return 'BOOKING_SUCCESS_CLAIM';
       // ---- Prompt 22 grounding ----
       for (const m of t.matchAll(/(?:₹|\brs\.?\s?|\binr\s?)\s?([\d,]+(?:\.\d+)?)/gi)) { const n = Number(m[1].replace(/,/g, '')); if (!fareNums.has(n)) return `UNGROUNDED_FARE_AMOUNT:${n}`; }
-      if (!general) for (const c of stationCodesIn(t)) if (!stations.has(c)) return `UNGROUNDED_STATION:${c}`;
-      if (!general) for (const m of t.matchAll(CITY_RE)) if (!nameSources.includes(m[1].toLowerCase())) return `UNGROUNDED_STATION:${m[1]}`;
+      if (!gk) for (const c of stationCodesIn(t)) if (!stations.has(c)) return `UNGROUNDED_STATION:${c}`;
+      if (!gk) for (const m of t.matchAll(CITY_RE)) if (!nameSources.includes(m[1].toLowerCase())) return `UNGROUNDED_STATION:${m[1]}`;
       const saidNums = (t.match(/\b\d{5}\b/g) || []).filter(n => knownTrainNums.has(n) || knownNames.some(k => k.num === n));
-      if (!general || saidNums.length === 1) for (const m of t.matchAll(TRAIN_NAME_RE)) {
+      if (!gk || saidNums.length === 1) for (const m of t.matchAll(TRAIN_NAME_RE)) {
         const kw = m[1].toLowerCase();
         if (saidNums.length === 1) { const nm = knownNames.find(k => k.num === saidNums[0])?.name || ''; if (!nm.includes(kw)) return `UNGROUNDED_TRAIN_NAME:${m[1]}`; }
         else if (!knownNames.some(k => k.name.includes(kw)) && !`${i.backendReply} ${i.deterministicSpeech}`.toLowerCase().includes(kw)) return `UNGROUNDED_TRAIN_NAME:${m[1]}`;
       }
-      if (!general && !NEGATION_RE.test(t)) for (const m of t.matchAll(DAY_RE)) { const r: any = resolveDate(m[1].toLowerCase()); if (!r?.ok || r.date !== s.date) return `UNGROUNDED_DATE:${m[1]}`; }
-      for (const m of t.matchAll(TRAIN_COUNT_RE)) if (!trainCounts.has(countOf(m[1]))) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
-      for (const m of t.matchAll(PAX_COUNT_RE)) if (!paxCounts.has(countOf(m[1]))) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
+      if (!gk && !NEGATION_RE.test(t)) for (const m of t.matchAll(DAY_RE)) { const r: any = resolveDate(m[1].toLowerCase()); if (!r?.ok || r.date !== s.date) return `UNGROUNDED_DATE:${m[1]}`; }
+      // Prompt 25 Part 6: a count derived from the returned set (all / "subah ki" / "CC wali") is preserved
+      for (const m of t.matchAll(TRAIN_COUNT_RE)) {
+        const n = countOf(m[1]);
+        if (!trainCounts.has(n) && !derivedTrainCounts(t, idx).includes(n)) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
+        hits.count = true;
+      }
+      // Prompt 25 Part 2: passenger counts by context — user-provided and general explanations are not session claims
+      for (const m of t.matchAll(PAX_COUNT_RE)) {
+        const n = countOf(m[1]);
+        const kind = classifyPaxCount(t, n, m[1], i.userText);
+        hits.pax = kind;
+        if (kind === 'USER_PROVIDED' || kind === 'GENERAL_KNOWLEDGE') continue;
+        if (kind === 'SESSION_FACT' && general && !isSessionish(t)) { hits.pax = 'GENERAL_KNOWLEDGE'; continue; }
+        if (!paxCounts.has(n)) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
+      }
       {
         const mentioned: string[] = [...(t.match(CLASS_RE) || [])];
         const rel = statuses.filter(x => !mentioned.length || mentioned.includes(x.cls));
         if (POS_AVAIL_RE.test(t) && !NEGATION_RE.test(t) && rel.length && !rel.some(x => /^(AVAIL|AVBL|CURR_AVBL)/i.test(x.status))) return 'AVAILABILITY_MISMATCH';
         for (const m of t.matchAll(/\b(WL|waitlist|waiting(?:\s+list)?)\s*(\d+)/gi)) if (!rel.some(x => normStatus(x.status) === `WL ${m[2]}`)) return `AVAILABILITY_MISMATCH:WL ${m[2]}`;
         for (const m of t.matchAll(/\bRAC\s*(\d+)/gi)) if (!rel.some(x => normStatus(x.status) === `RAC ${m[1]}`)) return `AVAILABILITY_MISMATCH:RAC ${m[1]}`;
+        if (!gk && rel.length && (POS_AVAIL_RE.test(t) || AVAIL_RE.test(t))) hits.avail = true;
       }
+      // ---- Prompt 25: structured railway claims (train ↔ time / comparison / class list / GET_FARE scope) ----
+      if (!gk) { const tv = judgeTimes(t, idx, true); if (tv.reason) return tv.reason; hits.time = tv; }
+      { const c = judgeComparison(t, idx); if (c) return c; }
+      if (hits.classList) { const c = judgeClassList(t, idx); if (c) return c; }
+      { const f = judgeFareScope(t, idx); if (f.reason) return f.reason; if (f.fact) hits.fare = f.fact; }
       // a train number the USER said, inside a negative statement ("14542 is list mein nahi hai"), is not a fact claim
-      const probe = NEGATION_RE.test(t) ? t.replace(/\b\d{5}\b/g, m => userTrainNums.has(m) && !knownTrainNums.has(m) ? 'woh train' : m) : t;
+      let probe = NEGATION_RE.test(t) ? t.replace(/\b\d{5}\b/g, m => userTrainNums.has(m) && !knownTrainNums.has(m) ? 'woh train' : m) : t;
+      // times already judged as general knowledge (e.g. when Tatkal opens) are not timetable claims
+      for (const g of hits.time?.general || []) probe = probe.split(g).join('—');
+      // Prompt 25 Part 1: explaining how RAC / WL work ("cancellation hone par seat confirm ho jaati hai") is general knowledge —
+      // concrete availability (train / day / "available hai") was already judged above, so the legacy blunt phrase guard
+      // only sees un-anchored explanation phrases masked
+      if (gk && !/\b\d{5}\b|\b(aaj|today|kal|tomorrow|parso)\b/i.test(t)) probe = probe.replace(GK_AVAIL_PHRASE, '—');
       const g = railwayResponseGrounding.validate(probe, { session: s, steps: i.steps, records: (i.records || []) as any });
       if (g.rejected.length) return `GROUNDING:${g.rejected[0]}`;
       return null;
     };
+    const provenance: ClaimProvenance[] = [];
+    let repaired = 0;
+    let prevRejected = false;
     const take = (sentence: string) => {
-      const t = sentence.trim();
+      let t = sentence.trim();
       if (!t) return;
-      const why = judge(t);
-      if (why) { rejected.push({ sentence: t.slice(0, 120), reason: why }); return; }
+      // Prompt 25 Part 11: no orphan numbering / bullets / punctuation; a sentence that only continued a removed one
+      // ("Aur …") loses the dangling conjunction instead of reading as a fragment
+      if (isFragment(t)) { if (t.length > 1 || /\d/.test(t)) rejected.push({ sentence: t.slice(0, 120), reason: 'FRAGMENT' }); return; }
+      if (prevRejected && LEAD_CONJ.test(t)) { const r = t.replace(LEAD_CONJ, ''); if (/[A-Za-zऀ-ॿ]{2,}/.test(r)) t = r.charAt(0).toUpperCase() + r.slice(1); }
+      const hits: Hits = {};
+      const why = judge(t, hits);
+      if (why) { rejected.push({ sentence: t.slice(0, 120), reason: why }); prevRejected = true; return; }
+      prevRejected = false;
+      if (hits.text && hits.text !== t) { t = hits.text; repaired++; }
       // Prompt 23: an agent-authored reply keeps one sentence free for the pending question the backend appends
       const cap = agentText && question && !hasQ() && !t.includes('?') ? maxSentences - 1 : maxSentences;
       if (accepted.length >= cap) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       const reserve = question && !hasQ() && !t.includes('?') ? question.length + 1 : 0;
       if ((len() ? len() + 1 : 0) + t.length + reserve > maxLen) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       accepted.push(t);
+      provenance.push(classifyClaim(t, idx, hits, general));
       if (streamable) { i.onSegment!(streamed, t); streamed++; }
     };
 
@@ -313,7 +413,7 @@ export class NaturalResponseComposer {
     } finally { if (timer) clearTimeout(timer); }
 
     // non-streaming providers (or the tail of a stream)
-    if (out?.text && !accepted.length && !rejected.length && !buf) for (const sn of splitSentences(out.text)) take(sn);
+    if (out?.text && !accepted.length && !rejected.length && !buf) for (const sn of toSentences(out.text)) take(sn);
     else if (buf.trim()) { take(buf); buf = ''; }
     if (!accepted.length) return fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected);
 
@@ -325,7 +425,8 @@ export class NaturalResponseComposer {
     }
     const segments = [...accepted];
     if (!streamable) segments.forEach((t, k) => i.onSegment?.(k, t));
-    return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}) };
+    return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),
+      provenance, repaired, wordingCall: !agentText };
   }
 }
 

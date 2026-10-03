@@ -16,6 +16,7 @@ import type { AgentDecision } from '../decisions/agent-decision';
 import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, NATIVE_AGENT_SYSTEM_PROMPT } from '../prompts/system-prompt';
 import type { AgentTranscriptStep } from './llm-provider';
 import { v4 as uuid } from '../orchestrator/utils';
+import { detectLanguageStyle } from '@shared/voice/language-style';
 
 export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{
   ok: boolean; status: number; json(): Promise<any>; text(): Promise<string>; body?: any;
@@ -276,6 +277,8 @@ function conversationOf(input: LLMTurnInput): Array<{ role: 'user' | 'assistant'
 export function buildNativeMessages(input: LLMTurnInput): any[] {
   const ctx = {
     inputMode: input.inputMode, bookingState: input.state, missingFields: input.missingFields,
+    // Prompt 25 Part 7: dominant language of the LATEST user message (the reply language; the model writes the reply)
+    replyLanguage: detectLanguageStyle(input.userText, (input.history || []).filter(m => m.role === 'user').map(m => String(m.content || ''))),
     context: input.context ?? null
   };
   const messages: any[] = [
@@ -297,12 +300,20 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
     for (const c of st.toolCalls) {
       const r = st.results.find(x => String(x.callId) === c.callId);
       const content = r
-        ? { ok: r.ok, ...(r.ok ? { data: trimResult(r.data) } : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300) } }) }
+        ? { ok: r.ok, ...(r.ok ? { data: trimResult(r.data) } : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details) } }) }
         : { ok: false, error: { code: 'NOT_EXECUTED', message: 'Not executed (the session changed first) — decide again from the current context.' } };
       messages.push({ role: 'tool', tool_call_id: c.callId, content: clip(JSON.stringify(content), MAX_TOOL_RESULT_CHARS) });
     }
   }
   return messages;
+}
+
+/** Prompt 25 Part 8: the structured validation reason (argument / expected / received) — nothing else from details. */
+function argumentDetails(d: any): Record<string, string> {
+  if (!d || typeof d !== 'object') return {};
+  const out: Record<string, string> = {};
+  for (const k of ['argument', 'expected', 'received', 'previousCode'] as const) if (typeof d[k] === 'string') out[k] = clip(d[k], 120);
+  return out;
 }
 
 function trimResult(v: any, depth = 0): any {

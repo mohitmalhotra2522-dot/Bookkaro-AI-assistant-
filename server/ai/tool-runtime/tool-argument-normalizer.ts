@@ -15,6 +15,7 @@ import type { BookingSession } from '@shared/entities';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
 import { extractDateExpression } from '../conversation/grounding';
+import { validateToolArgumentShape } from './tool-argument-schema';
 
 export interface NormalizedArgs {
   ok: true;
@@ -24,7 +25,7 @@ export interface NormalizedArgs {
 }
 export interface ArgRejection {
   ok: false;
-  code: 'FORBIDDEN_ARGUMENT' | 'AMBIGUOUS_DATE' | 'INVALID_DATE' | 'AMBIGUOUS_STATION' | 'CONTEXT_CONFLICT' | 'INVALID_REQUEST';
+  code: 'FORBIDDEN_ARGUMENT' | 'AMBIGUOUS_DATE' | 'INVALID_DATE' | 'AMBIGUOUS_STATION' | 'CONTEXT_CONFLICT' | 'INVALID_REQUEST' | 'INVALID_ARGUMENT';
   message: string;
   details?: Record<string, any>;
 }
@@ -82,6 +83,13 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
 
   const sec = scanArgumentSecurity(args);
   if (sec) return sec;
+
+  // ---- Prompt 25 Part 8: schema / type / identifier format, before anything is resolved or executed ----
+  const shape = validateToolArgumentShape(tool, args);
+  if (!shape.ok) return { ok: false, code: shape.code, message: shape.message, details: shape.details };
+  for (const k of Object.keys(args)) delete args[k];
+  Object.assign(args, shape.arguments);
+  for (const c of shape.coerced) corrections.push(`type: ${c} (lossless)`);
 
   // ---- Dates: DateResolver is authoritative (Part 8) ----
   if (DATE_TOOLS.has(tool)) {

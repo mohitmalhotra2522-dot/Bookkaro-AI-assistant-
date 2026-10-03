@@ -121,6 +121,11 @@ export class ToolTurn {
   private llmCalls = 0;
   private rounds = 0;
   private readonly sigCounts = new Map<string, number>();
+  /** Prompt 25 Part 9: LLM calls rejected by validation in this turn (raw loop signature → why). */
+  private readonly invalidSigs = new Map<string, { code: string; message: string; details?: any; clarify?: string }>();
+  private readonly invalidTools = new Set<string>();
+  /** Prompt 25 Part 17: validation failures / identical invalid repeats / corrected retries of this turn. */
+  readonly validation = { failures: 0, repeatedInvalid: 0, correctedRetries: 0, coerced: 0 };
   private parallelGroup = 0;
   readonly timeoutMs: number;
   readonly maxCalls: number;
@@ -200,10 +205,29 @@ export class ToolTurn {
 
     rec.status = 'VALIDATING';
     const raw = (tc?.arguments && typeof tc.arguments === 'object' && !Array.isArray(tc.arguments)) ? tc.arguments : {};
+    // Prompt 25 Part 9: the SAME invalid call again (same tool + args + context) is not re-validated or executed —
+    // the LLM is told to correct the arguments or ask the user; a third identical request ends in the loop guard.
+    const sig = fromLLM ? this.loopSignature(tc) : '';
+    const prevInvalid = fromLLM ? this.invalidSigs.get(sig) : undefined;
+    if (prevInvalid) {
+      this.validation.repeatedInvalid++;
+      return this.reject(tc, rec, 'INVALID_REPEATED_CALL', `Identical ${res.name} call was already rejected (${prevInvalid.code}). Do not repeat it: correct the arguments or ask the user.`,
+        false, { previousCode: prevInvalid.code, ...(prevInvalid.details && typeof prevInvalid.details === 'object' ? prevInvalid.details : {}) });
+    }
+    const invalid = (code: string, message: string, details?: any): PreparedCall => {
+      if (fromLLM) {
+        this.validation.failures++;
+        this.invalidTools.add(res.name);
+        this.invalidSigs.set(sig, { code, message, details, clarify: typeof details?.clarify === 'string' ? details.clarify : undefined });
+      }
+      return this.reject(tc, rec, code, message, false, details);
+    };
     const norm = normalizeToolArguments(res.name, raw, s, this.ctx.userText);
-    if (!norm.ok) return this.reject(tc, rec, norm.code, norm.message, false, norm.details);
+    if (!norm.ok) return invalid(norm.code, norm.message, norm.details);
     const val = this.ctx.validate({ callId: tc.callId, name: res.name as any, arguments: norm.arguments }, s);
-    if (!val.ok) return this.reject(tc, rec, val.error.code, val.error.message);
+    if (!val.ok) return invalid(val.error.code, val.error.message, (val.error as any).details);
+    if (fromLLM && this.invalidTools.has(res.name)) this.validation.correctedRetries++;
+    this.validation.coerced += norm.corrections.filter(c => c.startsWith('type:')).length;
     rec.argumentsHash = hashArguments(res.name, val.v.arguments);
     rec.argumentsSummary = safeSummary(val.v.arguments);
     return { ok: true, tc, vt: val.v, record: rec, journeyVersion: syncJourneyVersion(s), selectionKey: selectionKeyOf(s), corrections: norm.corrections };
@@ -334,6 +358,8 @@ export class ToolTurn {
     onRejected: (p: Extract<PreparedCall, { ok: false }>) => void;
     /** Return false to stop (e.g. the result was stale). Session sync happens here. */
     onExecuted: (x: ExecutedCall) => boolean;
+    /** Prompt 25: a call whose VALIDATED request was already answered this turn (different raw args, same data). */
+    skipPrepared?: (p: Extract<PreparedCall, { ok: true }>) => boolean;
     /** Identical call inside the SAME parallel segment — answered by the original's result (one provider call). */
     onDuplicate?: (tc: ToolCall, original: ExecutedCall) => void;
   }): Promise<'done' | 'stop'> {
@@ -369,6 +395,13 @@ export class ToolTurn {
           continue;
         }
         const p = this.prepare(tc, h.fromLLM, true);
+        if (p.ok && h.skipPrepared?.(p)) {
+          // never re-fetch identical data inside one turn (not a cache: the next turn always calls the provider)
+          p.record.status = 'CANCELLED'; p.record.rejectionReason = 'DUPLICATE_CALL'; p.record.completedAt = new Date().toISOString();
+          if (node) { node.toolExecutionId = p.record.toolExecutionId; p.record.planNodeId = node.planNodeId; node.status = 'SKIPPED_DUPLICATE'; }
+          prepared.push(null);
+          continue;
+        }
         if (node) { node.toolExecutionId = p.record.toolExecutionId; p.record.planNodeId = node.planNodeId; if (!p.ok) node.status = 'REJECTED'; else node.status = 'RUNNING'; }
         if (p.ok) inSeg.set(key, prepared.length);
         prepared.push(p);
@@ -410,7 +443,8 @@ export class ToolTurn {
     const sig = this.loopSignature(tc);
     const n = (this.sigCounts.get(sig) || 0) + 1;
     this.sigCounts.set(sig, n);
-    if (n >= this.loopThreshold) return this.reject(tc, this.newRecord(tc), 'TOOL_LOOP_DETECTED', SAFE_ERROR_MESSAGE.TOOL_LOOP_DETECTED, true) as any;
+    // Prompt 25: a loop of INVALID calls ends with a clarification for the user (there is no verified result to keep)
+    if (n >= this.loopThreshold) return this.reject(tc, this.newRecord(tc), 'TOOL_LOOP_DETECTED', this.invalidSigs.get(sig)?.clarify || SAFE_ERROR_MESSAGE.TOOL_LOOP_DETECTED, true) as any;
     return null;
   }
 

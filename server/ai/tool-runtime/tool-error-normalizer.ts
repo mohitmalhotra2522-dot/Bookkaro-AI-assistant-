@@ -59,7 +59,9 @@ export const SAFE_ERROR_MESSAGE: Record<ToolErrorCode, string> = {
   TOOL_LOOP_DETECTED: 'Ye jaankari dobara nahi mangwa raha — upar wala verified result hi current hai.',
   STALE_TOOL_RESULT: 'Purana result ignore kiya gaya.',
   DEPENDENCY_NOT_SATISFIED: 'Pehle wala step verify nahi ho paaya, isliye ye check abhi nahi kiya.',
-  PROVIDER_DATA_CONFLICT: 'Railway providers ki jaankari mel nahi kha rahi — abhi verified result available nahi hai.'
+  PROVIDER_DATA_CONFLICT: 'Railway providers ki jaankari mel nahi kha rahi — abhi verified result available nahi hai.',
+  INVALID_ARGUMENT: 'Ek detail sahi format mein nahi thi — thoda clear karke bataiye.',
+  INVALID_REPEATED_CALL: 'Wahi galat detail dobara aayi — sahi value bataiye.'
 };
 
 /** Strip anything that is not a short human message (stack traces, URLs with keys, JSON blobs). */

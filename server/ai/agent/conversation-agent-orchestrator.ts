@@ -142,6 +142,8 @@ export interface AgentTurnResult {
 
 /** Prompt 16: per-turn observability extras carried to finish(). */
 interface TurnExtras {
+  /** Prompt 25 Part 10/17: why a second (wording) LLM call was allowed this turn (null = none needed). */
+  secondCallReason?: string | null;
   interruption?: boolean;
   contextBefore?: ReturnType<typeof summarizeContext>;
   pqBefore?: ReturnType<typeof pendingQuestionOf>;
@@ -515,12 +517,23 @@ export class ConversationAgentOrchestrator {
       && !rt.applyOutcomes.some(o => o.lifecycle) && !forbiddenAttempted(rt) && !lcPlan && !(prep?.steps?.length) && !dupExecution && agentSessionSig(sess) === sigAfterLoop
       // the backend moving on to the next step is fine; entering review / confirmation after the agent spoke is not
       && !(sess.bookingState !== stateAfterLoop && (sess.bookingState === BookingState.AWAITING_CONFIRMATION || sess.bookingState === BookingState.IRCTC_HANDOFF_READY));
+    // Prompt 25 Part 10: a second (wording) LLM call only for NEW material information after the agent spoke —
+    // never for formatting, polishing, a refusal / limit / lifecycle answer the backend already phrased, or a state
+    // move without user-visible meaning. MockLLM (no agent-authored replies) keeps its separate wording step.
+    const secondCallReason: string | null = agentFresh ? null
+      : !this.llm.agentAuthoredReplies ? 'PROVIDER_WORDING_STEP'
+      : (rt.stopReason !== 'final' || !rt.finalMessage || !!blockErr || forbiddenAttempted(rt) || !!dupExecution || !!lcPlan || rt.applyOutcomes.some(o => o.lifecycle)) ? null
+      : prep?.steps?.length ? 'NEW_TOOL_RESULT'
+      : (sess.bookingState !== stateAfterLoop && (sess.bookingState === BookingState.AWAITING_CONFIRMATION || sess.bookingState === BookingState.IRCTC_HANDOFF_READY)) ? 'BOOKING_STATE_CHANGED'
+      : agentSessionSig(sess) !== sigAfterLoop ? 'SESSION_CHANGED_AFTER_AGENT'
+      : null;
+    extra.secondCallReason = secondCallReason;
     const generalTurn = agentFresh && rt.steps.length === 0 && !(extra.backendActions || []).length && !ctx.changes.length
       && !turnError && sess.bookingState === stateBefore;
     if (opts.naturalSpeech !== false && message && !(turnError?.code === 'LLM_UNAVAILABLE')) {
       try {
         extra.naturalSpeech = await naturalResponseComposer.compose({
-          agentText: agentFresh ? rt.finalMessage : null, general: generalTurn,
+          agentText: agentFresh ? rt.finalMessage : null, general: generalTurn, allowWordingCall: agentFresh || !!secondCallReason,
           llm: this.llm, session: sess, userText: normalizedInput, backendReply: message, mode,
           deterministicSpeech: mode === 'VOICE' ? speechOf(message, 'VOICE', questionFor(sess.pendingInteraction, sess, 'VOICE')) : message,
           stateBefore, reviewVersionBefore: voiceBefore.reviewVersion, selectedTrainBefore: voiceBefore.train,
@@ -618,6 +631,26 @@ export class ConversationAgentOrchestrator {
 
   // ---------------------------------------------------------------- turn record
 
+  private diagnosticsOf(a: { rt: ToolRuntimeResult | null; startedAt: number; prepSteps?: ToolCallStep[] }, x: TurnExtras): NonNullable<TurnRecord['diagnostics']> {
+    const ns = x.naturalSpeech;
+    const recs = a.rt?.toolExecutions || [];
+    const claimTypes: Record<string, number> = {};
+    for (const p of ns?.provenance || []) claimTypes[p.claimType] = (claimTypes[p.claimType] || 0) + 1;
+    const wording = !!ns && ns.wordingCall === true && ns.fallbackReason !== 'NO_MATERIAL_CHANGE' && ns.fallbackReason !== 'PROVIDER_NO_SPOKEN_RESPONSE'
+      && ns.fallbackReason !== 'SENSITIVE_TURN' && ns.fallbackReason !== 'SAFETY_ERROR' && ns.fallbackReason !== 'LLM_UNAVAILABLE' && ns.fallbackReason !== 'LIVE_STATUS_AUTHORITATIVE' && ns.fallbackReason !== 'EMPTY';
+    const tv = a.rt?.toolValidation;
+    return {
+      provider: this.llm.providerId, model: (this.llm as any).modelName ?? (this.llm as any).cfg?.model ?? null,
+      llmCalls: (a.rt?.llmCalls ?? 0) + (wording ? 1 : 0),
+      agentLlmCalls: a.rt?.llmCalls ?? 0,
+      secondLlmCall: wording, secondLlmCallReason: wording ? (x.secondCallReason ?? null) : null,
+      toolCalls: recs.length, toolNames: [...new Set(recs.map(r => r.tool))],
+      toolValidationFailures: tv?.failures ?? 0, repeatedInvalidCalls: tv?.repeatedInvalid ?? 0, retryCount: tv?.correctedRetries ?? 0,
+      latencyMs: Date.now() - a.startedAt, llmLatencyMs: a.rt?.llmLatencyMs ?? 0,
+      validation: { accepted: ns?.segments.length ?? 0, rejected: (ns?.rejected || []).map(r => r.reason), repaired: ns?.repaired ?? 0, claimTypes, source: ns?.source ?? null }
+    };
+  }
+
   private finish(a: {
     sessionId: string; turnId: string; requestId: string; startedAt: number; userText: string; normalizedInput: string;
     mode: 'TEXT' | 'VOICE'; stateBefore: BookingState; pendingBefore: string; cards: any[]; events: string[];
@@ -666,6 +699,8 @@ export class ConversationAgentOrchestrator {
       rejectionReason: a.rejection || (a.error?.message ? pii(a.error.message) : undefined), errorCode: a.error?.code,
       assistantResponse: a.stale ? '' : pii(a.message),
       llmProvider: this.llm.providerId, llmLatencyMs: a.rt?.llmLatencyMs,
+      // ---- Prompt 25 Part 17: one structured diagnostics block (counts / codes only — never text, args or secrets) ----
+      diagnostics: this.diagnosticsOf(a, x),
       bookingReadiness: s.readiness ? { ready: s.readiness.ready, blockers: s.readiness.blockers, warnings: s.readiness.warnings } : undefined,
       missingFields: s.readiness?.missingFields,
       reviewVersion: s.review?.valid ? s.review.reviewVersion : undefined,
@@ -685,7 +720,7 @@ export class ConversationAgentOrchestrator {
       rejectedClaims: x.rejectedClaims || [],
       backendActions: x.backendActions || [],
       // Prompt 21: speech provenance (reasons only — never the rejected sentence text / names)
-      ...(x.naturalSpeech ? { naturalSpeech: { source: x.naturalSpeech.source, language: x.naturalSpeech.language, segments: x.naturalSpeech.segments.length, rejected: x.naturalSpeech.rejected.map(r => r.reason), fallbackReason: x.naturalSpeech.fallbackReason ?? null, ...(x.naturalSpeech.authoredBy ? { authoredBy: x.naturalSpeech.authoredBy } : {}), ...(x.naturalSpeech.general ? { general: true } : {}) } } : {}),
+      ...(x.naturalSpeech ? { naturalSpeech: { source: x.naturalSpeech.source, language: x.naturalSpeech.language, segments: x.naturalSpeech.segments.length, rejected: x.naturalSpeech.rejected.map(r => r.reason), fallbackReason: x.naturalSpeech.fallbackReason ?? null, ...(x.naturalSpeech.authoredBy ? { authoredBy: x.naturalSpeech.authoredBy } : {}), ...(x.naturalSpeech.general ? { general: true } : {}), ...(x.naturalSpeech.repaired ? { repaired: x.naturalSpeech.repaired } : {}) } } : {}),
       resultSetId: (s.searchResults as any)?.resultId ?? s.searchMeta?.resultId ?? null,
       activeJourneyId: this.context.activeJourneyId(a.sessionId),
       interruption: !!x.interruption,

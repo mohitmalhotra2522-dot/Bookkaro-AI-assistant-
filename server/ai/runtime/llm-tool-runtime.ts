@@ -143,6 +143,10 @@ export interface ToolRuntimeResult {
   toolRounds?: number;
   /** Prompt 18: ToolExecutionPlan nodes (dependency graph) of every round in this turn. */
   toolPlans?: ToolExecutionPlanNode[];
+  /** Prompt 25 Part 17: agent decision calls made in this turn (each one is an LLM request). */
+  llmCalls?: number;
+  /** Prompt 25 Part 17: tool-argument validation failures / identical invalid repeats / corrected retries. */
+  toolValidation?: { failures: number; repeatedInvalid: number; correctedRetries: number; coerced: number };
 }
 
 export interface RuntimeInput {
@@ -251,6 +255,7 @@ export class BoundToolRuntime {
     let nativeRecoveries = 0;
     let lastError: OrchestratorError | undefined;
     let llmLatencyMs = 0;
+    let llmCalls = 0;
     const H = this.hooks;
     this.userText = userText;
     this.turnCtx.userText = userText;
@@ -267,10 +272,17 @@ export class BoundToolRuntime {
       const t: any = sx.selectedTrain;
       return `${tc?.name}|${stableJson(tc?.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
     };
+    // Prompt 25 Part 9: same VALIDATED request (e.g. trainNumber 12497 vs "12497" + the selected class) → not re-fetched
+    const doneValidated = new Map<string, TurnToolResultView>();
+    const vSig = (vt: { name: string; arguments: Record<string, any> }) => {
+      const sx: any = this.getSession(); const t: any = sx.selectedTrain;
+      return `${vt.name}|${stableJson(vt.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
+    };
     const done = (finalMessage: string, stopReason: ToolRuntimeResult['stopReason'], error?: OrchestratorError): ToolRuntimeResult => ({
       finalMessage, finalDecision: lastDecision || dummyDecision(), steps, stopReason, error,
       latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs, deduplicated,
-      toolExecutions: this.turn.records, toolRounds: this.turn.roundsUsed, toolPlans: this.turn.plans
+      toolExecutions: this.turn.records, toolRounds: this.turn.roundsUsed, toolPlans: this.turn.plans,
+      llmCalls, toolValidation: { ...this.turn.validation }
     });
 
     for (let iter = 0; iter < this.maxIterations; iter++) {
@@ -282,6 +294,7 @@ export class BoundToolRuntime {
       // Prompt 22: an LLM failure never hands the turn to a deterministic parser — the turn ends with the safe
       // LLM_UNAVAILABLE reply; results already verified in this turn (if any) are kept, nothing else changes.
       let decision: AgentDecision;
+      llmCalls++;
       try {
       decision = (await this.llm.generateStructuredDecision({
         userText,
@@ -369,6 +382,15 @@ export class BoundToolRuntime {
           H.emit?.('TOOL_CALL_DEDUPLICATED', { toolName: tc.name });
           return true;
         },
+        skipPrepared: (p) => {
+          const prior = doneValidated.get(vSig(p.vt));
+          if (!prior) return false;
+          deduplicated++;
+          turnResults.push({ ...prior, callId: p.tc.callId });
+          localHistory.push({ role: 'tool', content: JSON.stringify({ ok: true, deduplicated: true, sameAs: prior.callId }), toolCallId: p.tc.callId, toolName: p.tc.name });
+          H.emit?.('TOOL_CALL_DEDUPLICATED', { toolName: p.tc.name });
+          return true;
+        },
         onRejected: (p) => {
           this.recordRejected(p, iter, turnResults, localHistory, steps);
           lastError = { code: p.error.code as any, message: p.error.message };
@@ -385,7 +407,7 @@ export class BoundToolRuntime {
           const r = this.recordExecuted(x, iter, turnResults, localHistory, steps);
           if (r.stale) { staleHit = true; return false; }
           if (r.error) lastError = r.error;
-          if (x.success) doneCalls.set(sigs.get(x.prepared.tc.callId) || sigOf(x.prepared.tc), turnResults[turnResults.length - 1]);
+          if (x.success) { doneCalls.set(sigs.get(x.prepared.tc.callId) || sigOf(x.prepared.tc), turnResults[turnResults.length - 1]); doneValidated.set(vSig(x.prepared.vt), turnResults[turnResults.length - 1]); }
           return true;
         }
       });
@@ -427,7 +449,8 @@ export class BoundToolRuntime {
     };
     steps.push({ toolCall: tc, result: errRes, iteration: iter, status: 'rejected', requestId: H.requestId, execution: p.record, llmResult: p.result });
     turnResults.push({ toolName: tc?.name as any, callId: tc?.callId, ok: false, error: { ...error, details: p.error.details } as any });
-    localHistory.push({ role: 'tool', content: JSON.stringify({ ...p.result, ok: false, error, toolName: tc?.name }), toolCallId: tc?.callId, toolName: tc?.name });
+    // Prompt 25 Part 8: the structured reason (argument / expected / received) reaches the LLM so it can correct itself
+    localHistory.push({ role: 'tool', content: JSON.stringify({ ...p.result, ok: false, error: { ...error, ...(p.error.details ? { details: p.error.details } : {}) }, toolName: tc?.name }), toolCallId: tc?.callId, toolName: tc?.name });
     H.emit?.('TOOL_FAILED', { toolName: tc?.name, code: p.error.code, stage: 'validation', toolExecutionId: p.record.toolExecutionId });
   }
 

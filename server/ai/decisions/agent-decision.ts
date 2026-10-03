@@ -353,6 +353,13 @@ export interface TurnRecord {
   assistantResponse?: string;
   llmProvider?: string;
   llmLatencyMs?: number;
+  /** Prompt 25 Part 17: per-turn diagnostics (counts / codes only). */
+  diagnostics?: {
+    provider: string; model: string | null; llmCalls: number; agentLlmCalls: number; secondLlmCall: boolean; secondLlmCallReason: string | null;
+    toolCalls: number; toolNames: string[]; toolValidationFailures: number; repeatedInvalidCalls: number; retryCount: number;
+    latencyMs: number; llmLatencyMs: number;
+    validation: { accepted: number; rejected: string[]; repaired: number; claimTypes: Record<string, number>; source: 'LLM' | 'FALLBACK' | null };
+  };
   // ---- Prompt 9 observability ----
   bookingReadiness?: { ready: boolean; blockers: string[]; warnings: string[] };
   missingFields?: string[];
