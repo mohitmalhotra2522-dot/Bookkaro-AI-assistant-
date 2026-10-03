@@ -14,6 +14,7 @@
  * Unsupported sentences are removed; if nothing verified remains the safe fallback is used.
  */
 import { guardResponseFacts, type FactSources } from '../conversation/response-fact-guard';
+import { collectAvailabilityEvidence, judgeAvailabilityClaim, hasAvailabilityCode } from '../response/availability-authority';
 
 export const UNVERIFIED_FALLBACK = 'Is information ka verified result available nahi hai.';
 
@@ -29,7 +30,6 @@ const TIME = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)/g;
 // Prompt 22: widened — "time pe chal rahi", "chal rahi hai", "pahunch gayi", platform numbers are live claims too
 const PUNCTUAL = /\b(usually on time|generally on time|on time|on schedule|time (par|pe|se) (chal|pahunch|aa)|samay (par|pe)|late (chal|ho|hai)|der se (chal|pahunch)|delay(ed)? (hai|chal)|running late|kitni late|chal rahi hai|pahunch (gayi|chuki)|platform (number |no\.? )?\d+)\b/i;
 const PNR_STATUS = /\bpnr\b[^.?!]*\b(confirm(ed)?|cnf|waiting|wl|rac|chart (ban|prepared)|cancel(led)?)\b/i;
-const AVAIL_CODE = /\b(AVL|AVAILABLE|RAC|WL|GNWL|RLWL|PQWL|TQWL)\s*[-/]?\s*\d+\b/;
 const CANCELLED = /\b(train|gaadi|gadi)\b[^.?!]*\b(cancel(led)? (hai|ho gayi|kar di)|rad (hai|ho gayi)|cancelled)\b|\b\d{5}\b[^.?!]*\b(cancel(led)?|radd?)\b(?!\s+(karna|karni|karni hai|karo|kar sakte|request))/i;
 
 function collectTimes(v: any, out: Set<string>) {
@@ -50,7 +50,8 @@ export class RailwayResponseGroundingValidator {
     for (const a of [s.searchResults, s.selectedTrain, s.lastTrainInfo, s.lastTimetable, s.carryOverSelection]) collectTimes(a, times);
     for (const st of okSteps) collectTimes(st.result.data, times);
     for (const r of src.records || []) collectTimes(r, times);
-    const availKnown = has('CHECK_AVAILABILITY') || !!(s.availability && Object.keys(s.availability).length);
+    // Prompt 26: a status code ("WL 12", "RAC 4") is verified only by a matching CHECK_AVAILABILITY result (scoped)
+    const availability = { session: s, evidence: collectAvailabilityEvidence(s, src.steps as any[]) };
     const pnrKnown = has('CHECK_PNR') || (src.records || []).some(r => !!r.pnr);
     const liveKnown = has('TRACK_TRAIN');
     const cancelledKnown = has('GET_CANCELLED_TRAINS') || okSteps.some(st => st.result.toolName === 'TRACK_TRAIN' && /cancel/i.test(JSON.stringify(st.result.data || {})));
@@ -65,7 +66,7 @@ export class RailwayResponseGroundingValidator {
       }
       if (PUNCTUAL.test(sn) && !liveKnown) rejected.push('PUNCTUALITY_CLAIM');
       if (PNR_STATUS.test(sn) && !pnrKnown) rejected.push('PNR_STATUS_CLAIM');
-      if (AVAIL_CODE.test(sn) && !availKnown) rejected.push('AVAILABILITY_CODE');
+      if (hasAvailabilityCode(sn) && judgeAvailabilityClaim(sn, availability).reason) rejected.push('AVAILABILITY_CODE');
       if (CANCELLED.test(sn) && !cancelledKnown) rejected.push('CANCELLATION_CLAIM');
       return rejected.length === before;
     });

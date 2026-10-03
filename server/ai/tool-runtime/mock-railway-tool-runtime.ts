@@ -14,6 +14,12 @@ import { ToolCallValidator, type ValidatedToolCall } from '../tools/tool-call-va
 import type { ToolRetryPolicy } from './tool-retry-policy';
 import { RailwayToolRuntime, type RailwayToolExecutor, type ExecutedCall, ToolTurn } from './railway-tool-runtime';
 import { reconcileProviderAnswers } from './provider-conflict';
+import { resolveDate } from '../../railway/resolvers/date-resolver';
+
+/** The fixture's journey is "kal" (the scenarios say "Amritsar se Delhi kal"): resolved by the real DateResolver,
+ *  never a hard-coded calendar date that turns stale at the next IST midnight. */
+const KAL = (() => { const r = resolveDate('kal'); return r.ok ? r.date : '2026-10-05'; })();
+const PARSO = (() => { const r = resolveDate('parso'); return r.ok ? r.date : '2026-10-06'; })();
 import type { ToolGrounding } from '../../booking/post-booking/post-booking-service';
 
 export type MockToolScenario =
@@ -36,7 +42,7 @@ const TRAINS = [
 export function mockToolSession(): BookingSession {
   return {
     sessionId: 'mock-tool-session', bookingState: BookingState.CLASS_SELECTED, sessionVersion: 1, searchResultsVersion: 1,
-    origin: 'ASR', originName: 'Amritsar Junction', destination: 'NDLS', destinationName: 'New Delhi', date: '2026-10-04', passengersCount: 2,
+    origin: 'ASR', originName: 'Amritsar Junction', destination: 'NDLS', destinationName: 'New Delhi', date: KAL, passengersCount: 2,
     searchResults: { trains: TRAINS.map((t, i) => ({ ...t, displayIndex: i + 1 })), version: 1, resultId: 'rs-mock-1' } as any,
     selectedTrain: { number: '12497', name: 'Shan-e-Punjab (MOCK)', availableClasses: ['3A', 'CC', 'SL', '2S'] } as any,
     selectedClass: 'CC', passengers: [], mode: 'TEXT'
@@ -125,7 +131,7 @@ export class MockRailwayToolRuntime {
     const s = mockToolSession();
     const out = (r: { results: LLMToolResult[]; records: ToolExecutionRecord[]; stopped: boolean }, ex: ScriptedRailwayExecutor, extra: Partial<ScenarioOutcome> = {}): ScenarioOutcome =>
       ({ scenario, results: r.results, records: r.records, stopped: r.stopped, providerCalls: ex.calls.length, session: s, ...extra });
-    const SEARCH = call('SEARCH_TRAINS', { origin: 'ASR', destination: 'NDLS', date: '2026-10-04' });
+    const SEARCH = call('SEARCH_TRAINS', { origin: 'ASR', destination: 'NDLS', date: KAL });
     switch (scenario) {
       case 'SEARCH_SUCCESS': { const ex = new ScriptedRailwayExecutor(); return out(await this.runTurn([[SEARCH]], s, 'Amritsar se Delhi kal', ex), ex); }
       case 'SEARCH_EMPTY': { const ex = new ScriptedRailwayExecutor({ empty: true }); return out(await this.runTurn([[SEARCH]], s, 'Amritsar se Delhi kal', ex), ex); }
@@ -139,7 +145,7 @@ export class MockRailwayToolRuntime {
       case 'TIMEOUT': { const ex = new ScriptedRailwayExecutor({ timeout: true }); return out(await this.runTurn([[call('CHECK_AVAILABILITY', {})]], s, 'availability batao', ex), ex); }
       case 'PROVIDER_FAILURE': { const ex = new ScriptedRailwayExecutor({ failTools: ['GET_FARE'] }); return out(await this.runTurn([[call('GET_FARE', {})]], s, 'fare batao', ex), ex); }
       case 'UNKNOWN_TOOL': { const ex = new ScriptedRailwayExecutor(); return out(await this.runTurn([[call('BOOK_TICKET_NOW', { trainNumber: '12497' }), call('CANCEL_BOOKING', {})]], s, 'book karo', ex), ex); }
-      case 'INVALID_ARGS': { const ex = new ScriptedRailwayExecutor(); return out(await this.runTurn([[call('SEARCH_TRAINS', { origin: 'ASR', destination: 'NDLS', date: '2026-10-04', password: 'x' }), call('CHECK_PNR', { pnr: '9876543210' })]], s, 'search karo', ex), ex); }
+      case 'INVALID_ARGS': { const ex = new ScriptedRailwayExecutor(); return out(await this.runTurn([[call('SEARCH_TRAINS', { origin: 'ASR', destination: 'NDLS', date: KAL, password: 'x' }), call('CHECK_PNR', { pnr: '9876543210' })]], s, 'search karo', ex), ex); }
       case 'MISSING_ARGS': {
         const ex = new ScriptedRailwayExecutor();
         const s2: any = { ...s, origin: undefined, destination: undefined, date: undefined, searchResults: undefined, selectedTrain: undefined, selectedClass: undefined, bookingState: BookingState.IDLE };
@@ -148,7 +154,7 @@ export class MockRailwayToolRuntime {
       }
       case 'STALE_RESULT': {
         // the journey date changes while availability is in flight → journeyVersion moves → not applied
-        const ex = new ScriptedRailwayExecutor({ delayMs: 5, onCall: () => { setTimeout(() => { s.date = '2026-10-05'; }, 1); } });
+        const ex = new ScriptedRailwayExecutor({ delayMs: 5, onCall: () => { setTimeout(() => { s.date = PARSO; }, 1); } });
         return out(await this.runTurn([[call('CHECK_AVAILABILITY', {})]], s, 'availability', ex), ex);
       }
       case 'PARALLEL_SUCCESS': { const ex = new ScriptedRailwayExecutor({ delayMs: 20 }); return out(await this.runTurn([[call('GET_TIMETABLE', { trainNumber: '12497' }), call('CHECK_AVAILABILITY', {}), call('GET_FARE', {})]], s, 'timetable, availability aur fare', ex), ex); }

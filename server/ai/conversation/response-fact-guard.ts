@@ -8,11 +8,12 @@
  *                                  the session's booking records
  *   - ₹ amounts                   → provider fare / search-result fares / review / booking records
  *   - PNR-like 10-digit numbers   → authoritative booking records / CHECK_PNR results only
- *   - availability claims         → only if a provider availability result exists this turn or in session
+ *   - availability claims         → Prompt 26: only a CHECK_AVAILABILITY result matching train / date / class / status
  * Sentences with an unsupported fact are removed (never displayed as fact). The backend's own
  * deterministic phrasing is not filtered here.
  */
 import type { BookingSession } from '@shared/entities';
+import { collectAvailabilityEvidence, judgeAvailabilityClaim, hasAvailabilityCode } from '../response/availability-authority';
 
 export interface FactSources {
   session: BookingSession;
@@ -25,7 +26,6 @@ export interface FactSources {
 export interface FactGuardResult { text: string; rejected: string[] }
 
 const SENT_SPLIT = /(?<=[.!?।])\s+/;
-const AVAIL_CLAIM = /\b(available hai|available hain|seats? (available|milegi|mil jayegi|hai)|confirm(ed)? seat|seat confirm|cnf milega|pakki seat)\b/i;
 
 function numbersIn(v: any, re: RegExp, out: Set<string>) {
   if (v === undefined || v === null) return;
@@ -51,14 +51,15 @@ export function guardResponseFacts(text: string, src: FactSources): FactGuardRes
   for (const r of src.records || []) if (r.fareSummary?.total) amounts.add(String(r.fareSummary.total));
   for (const r of src.records || []) if (r.pnr) pnrs.add(String(r.pnr));
   for (const st of src.steps) if (st.status === 'ok' && st.result.toolName === 'CHECK_PNR') numbersIn(st.result.data?.pnr, P10, pnrs);
-  const availKnown = src.steps.some(st => st.status === 'ok' && st.result.toolName === 'CHECK_AVAILABILITY') || !!(s.availability && Object.keys(s.availability).length);
+  // Prompt 26: availability authority = CHECK_AVAILABILITY evidence matched to the sentence's train / date / class / status
+  const availability = { session: s, evidence: collectAvailabilityEvidence(s, src.steps as any[]) };
 
   const rejected: string[] = [];
   const kept = String(text).split(SENT_SPLIT).filter(sn => {
     for (const m of sn.matchAll(P10)) if (!pnrs.has(m[1])) { rejected.push(`PNR:${m[1].slice(0, 2)}******${m[1].slice(-2)}`); return false; }
     for (const m of sn.replace(P10, ' ').matchAll(T5)) if (!trains.has(m[1])) { rejected.push(`TRAIN:${m[1]}`); return false; }
     for (const m of sn.matchAll(/₹\s?([\d,]+)/g)) { const v = m[1].replace(/,/g, ''); if (!amounts.has(v)) { rejected.push(`FARE:${v}`); return false; } }
-    if (AVAIL_CLAIM.test(sn) && !availKnown) { rejected.push('AVAILABILITY_CLAIM'); return false; }
+    if (!hasAvailabilityCode(sn) && judgeAvailabilityClaim(sn, availability).reason) { rejected.push('AVAILABILITY_CLAIM'); return false; }
     return true;
   });
   if (!rejected.length) return { text, rejected };

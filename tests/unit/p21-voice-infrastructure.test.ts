@@ -311,7 +311,7 @@ describe('P21 G2 — NaturalResponseComposer (LLM wording, backend grounding)', 
     expect(bad.source).toBe('LLM');
     expect(bad.text).toBe('Haan, 12014 rakh li. Kaunsi class chahiye?');      // pending question guaranteed
     const why = bad.rejected.map(r => r.reason.split(':')[0]);
-    for (const r of ['UNGROUNDED_NUMBER', 'UNGROUNDED_CLASS', 'UNGROUNDED_AVAILABILITY', 'BOOKING_SUCCESS_CLAIM', 'CHAIN_OF_THOUGHT', 'ROBOTIC_PHRASING']) expect(why).toContain(r);
+    for (const r of ['UNGROUNDED_NUMBER', 'UNGROUNDED_CLASS', 'UNVERIFIED_AVAILABILITY', 'BOOKING_SUCCESS_CLAIM', 'CHAIN_OF_THOUGHT', 'ROBOTIC_PHRASING']) expect(why).toContain(r);
     expect(bad.text).not.toMatch(/99999|777|3A|book ho gaya/);
   });
 

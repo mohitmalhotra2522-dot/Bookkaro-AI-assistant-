@@ -204,7 +204,7 @@ describe('P22 G3 — the LLM is the conversational intelligence', () => {
       await run(h, ['Amritsar se Delhi kal', '12014 wali', 'CC'], mode);
       L.spoken = '12014 Rajdhani hai. Ye Mumbai se aati hai. Parso subah 9:15 baje chalti hai. Fare ₹999 hai. Do trainein hain. CC mein Waitlist 3 hai. Kitne passengers hain?';
       const r = await h.say('theek hai', mode);
-      expect(r.turnLog.naturalSpeech.rejected, mode).toEqual(['UNGROUNDED_TRAIN_NAME:Rajdhani', 'UNGROUNDED_STATION:Mumbai', 'UNGROUNDED_NUMBER:9', 'UNGROUNDED_NUMBER:999', 'UNGROUNDED_COUNT:Do trainein', 'AVAILABILITY_MISMATCH:WL 3']);
+      expect(r.turnLog.naturalSpeech.rejected, mode).toEqual(['UNGROUNDED_TRAIN_NAME:Rajdhani', 'UNGROUNDED_STATION:Mumbai', 'UNGROUNDED_NUMBER:9', 'UNGROUNDED_NUMBER:999', 'UNGROUNDED_COUNT:Do trainein', 'UNVERIFIED_AVAILABILITY']);   // Prompt 26: no CHECK_AVAILABILITY ran — a search hint neither proves nor disproves availability
       expect(r.voice.assistantText, mode).not.toMatch(/Rajdhani|Mumbai|9:15|999|Waitlist 3|Do trainein/);
       expect(r.voice.assistantText, mode).toMatch(/Kitne passengers hain\?/);
     }

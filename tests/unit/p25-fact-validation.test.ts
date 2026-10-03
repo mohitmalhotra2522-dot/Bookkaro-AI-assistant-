@@ -51,7 +51,7 @@ describe('P25 G2 — claim classification + structured railway claims', () => {
     // same explanation in a NON-general turn (train list on screen, no availability result): not a live claim
     const mid = await compose(session(), 'RAC mein do passengers ek berth share karte hain. 12014 mein seats available hain.', { userText: 'RAC kya hota hai?' });
     expect(mid.text).toBe('RAC mein do passengers ek berth share karte hain. Kaunsi train chahiye?');
-    expect(reasons(mid)).toEqual(['UNGROUNDED_AVAILABILITY']);
+    expect(reasons(mid)).toEqual(['UNVERIFIED_AVAILABILITY']);
     // live Muse regression: HOW RAC works ("seat confirm ho jaati hai") is an explanation, not a seat claim — even with trains on screen
     const how = await compose(session(), 'RAC matlab Reservation Against Cancellation. RAC mein aadhi berth milti hai aur cancellation hone par seat confirm ho jaati hai. Chart ke baad bhi confirmed seat mil sakti hai.', { general: true, userText: 'RAC kya hota hai?' });
     expect(how.rejected).toEqual([]);
@@ -89,7 +89,7 @@ describe('P25 G2 — claim classification + structured railway claims', () => {
     const s = session();
     const r = await compose(s, '12014 Amritsar Shatabdi – 04:55 se 10:50, CC aur 2S available. 12014 mein 3A available hai. CC mein seats available hain.');
     expect(r.text).toBe('12014 Amritsar Shatabdi – 04:55 se 10:50, CC aur 2S classes listed. Kaunsi train chahiye?');
-    expect(reasons(r)).toEqual(['CLASS_NOT_LISTED:3A', 'UNGROUNDED_AVAILABILITY']);
+    expect(reasons(r)).toEqual(['UNVERIFIED_AVAILABILITY', 'UNVERIFIED_AVAILABILITY']);   // P26: a single-class "available hai" is a seat claim
     expect(r.repaired).toBe(1);
     expect(r.provenance![0]).toMatchObject({ claimType: 'TOOL_DERIVED_FACT', sourceTool: 'SEARCH_TRAINS' });
     // with a real availability result the same words are a seat claim, validated against it (no repair)

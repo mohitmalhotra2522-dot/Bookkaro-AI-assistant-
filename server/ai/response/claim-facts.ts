@@ -14,6 +14,7 @@
  * "CC aur 2S classes listed") when no availability result exists, which keeps the provider-backed meaning.
  */
 import type { BookingSession } from '@shared/entities';
+import { isClassEnumeration, type AvailabilityEvidence } from './availability-authority';
 
 export type ClaimType =
   | 'GENERAL_KNOWLEDGE' | 'RAILWAY_LIVE_FACT' | 'SESSION_FACT' | 'TOOL_DERIVED_FACT'
@@ -25,6 +26,13 @@ export interface ClaimProvenance {
   sourceTool: string | null;
   sourceResultId: string | null;
   fields: string[];
+  /** Prompt 26: availability provenance (internal only) — absent ⇒ availability is NOT verified. */
+  factSubtype?: 'SEAT_AVAILABILITY';
+  verified?: boolean;
+  trainNumber?: string;
+  date?: string;
+  travelClass?: string;
+  availability?: string;
 }
 
 export interface TrainFact { num: string; name: string; dep?: string; arr?: string; durMin?: number; classes: string[]; source: string; resultId: string | null }
@@ -196,7 +204,8 @@ export function judgeComparison(t: string, idx: FactIndex): string | null {
 const CLASS_CODE_RE = /\b(1A|2A|3A|3E|CC|EC|SL|2S|FC|EA)\b/g;
 const SEAT_RE = /\b(seats?|berths?|khaali|khali|confirm(ed)?|cnf|avl\s*\d|wl|rac|waiting|waitlist|bhari|full|sold out|mil (jayegi|jaegi|jaayegi|jaati)|tickets? (available|mil))\b/i;
 export function isClassListClaim(t: string): boolean {
-  return (t.match(CLASS_CODE_RE) || []).length > 0 && /\bavailable\b/i.test(t) && !SEAT_RE.test(t);
+  // Prompt 26: only an ENUMERATION of classes is a class list; "12014 mein CC available hai" is a seat claim
+  return isClassEnumeration(t) && !SEAT_RE.test(t);
 }
 /** "CC aur 2S available hain" → "CC aur 2S classes listed hain"; "CC and 2S are available" → "CC and 2S classes are listed". */
 export function repairClassList(t: string): string {
@@ -273,10 +282,15 @@ export function isGeneralKnowledgeClaim(t: string, idx: FactIndex): boolean {
   return EXPLAIN_RE.test(t) || OPINION_RE.test(t);
 }
 
-export function classifyClaim(t: string, idx: FactIndex, hits: { time?: TimeVerdict; fare?: FareFact; classList?: boolean; pax?: PaxClass; avail?: boolean; count?: boolean }, general: boolean): ClaimProvenance {
+export function classifyClaim(t: string, idx: FactIndex, hits: { time?: TimeVerdict; fare?: FareFact; classList?: boolean; pax?: PaxClass; avail?: AvailabilityEvidence; userAvail?: boolean; count?: boolean }, general: boolean): ClaimProvenance {
   const prov = (claimType: ClaimType, sourceTool: string | null = null, sourceResultId: string | null = null, fields: string[] = []): ClaimProvenance => ({ claimType, sourceTool, sourceResultId, fields });
   if (hits.fare) return prov('TOOL_DERIVED_FACT', hits.fare.source, hits.fare.resultId, ['fare', ...(hits.fare.train ? ['trainNumber'] : []), ...(hits.fare.cls ? ['travelClass'] : [])]);
-  if (hits.avail) return prov('RAILWAY_LIVE_FACT', 'CHECK_AVAILABILITY', null, ['availability']);
+  if (hits.avail) {
+    const e = hits.avail;
+    return { ...prov('RAILWAY_LIVE_FACT', e.sourceTool, e.sourceResultId, ['availability', 'trainNumber', 'date', 'travelClass']),
+      factSubtype: 'SEAT_AVAILABILITY', verified: true, trainNumber: e.trainNumber, date: e.date, travelClass: e.travelClass, availability: e.status };
+  }
+  if (hits.userAvail) return { ...prov('USER_PROVIDED', null, null, ['availability']), factSubtype: 'SEAT_AVAILABILITY', verified: false };
   if (hits.time?.fact) return prov('TOOL_DERIVED_FACT', hits.time.fact.source, hits.time.fact.resultId, ['trainNumber', ...hits.time.fields]);
   if (hits.time?.validated.length) return prov('TOOL_DERIVED_FACT', 'SEARCH_TRAINS', null, hits.time.fields);
   if (hits.classList) { const f = trainsIn(t, idx)[0]; return prov('TOOL_DERIVED_FACT', f?.source || 'SEARCH_TRAINS', f?.resultId ?? null, ['classes']); }

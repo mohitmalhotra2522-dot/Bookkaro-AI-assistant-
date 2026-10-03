@@ -24,9 +24,10 @@ import { railwayResponseGrounding } from '../tool-runtime/railway-response-groun
 import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import {
-  buildFactIndex, judgeTimes, judgeComparison, isClassListClaim, repairClassList, judgeClassList, judgeFareScope,
+  buildFactIndex, judgeTimes, judgeComparison, repairClassList, judgeClassList, judgeFareScope,
   classifyPaxCount, isSessionish, derivedTrainCounts, isGeneralKnowledgeClaim, classifyClaim, type ClaimProvenance, type TimeVerdict, type FareFact, type PaxClass
 } from './claim-facts';
+import { collectAvailabilityEvidence, judgeAvailabilityClaim, type AvailabilityEvidence, type AvailabilityContext } from './availability-authority';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -95,7 +96,6 @@ export interface NaturalComposeResult {
 
 const SAFETY = new Set(['FORBIDDEN_ACTION', 'SENSITIVE_REQUEST_REJECTED', 'SENSITIVE_DATA_REJECTED', 'BOOKING_ACCESS_DENIED', 'INVALID_LLM_OUTPUT', 'SESSION_VERSION_CONFLICT']);
 const CLASS_RE = /\b(1A|2A|3A|3E|CC|EC|SL|2S|FC)\b/g;
-const AVAIL_RE = /\b(available|availability hai|waiting|WL|RAC|seats?|khaali|bhari|full)\b/i;
 const SUCCESS_RE = /\b(book ho (gaya|gayi|gyi|chuka|chuki)|booked|booking (ho gayi|confirm(ed)?|successful|safal)|ticket (confirm|ban|book) (ho )?(gaya|gayi|chuka)|payment (ho gaya|done|successful)|pnr (number )?(hai|is|mil))/i;
 const NEGATION_RE = /\b(nahi|nahin|na|not|no|never|abhi tak nahi)\b/i;
 const NOT_BOOKED_RE = /(book nahi|booked nahi|nahi hua|not (been )?booked|no ticket|ticket book nahi)/i;
@@ -106,8 +106,6 @@ const DAY_RE = /\b(aaj|today|kal|tomorrow|parso|parson|day after tomorrow)\b/gi;
 const TRAIN_COUNT_RE = /\b(\d+|ek|one|do|two|teen|three|char|chaar|four|paanch|five|chhe|six)\s+(trains?|trainein|gaadiyan)\b/gi;
 const PAX_COUNT_RE = /\b(\d+|ek|one|do|two|teen|three|char|chaar|four|paanch|five|chhe|six)\s+(passengers?|yatri|log)\b/gi;
 const COUNT_WORD: Record<string, number> = { ek: 1, one: 1, do: 2, two: 2, teen: 3, three: 3, char: 4, chaar: 4, four: 4, paanch: 5, five: 5, chhe: 6, six: 6 };
-const POS_AVAIL_RE = /\b(seats? (available|khaali|mil (jaayegi|jayegi|jaegi))|available (hain|hai|h)\b|confirm(ed)? seats?|pakki seats?|seats? (confirm|pakki))/i;
-const normStatus = (x: string) => String(x || '').toUpperCase().replace(/WAIT\s*LIST(ED)?|WAITING(\s+LIST)?|GNWL|PQWL|RLWL|RSWL/g, 'WL').replace(/\s+/g, ' ').trim();
 const lcPad = (x: string) => ` ${String(x || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')} `;
 function stationCodesIn(text: string): Set<string> {
   const t = lcPad(text); const out = new Set<string>();
@@ -116,11 +114,15 @@ function stationCodesIn(text: string): Set<string> {
   return out;
 }
 /** Numbers under fare-bearing keys only (a ₹ amount must be a fare / total the provider or the review returned). */
+// ids / timestamps / provenance inside a fare object are never amounts ("…-55…" in a requestId, ":55" in retrievedAt)
+const FARE_META_KEY = /(id|at|time|timestamp|date|version|session|request|provider|source|origin|destination|hash|status|currency|class|train|count)$/i;
 function collectFare(into: Set<number>, v: any, key = '', inFare = false, depth = 0) {
   if (v === null || v === undefined || depth > 7) return;
-  const f = inFare || /fare|total|amount|perpassenger|price/i.test(key);
+  if (key && FARE_META_KEY.test(key) && !/fare|total|amount|perpassenger|price/i.test(key)) return;
+  const own = /fare|total|amount|perpassenger|price/i.test(key);
+  const f = inFare || own;
   if (typeof v === 'number') { if (f && Number.isFinite(v)) into.add(Math.abs(v)); return; }
-  if (typeof v === 'string') { if (f) for (const m of v.match(/\d+(?:\.\d+)?/g) || []) into.add(Number(m)); return; }
+  if (typeof v === 'string') { if (own) for (const m of v.match(/\d+(?:\.\d+)?/g) || []) into.add(Number(m)); return; }
   if (Array.isArray(v)) { for (const x of v.slice(0, 40)) collectFare(into, x, key, f, depth + 1); return; }
   if (typeof v === 'object') for (const [k, x] of Object.entries(v)) collectFare(into, x, k, f, depth + 1);
 }
@@ -138,8 +140,6 @@ const SHORT_Q_EN: Record<string, string> = {
 };
 /** A sentence that already asks the user for something ("…bata dijiye.", "Please share…") — no second question. */
 const ASKS_RE = /(\?|\b(bata\s?(o|iye|ie|ein|yein|dijiye|dein|do|dena)|batayein|bataiye|batao|share (karein|kijiye|kar dijiye)|let me know|tell me|please (confirm|share|tell|choose|select|provide)|chun (lijiye|lein|lo)|select kar(ein|iye| lijiye)|confirm kar(ein|iye| dijiye))\b[^.!?]*[.!]?\s*$)/i;
-const POS_AVAIL_PRESENT_RE = /\b(seats? (available|khaali|mil (jaayegi|jayegi|jaegi))|available (hain|hai|h)\b)/i;
-const GK_AVAIL_PHRASE = /\b(seats? (available|milegi|mil jayegi|hai)|confirm(ed)? seat|seat confirm|cnf milega|pakki seat)\b/gi;
 const LEAD_CONJ = /^(aur|and|lekin|but|par|magar|ya|or|also|bhi|toh|to|so)\b[,\s]+/i;
 /**
  * Prompt 25 Part 11: markdown lists become plain sentences BEFORE splitting, so a list marker can never survive as an
@@ -226,7 +226,8 @@ export class NaturalResponseComposer {
     const userTrainNums = new Set<string>([...(i.userText.match(/\b\d{5}\b/g) || []), ...(i.selectedTrainBefore ? [String(i.selectedTrainBefore)] : [])]);
     const knownTrainNums = new Set<string>([...trains.map(t => String(t.trainNumber)), ...((s.selectedTrain as any)?.number ? [String((s.selectedTrain as any).number)] : [])]);
     const fareKnown = !!s.fare || views.some(v => v.ok && v.toolName === 'GET_FARE') || /₹/.test(i.backendReply) || (s.review as any)?.snapshot?.fare?.status === 'VERIFIED';
-    const availKnown = !!(s.availability && Object.keys(s.availability).length) || views.some(v => v.ok && v.toolName === 'CHECK_AVAILABILITY') || AVAIL_RE.test(i.backendReply);
+    // Prompt 26: no `availKnown` boolean — keyword presence (backend reply / LLM text / user words) is never availability
+    // evidence; every availability sentence is judged by availability-authority against CHECK_AVAILABILITY results only
     const confirmationTurn = s.bookingState === BookingState.IRCTC_HANDOFF_READY && i.stateBefore !== BookingState.IRCTC_HANDOFF_READY;
     const reviewTurn = s.bookingState === BookingState.AWAITING_CONFIRMATION;
     const streamable = !!i.onSegment && !confirmationTurn && !reviewTurn;
@@ -250,10 +251,6 @@ export class NaturalResponseComposer {
       ...views.filter(v => v.ok && v.data && (v.data as any).trainNumber).map(v => ({ num: String((v.data as any).trainNumber), name: String((v.data as any).trainName || (v.data as any).name || '').toLowerCase() }))
     ];
     const nameSources = `${knownNames.map(k => k.name).join(' ')} ${i.backendReply} ${i.deterministicSpeech} ${i.userText} ${s.originName || ''} ${s.destinationName || ''}`.toLowerCase();
-    const statuses: Array<{ cls: string; status: string }> = [
-      ...Object.entries((s.availability || {}) as Record<string, any>).map(([c, v]) => ({ cls: c, status: String(v?.status ?? v ?? '') })),
-      ...views.filter(v => v.ok && v.toolName === 'CHECK_AVAILABILITY' && v.data).map(v => ({ cls: String((v.data as any).travelClass || ''), status: String((v.data as any).status || '') }))
-    ];
     // counts are checked against THE count (not any number seen this turn)
     const trainCounts = new Set<number>([trains.length, ...[...`${i.backendReply} ${i.deterministicSpeech}`.matchAll(/(\d+)\s+(?:trains?|trainein)/gi)].map(m => Number(m[1]))]);
     const paxCounts = new Set<number>([s.passengersCount, (s.passengers || []).length, ...(i.userText.match(/\b\d{1,2}\b/g) || []).map(Number)].filter((n): n is number => typeof n === 'number'));
@@ -263,7 +260,8 @@ export class NaturalResponseComposer {
     collectFare(fareNums, { fare: s.fare, review: (s.review as any)?.snapshot, steps: views.filter(v => v.ok && v.toolName === 'GET_FARE').map(v => ({ fare: v.data })) });
     const idx = buildFactIndex(s, views as any);
     for (const n of idx.farePax) paxCounts.add(n);
-    const seatStatusFor = (t: string) => { const m = [...new Set(t.match(CLASS_RE) || [])]; return statuses.some(x => x.status && (!m.length || m.includes(x.cls))); };
+    // Prompt 26: availability evidence = CHECK_AVAILABILITY only (this turn's validated step / the runtime-committed session entry)
+    const availCtx: AvailabilityContext = { session: s, evidence: collectAvailabilityEvidence(s, (i.steps || []) as any[]), trains: idx.trains.map(f => ({ num: f.num, classes: f.classes })) };
     for (const m of `${i.backendReply} ${i.deterministicSpeech}`.matchAll(/₹\s?([\d,]+(?:\.\d+)?)/g)) fareNums.add(Number(m[1].replace(/,/g, '')));
 
     const accepted: string[] = [];
@@ -273,7 +271,7 @@ export class NaturalResponseComposer {
     const hasQ = () => accepted.some(a => a.includes('?')) || (!!accepted.length && ASKS_RE.test(accepted[accepted.length - 1]));
 
     // Prompt 25: per-sentence evidence → claim type / provenance; `text` may carry a meaning-preserving repair
-    type Hits = { time?: TimeVerdict; fare?: FareFact; classList?: boolean; pax?: PaxClass; avail?: boolean; count?: boolean; text?: string };
+    type Hits = { time?: TimeVerdict; fare?: FareFact; classList?: boolean; pax?: PaxClass; avail?: AvailabilityEvidence; userAvail?: boolean; count?: boolean; text?: string };
     const judge = (sentence: string, hits: Hits = {}): string | null => {
       let t = sentence.trim();
       if (!t) return 'EMPTY';
@@ -282,6 +280,16 @@ export class NaturalResponseComposer {
       // Prompt 25 Part 1: a general explanation (no train / class / date / fare / session anchor) is general knowledge in
       // ANY turn — judged for what it can falsely claim, never for merely containing a number
       const gk = general || isGeneralKnowledgeClaim(t, idx);
+      // Prompt 26: ONE availability rule (availability-authority). CLASS_LIST ≠ SEAT_AVAILABILITY: "CC aur 2S available"
+      // without an availability result is the provider's class list → kept with unambiguous wording. RAC / WL explanations
+      // are general knowledge. A live seat claim must match a CHECK_AVAILABILITY result (train + date + class + status).
+      {
+        const av = judgeAvailabilityClaim(t, availCtx);
+        if (av.outcome === 'CLASS_LIST' && (!gk || /\b\d{5}\b/.test(t))) { t = repairClassList(t); hits.classList = true; hits.text = t; }
+        if (av.reason) return av.reason;
+        if (av.outcome === 'VERIFIED_AVAILABILITY') hits.avail = av.evidence;
+        if (av.outcome === 'USER_PROVIDED_FACT') hits.userAvail = true;
+      }
       // class codes ("3A", "2S") are checked as classes, not as free numbers
       if (gk) {
         // general explanation: specific identifiers are still never invented
@@ -296,13 +304,6 @@ export class NaturalResponseComposer {
         for (const c of t.match(CLASS_RE) || []) if (!classes.has(c)) return `UNGROUNDED_CLASS:${c}`;
       }
       if (/₹|\brs\.?\s*\d|\brupay/i.test(t) && !fareKnown) return 'UNGROUNDED_FARE';
-      // Prompt 25 Part 4: CLASS_LIST ≠ SEAT_AVAILABILITY — "CC aur 2S available" without an availability result is the
-      // provider's class list → kept with unambiguous wording; a seat claim still needs CHECK_AVAILABILITY
-      if (!gk && isClassListClaim(t) && !seatStatusFor(t)) { t = repairClassList(t); hits.classList = true; hits.text = t; }
-      // general: explaining WL / RAC / seats is fine; a concrete availability claim (train / day / "available hai") is not
-      // (Prompt 25: "cancellation hone par seat confirm ho jaati hai" explains RAC — confirm / pakki phrasing is a claim only when anchored)
-      if (gk ? (!availKnown && (POS_AVAIL_PRESENT_RE.test(t) || ((AVAIL_RE.test(t) || POS_AVAIL_RE.test(t)) && /\b\d{5}\b|\b(aaj|today|kal|tomorrow|parso)\b/i.test(t))))
-        : (AVAIL_RE.test(t) && !/availability (check|dekh|verify)/i.test(t) && !availKnown)) return 'UNGROUNDED_AVAILABILITY';
       if (SUCCESS_RE.test(t) && !NEGATION_RE.test(t)) return 'BOOKING_SUCCESS_CLAIM';
       // ---- Prompt 22 grounding ----
       for (const m of t.matchAll(/(?:₹|\brs\.?\s?|\binr\s?)\s?([\d,]+(?:\.\d+)?)/gi)) { const n = Number(m[1].replace(/,/g, '')); if (!fareNums.has(n)) return `UNGROUNDED_FARE_AMOUNT:${n}`; }
@@ -330,14 +331,6 @@ export class NaturalResponseComposer {
         if (kind === 'SESSION_FACT' && general && !isSessionish(t)) { hits.pax = 'GENERAL_KNOWLEDGE'; continue; }
         if (!paxCounts.has(n)) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
       }
-      {
-        const mentioned: string[] = [...(t.match(CLASS_RE) || [])];
-        const rel = statuses.filter(x => !mentioned.length || mentioned.includes(x.cls));
-        if (POS_AVAIL_RE.test(t) && !NEGATION_RE.test(t) && rel.length && !rel.some(x => /^(AVAIL|AVBL|CURR_AVBL)/i.test(x.status))) return 'AVAILABILITY_MISMATCH';
-        for (const m of t.matchAll(/\b(WL|waitlist|waiting(?:\s+list)?)\s*(\d+)/gi)) if (!rel.some(x => normStatus(x.status) === `WL ${m[2]}`)) return `AVAILABILITY_MISMATCH:WL ${m[2]}`;
-        for (const m of t.matchAll(/\bRAC\s*(\d+)/gi)) if (!rel.some(x => normStatus(x.status) === `RAC ${m[1]}`)) return `AVAILABILITY_MISMATCH:RAC ${m[1]}`;
-        if (!gk && rel.length && (POS_AVAIL_RE.test(t) || AVAIL_RE.test(t))) hits.avail = true;
-      }
       // ---- Prompt 25: structured railway claims (train ↔ time / comparison / class list / GET_FARE scope) ----
       if (!gk) { const tv = judgeTimes(t, idx, true); if (tv.reason) return tv.reason; hits.time = tv; }
       { const c = judgeComparison(t, idx); if (c) return c; }
@@ -347,10 +340,6 @@ export class NaturalResponseComposer {
       let probe = NEGATION_RE.test(t) ? t.replace(/\b\d{5}\b/g, m => userTrainNums.has(m) && !knownTrainNums.has(m) ? 'woh train' : m) : t;
       // times already judged as general knowledge (e.g. when Tatkal opens) are not timetable claims
       for (const g of hits.time?.general || []) probe = probe.split(g).join('—');
-      // Prompt 25 Part 1: explaining how RAC / WL work ("cancellation hone par seat confirm ho jaati hai") is general knowledge —
-      // concrete availability (train / day / "available hai") was already judged above, so the legacy blunt phrase guard
-      // only sees un-anchored explanation phrases masked
-      if (gk && !/\b\d{5}\b|\b(aaj|today|kal|tomorrow|parso)\b/i.test(t)) probe = probe.replace(GK_AVAIL_PHRASE, '—');
       const g = railwayResponseGrounding.validate(probe, { session: s, steps: i.steps, records: (i.records || []) as any });
       if (g.rejected.length) return `GROUNDING:${g.rejected[0]}`;
       return null;

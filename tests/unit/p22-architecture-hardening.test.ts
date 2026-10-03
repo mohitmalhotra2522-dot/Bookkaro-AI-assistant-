@@ -166,7 +166,7 @@ describe('P22 G2 — tool results are the only railway fact authority (composer)
       ['Kal subah 4:55 wali hai.', null], ['12014 10:50 par pahunchti hai.', null],
       ['12014 Rajdhani hai.', 'UNGROUNDED_TRAIN_NAME:Rajdhani'], ['Chandigarh se bhi train hai.', 'UNGROUNDED_STATION:CDG'],
       ['Parso subah 4:55 wali hai.', 'UNGROUNDED_DATE:Parso'], ['Do trainein mili hain.', 'UNGROUNDED_COUNT:Do trainein'],
-      ['12014 11:30 par pahunchti hai.', 'UNGROUNDED_NUMBER:11'], ['CC mein seats available hain.', 'UNGROUNDED_AVAILABILITY'],
+      ['12014 11:30 par pahunchti hai.', 'UNGROUNDED_NUMBER:11'], ['CC mein seats available hain.', 'UNVERIFIED_AVAILABILITY'],
       ['Fare ₹55 hai.', 'UNGROUNDED_FARE'], ['Aapka PNR confirm hai.', 'GROUNDING:PNR_STATUS_CLAIM'],
       ['12014 cancelled hai.', 'GROUNDING:CANCELLATION_CLAIM'], ['12014 time pe chal rahi hai.', 'GROUNDING:PUNCTUALITY_CLAIM']
     ];
@@ -213,11 +213,13 @@ describe('P22 G2 — security', () => {
       logs.push(JSON.stringify(r.turnLog));
     }
     await h.say('12014 wali');   // later turns carry history — still redacted
-    const sessionJson = JSON.stringify(h.s());
+    // random UUIDs / generated ids can contain a digit run like "4321" by chance — that is not a leak, so ids are stripped first
+    const noIds = (x: string) => x.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>');
+    const sessionJson = noIds(JSON.stringify(h.s()));
     for (const [, secret] of secrets) {
-      expect(seen.join(' '), secret).not.toContain(secret);
+      expect(noIds(seen.join(' ')), secret).not.toContain(secret);
       expect(sessionJson, secret).not.toContain(secret);
-      expect(logs.join(' '), secret).not.toContain(secret);
+      expect(noIds(logs.join(' ')), secret).not.toContain(secret);
     }
   });
 
