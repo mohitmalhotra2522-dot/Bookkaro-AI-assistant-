@@ -13,7 +13,8 @@
  */
 import { LLMProviderError, isLLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult, type SpokenResponseInput, type SpokenResponseResult } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
-import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT } from '../prompts/system-prompt';
+import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, NATIVE_AGENT_SYSTEM_PROMPT } from '../prompts/system-prompt';
+import type { AgentTranscriptStep } from './llm-provider';
 import { v4 as uuid } from '../orchestrator/utils';
 
 export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{
@@ -27,10 +28,22 @@ export interface OpenAICompatibleConfig {
   timeoutMs: number;
   fetch?: FetchLike;
   temperature?: number;
+  /**
+   * Prompt 23: 'native' (default) = OpenAI-style function calling — the model receives tool definitions, returns
+   * tool_calls, gets tool results back as role:"tool" messages and writes the final answer itself.
+   * 'json' = legacy single-JSON AgentDecision (for endpoints without tool-calling support).
+   */
+  toolMode?: 'native' | 'json';
 }
 
+/** Prompt 23: the one non-railway function the agent gets — a PROPOSAL the backend validates (never an execution). */
+export const SESSION_UPDATE_TOOL = 'update_booking_session';
+
 const MAX_TOKENS_DECISION = 700;
-const MAX_TOKENS_SPEECH = 180;
+/** Native agent steps: reasoning models spend part of the budget on hidden reasoning tokens. */
+const MAX_TOKENS_AGENT = 1400;
+const MAX_TOKENS_SPEECH = 400;
+const MAX_TOOL_RESULT_CHARS = 3500;
 
 export class OpenAICompatibleLLMProvider implements LLMProvider {
   readonly providerId = 'openai-compatible';
@@ -38,6 +51,10 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
   private readonly f: FetchLike;
   /** Count of failed remote decision calls (observability only; no content). */
   failedDecisions = 0;
+
+  /** Prompt 23: in native mode the agent's own final answer is the reply (validated by the composer). */
+  get agentAuthoredReplies(): boolean { return this.toolMode === 'native'; }
+  get toolMode(): 'native' | 'json' { return this.cfg.toolMode === 'json' ? 'json' : 'native'; }
 
   constructor(private readonly cfg: OpenAICompatibleConfig) {
     this.modelName = cfg.model;
@@ -70,6 +87,33 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
   }
 
   async generateStructuredDecision(input: LLMTurnInput): Promise<LLMTurnResult> {
+    return this.toolMode === 'native' ? this.nativeDecision(input) : this.jsonDecision(input);
+  }
+
+  /**
+   * Prompt 23 — one step of the native agent loop. Messages = system instructions + authoritative session context +
+   * recent conversation + the user's message + THIS turn's earlier steps replayed as assistant tool_calls and
+   * role:"tool" results (railway results and the backend's validated outcome of each session-update proposal).
+   */
+  private async nativeDecision(input: LLMTurnInput): Promise<LLMTurnResult> {
+    try {
+      const res = await this.post({
+        model: this.cfg.model, temperature: this.cfg.temperature ?? 0.3, max_tokens: MAX_TOKENS_AGENT,
+        messages: buildNativeMessages(input), tools: nativeToolDefs(input), tool_choice: 'auto'
+      });
+      let msg: any;
+      try { msg = (await res.json())?.choices?.[0]?.message; } catch { throw new LLMProviderError('LLM_BAD_RESPONSE'); }
+      if (!msg || typeof msg !== 'object') throw new LLMProviderError('LLM_BAD_RESPONSE');
+      const d = decisionFromNative(msg, input);
+      if (!d) throw new LLMProviderError('LLM_BAD_RESPONSE');
+      return { decision: d };
+    } catch (e) {
+      this.failedDecisions++;
+      throw isLLMProviderError(e) ? e : new LLMProviderError('LLM_BAD_RESPONSE');
+    }
+  }
+
+  private async jsonDecision(input: LLMTurnInput): Promise<LLMTurnResult> {
     try {
       const tools = input.tools.map(t => ({ name: t.name, description: t.description, parameters: t.parameters }));
       const user = {
@@ -136,10 +180,10 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
           try { const d = JSON.parse(data)?.choices?.[0]?.delta?.content; if (d) { text += d; input.onDelta!(d); } } catch { /* partial line */ }
         }
       }
-      return text.trim() ? { text: text.trim() } : null;
+      return cleanReply(text) ? { text: cleanReply(text) } : null;
     }
     const j = await res.json();
-    const text = String(j?.choices?.[0]?.message?.content || '').trim();
+    const text = cleanReply(String(j?.choices?.[0]?.message?.content || ''));
     if (text && input.onDelta) input.onDelta(text);
     return text ? { text } : null;
     } catch (e) { throw isLLMProviderError(e) ? e : new LLMProviderError('LLM_BAD_RESPONSE'); }
@@ -173,4 +217,162 @@ export function toDecision(raw: any, input: LLMTurnInput): AgentDecision {
     ...(typeof raw?.finalMessage === 'string' ? { finalMessage: raw.finalMessage } : {}),
     ...(typeof raw?.acknowledgement === 'string' ? { acknowledgement: raw.acknowledgement.slice(0, 160) } : {})
   } as AgentDecision;
+}
+
+
+// ---------------------------------------------------------------------------------------------- Prompt 23: native mode
+
+const STR = (description: string) => ({ type: 'string', description });
+
+/** Railway tools as OpenAI function definitions (the approved, implemented, LLM-callable set) + the session proposal. */
+export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
+  const railway = input.tools.map(t => {
+    const props: Record<string, any> = {};
+    const required: string[] = [];
+    for (const [k, p] of Object.entries(t.parameters || {})) {
+      let description = p.description;
+      // the backend resolves stations and dates deterministically — the model passes the user's own words
+      if (t.name === 'SEARCH_TRAINS' && (k === 'origin' || k === 'destination')) description = 'Station name or code as the user said it (e.g. "Amritsar", "ASR") — the backend resolves it.';
+      if (t.name === 'SEARCH_TRAINS' && k === 'date') description = 'Travel date exactly as the user said it ("kal", "parso", "5 Oct") or YYYY-MM-DD — the backend DateResolver resolves it. Never compute dates.';
+      props[k] = { type: p.type, description, ...(p.enum ? { enum: p.enum } : {}) };
+      if (p.required && t.name === 'SEARCH_TRAINS') required.push(k);
+    }
+    return { type: 'function', function: { name: t.name, description: t.description, parameters: { type: 'object', properties: props, required } } };
+  });
+  const trainRef = { type: 'object', description: 'How the user referred to a train (a PROPOSAL resolved by the backend).', properties: {
+    kind: { type: 'string', enum: ['TRAIN_NUMBER', 'DISPLAY_INDEX', 'TIME_PREFERENCE', 'CLASS_PREFERENCE', 'DEMONSTRATIVE', 'PREVIOUS', 'ALTERNATIVE'] },
+    value: { type: ['string', 'number'], description: 'e.g. "12014", 2, "MORNING", "AC", "THIS" | "FIRST" | "LAST"' },
+    searchResultsVersion: { type: 'number' } }, required: ['kind'] };
+  const session = { type: 'function', function: { name: SESSION_UPDATE_TOOL,
+    description: 'Propose a change to the booking session (select train/class, change route/date, passengers, review, confirmation, new booking, cancel flow). The backend validates it and returns the outcome; nothing is booked or paid.',
+    parameters: { type: 'object', required: ['intent', 'action'], properties: {
+      intent: { type: 'string', enum: ['BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'CANCEL_BOOKING', 'MODIFY_BOOKING', 'CHECK_REFUND_STATUS', 'GENERAL_RAILWAY_QUERY', 'UNKNOWN'] },
+      action: { type: 'string', description: 'SELECT_TRAIN | SELECT_CLASS | UPDATE_JOURNEY | UPDATE_DATE | UPDATE_PASSENGERS | SET_PASSENGER_COUNT | UPDATE_PASSENGER | START_PASSENGER_COLLECTION | COLLECT_PASSENGERS | COLLECT_PASSENGER_DETAILS | SHOW_REVIEW | REQUEST_CONFIRMATION | PREPARE_IRCTC_HANDOFF | REFINE_RESULTS | COMPARE_TRAINS | NO_ACTION' },
+      entities: { type: 'object', additionalProperties: true, properties: {
+        originRaw: STR('origin as said'), destinationRaw: STR('destination as said'), dateRaw: STR('date words as said'),
+        preferredTimeRaw: STR('e.g. subah / morning / raat'), preferredClassRaw: STR('e.g. AC / sleeper / CC'),
+        trainRef, classRaw: STR('class as said, e.g. "CC", "AC", "sleeper"'),
+        passengersCountRaw: STR('passenger count as said'), passengersDelta: { type: 'number' },
+        passengerChanges: { type: 'array', items: { type: 'object', properties: { passengerIndex: { type: 'number' }, changes: { type: 'object', properties: {
+          name: { type: 'string' }, age: { type: 'number' }, gender: { type: 'string' }, berthPreference: { type: 'string' } } } } } },
+        correctionTarget: STR('origin|destination|date|passengers|train|class'), correctionValueRaw: STR('corrected value as said'),
+        affirmation: { type: 'boolean' }, newJourney: { type: 'boolean' },
+        lifecycleAction: STR('optional booking lifecycle label'), bookingReference: STR('booking reference from context')
+      } },
+      clarification: STR('optional short question if you need to ask')
+    } } } };
+  return [...railway, session];
+}
+
+const clip = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : v);
+
+/** Recent conversation (bounded), without the current user message (sent separately) and without tool chatter. */
+function conversationOf(input: LLMTurnInput): Array<{ role: 'user' | 'assistant'; content: string }> {
+  const h = input.history.filter(m => m.role === 'user' || m.role === 'assistant').map(m => ({ role: m.role as 'user' | 'assistant', content: clip(String(m.content || ''), 600) }));
+  if (h.length && h[h.length - 1].role === 'user') h.pop();
+  return h.slice(-10);
+}
+
+export function buildNativeMessages(input: LLMTurnInput): any[] {
+  const ctx = {
+    inputMode: input.inputMode, bookingState: input.state, missingFields: input.missingFields,
+    context: input.context ?? null
+  };
+  const messages: any[] = [
+    { role: 'system', content: NATIVE_AGENT_SYSTEM_PROMPT },
+    { role: 'system', content: `AUTHORITATIVE SESSION CONTEXT (backend; wins over the conversation):\n${clip(JSON.stringify(ctx), 9000)}` },
+    ...conversationOf(input),
+    { role: 'user', content: input.userText }
+  ];
+  for (const st of (input.agentTranscript || []) as AgentTranscriptStep[]) {
+    const calls: any[] = [];
+    if (st.sessionUpdate) calls.push({ id: st.sessionUpdate.callId, type: 'function', function: { name: SESSION_UPDATE_TOOL, arguments: JSON.stringify(st.sessionUpdate.arguments || {}) } });
+    for (const c of st.toolCalls) calls.push({ id: c.callId, type: 'function', function: { name: c.name, arguments: JSON.stringify(c.arguments || {}) } });
+    if (!calls.length) continue;
+    messages.push({ role: 'assistant', content: st.assistantContent || '', tool_calls: calls });
+    if (st.sessionUpdate) {
+      const o = st.sessionUpdateOutcome;
+      messages.push({ role: 'tool', tool_call_id: st.sessionUpdate.callId, content: clip(JSON.stringify(o ? { ok: !o.error && !o.blocked, ...o } : { ok: false, error: { code: 'NOT_APPLIED' } }), 1500) });
+    }
+    for (const c of st.toolCalls) {
+      const r = st.results.find(x => String(x.callId) === c.callId);
+      const content = r
+        ? { ok: r.ok, ...(r.ok ? { data: trimResult(r.data) } : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300) } }) }
+        : { ok: false, error: { code: 'NOT_EXECUTED', message: 'Not executed (the session changed first) — decide again from the current context.' } };
+      messages.push({ role: 'tool', tool_call_id: c.callId, content: clip(JSON.stringify(content), MAX_TOOL_RESULT_CHARS) });
+    }
+  }
+  return messages;
+}
+
+function trimResult(v: any, depth = 0): any {
+  if (v === null || v === undefined || depth > 5) return v ?? null;
+  if (Array.isArray(v)) return v.slice(0, 12).map(x => trimResult(x, depth + 1));
+  if (typeof v === 'object') {
+    const o: any = {};
+    for (const [k, x] of Object.entries(v)) if (!/(requestId|sessionId|toolExecutionId|provenance|^raw$)/i.test(k)) o[k] = trimResult(x, depth + 1);
+    return o;
+  }
+  return typeof v === 'string' ? clip(v, 240) : v;
+}
+
+/** Remove hidden-reasoning wrappers and markdown noise from a model reply (private reasoning is never shown). */
+export function cleanReply(text: string): string {
+  return String(text || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*$/i, '')
+    .replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#{1,6}\s+/gm, '').replace(/^\s*[-*]\s+/gm, '')
+    .replace(/[ \t]+\n/g, '\n').replace(/\n{2,}/g, '\n').trim();
+}
+
+const parseArgs = (raw: any): Record<string, any> => {
+  if (raw && typeof raw === 'object') return raw;
+  try { const v = JSON.parse(String(raw || '{}')); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch { return {}; }
+};
+
+/**
+ * Native assistant message → AgentDecision. Pure shape transcoding — no interpretation of the user's words:
+ *  - content only → final answer;
+ *  - update_booking_session → intent/action/entities proposal (+ continueAfterApply so the model sees the outcome);
+ *  - railway tool calls → toolCalls (unknown / forbidden names are KEPT so the runtime rejects them visibly).
+ */
+export function decisionFromNative(msg: any, input: LLMTurnInput): AgentDecision | null {
+  const calls: any[] = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+  const content = cleanReply(typeof msg.content === 'string' ? msg.content : '');
+  if (!calls.length) {
+    if (!content) return null;
+    return { intent: 'GENERAL_RAILWAY_QUERY', action: 'NO_ACTION', entities: {}, missingFields: [], clarification: null, confidence: 0.8, toolCalls: [], finalMessage: content } as any;
+  }
+  const seen = new Set<string>();
+  const idOf = (c: any) => { let id = typeof c?.id === 'string' && c.id ? c.id : uuid(); if (seen.has(id)) id = uuid(); seen.add(id); return id; };
+  let update: { id: string; args: Record<string, any> } | null = null;
+  const toolCalls: any[] = [];
+  for (const c of calls.slice(0, 6)) {
+    const name = String(c?.function?.name ?? c?.name ?? '');
+    const args = parseArgs(c?.function?.arguments ?? c?.arguments);
+    if (name === SESSION_UPDATE_TOOL) { if (!update) update = { id: idOf(c), args }; continue; }
+    toolCalls.push({ callId: idOf(c), name, arguments: args });
+  }
+  const ack = content ? content.slice(0, 160) : undefined;
+  if (update) {
+    const a = update.args;
+    return {
+      intent: typeof a.intent === 'string' ? a.intent : 'UNKNOWN', action: typeof a.action === 'string' ? a.action : 'NO_ACTION',
+      entities: a.entities && typeof a.entities === 'object' && !Array.isArray(a.entities) ? a.entities : {},
+      missingFields: [], clarification: typeof a.clarification === 'string' ? a.clarification : null, confidence: 0.8,
+      toolCalls, continueAfterApply: true,
+      native: { sessionUpdateCallId: update.id, sessionUpdateArgs: a, ...(content ? { assistantContent: content } : {}) },
+      ...(ack && toolCalls.length ? { acknowledgement: ack } : {})
+    } as any;
+  }
+  // railway tools only: a search carries the model's own route/date arguments as the journey entities (same shape
+  // MockLLM uses), everything else is an information request with no session change
+  const search = toolCalls.find(c => c.name === 'SEARCH_TRAINS');
+  const sa = search?.arguments || {};
+  return {
+    intent: search ? 'SEARCH_TRAINS' : 'GENERAL_RAILWAY_QUERY', action: search ? 'SEARCH_TRAINS' : 'NO_ACTION',
+    entities: search ? { ...(sa.origin ? { originRaw: String(sa.origin) } : {}), ...(sa.destination ? { destinationRaw: String(sa.destination) } : {}), ...(sa.date ? { dateRaw: String(sa.date) } : {}) } : {},
+    missingFields: [], clarification: null, confidence: 0.8, toolCalls,
+    ...(content ? { native: { assistantContent: content } } : {}),
+    ...(ack ? { acknowledgement: ack } : {})
+  } as any;
 }

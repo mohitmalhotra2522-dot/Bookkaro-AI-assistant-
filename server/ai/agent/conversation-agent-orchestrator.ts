@@ -63,6 +63,7 @@ import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { syncPreparationState, recordDependencyOutcome, bookingPreparationSummary } from '../../booking/preparation/booking-preparation';
 import { classifyAgentTurn } from '../decisions/state-actions';
 import { preparationErrorTypeOf } from '@shared/booking-preparation';
+import { SAFE_ERROR_MESSAGE } from '../tool-runtime/tool-error-normalizer';
 import { naturalResponseComposer, type NaturalComposeResult } from '../response/natural-response-composer';
 import { speechOf } from '../conversation/assistant-response';
 
@@ -379,8 +380,12 @@ export class ConversationAgentOrchestrator {
       }
     });
     let rt: ToolRuntimeResult;
+    let sigAfterLoop = '';
+    let stateAfterLoop: BookingState | null = null;
     try {
       rt = await bound.run(llmInput, mode, this.getHistory(sessionId));
+      sigAfterLoop = agentSessionSig(this.state.getSession(sessionId));
+      stateAfterLoop = this.state.getSession(sessionId).bookingState;
     } catch (e: any) {
       const err: OrchestratorError = { code: e?.code === 'INVALID_STATE_TRANSITION' ? 'INVALID_STATE_TRANSITION' : 'TOOL_FAILED', message: 'Maaf kijiye, ye step abhi complete nahi ho paaya. Kripya dobara try karein.' };
       return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
@@ -497,19 +502,33 @@ export class ConversationAgentOrchestrator {
     const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
-    const turnError = blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined);
+    // Prompt 23: a native agent may have answered after a rejected proposal — the rejection stays the turn's error
+    // unless a later proposal in the same turn was applied
+    const lastEffect = [...rt.applyOutcomes].reverse().find(o => (o.applied || []).length || o.error);
+    const nativeRejected = rt.stopReason === 'final' && this.llm.agentAuthoredReplies && lastEffect?.error ? lastEffect.error : undefined;
+    const turnError = blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined) || nativeRejected;
     // ---- Prompt 21/22: natural wording by the LLM for TEXT and VOICE — every sentence grounded against authoritative
     //      data; the backend reply (responseMessage) stays the authoritative fact base + safe fallback ----
+    // Prompt 23: a native agent's own final answer is the reply when it was written from the CURRENT session (nothing
+    // moved after the agent loop: no backend preparation / lifecycle / duplicate execution, same key session fields)
+    const agentFresh = !!this.llm.agentAuthoredReplies && rt.stopReason === 'final' && !!rt.finalMessage && !blockErr
+      && !rt.applyOutcomes.some(o => o.lifecycle) && !forbiddenAttempted(rt) && !lcPlan && !(prep?.steps?.length) && !dupExecution && agentSessionSig(sess) === sigAfterLoop
+      // the backend moving on to the next step is fine; entering review / confirmation after the agent spoke is not
+      && !(sess.bookingState !== stateAfterLoop && (sess.bookingState === BookingState.AWAITING_CONFIRMATION || sess.bookingState === BookingState.IRCTC_HANDOFF_READY));
+    const generalTurn = agentFresh && rt.steps.length === 0 && !(extra.backendActions || []).length && !ctx.changes.length
+      && !turnError && sess.bookingState === stateBefore;
     if (opts.naturalSpeech !== false && message && !(turnError?.code === 'LLM_UNAVAILABLE')) {
       try {
         extra.naturalSpeech = await naturalResponseComposer.compose({
+          agentText: agentFresh ? rt.finalMessage : null, general: generalTurn,
           llm: this.llm, session: sess, userText: normalizedInput, backendReply: message, mode,
           deterministicSpeech: mode === 'VOICE' ? speechOf(message, 'VOICE', questionFor(sess.pendingInteraction, sess, 'VOICE')) : message,
           stateBefore, reviewVersionBefore: voiceBefore.reviewVersion, selectedTrainBefore: voiceBefore.train,
           selectedClassBefore: voiceBefore.cls, passengersCountBefore: voiceBefore.count,
           steps: [...rt.steps, ...(prep?.steps || [])], appliedActions: extra.backendActions || [],
           changes: (extra.patches || []).map(p => ({ field: String(p.field), corrected: p.kind === 'CORRECTION' })),
-          error: turnError ? { code: turnError.code, message: turnError.message } : null,
+          error: turnError ? { code: turnError.code, message: turnError.message }
+            : forbiddenAttempted(rt) ? { code: 'FORBIDDEN_ACTION', message: SAFE_ERROR_MESSAGE.FORBIDDEN_ACTION } : null,
           pendingQuestionCode: pendingQuestionCode(sess.pendingInteraction),
           pendingQuestion: pendingQuestionCode(sess.pendingInteraction) ? questionFor(sess.pendingInteraction, sess, 'VOICE') || null : null,
           history: (this.history.get(sessionId) || []).slice(-8) as any, records: this.postBooking.store.getBookingsForSession(sessionId) as any,
@@ -560,7 +579,11 @@ export class ConversationAgentOrchestrator {
     const searchFailed = rt.steps.some(st => st.result.toolName === 'SEARCH_TRAINS' && st.status !== 'ok');
     // Prompt 15: lifecycle turns are phrased ONLY by the backend service (never LLM wording)
     const lifecycleTurn = rt.applyOutcomes.some(o => o.lifecycle);
-    const llmFinalUseful = !lifecycleTurn && !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
+    // Prompt 23: after an attempted booking / payment / submission tool the agent's wording is never used — the
+    // backend states the boundary itself (a fragment like "Ho gaya!" must not survive claim removal)
+    const forbiddenAttempt = forbiddenAttempted(rt);
+    if (forbiddenAttempt) parts.push(SAFE_ERROR_MESSAGE.FORBIDDEN_ACTION);
+    const llmFinalUseful = !forbiddenAttempt && !lifecycleTurn && !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
     // Prompt 14: PNR / live status answers are ALWAYS deterministic phrasing of the provider result
     // (or its validated error) — LLM wording can never add or upgrade a status.
     if (nonSearch.some(st => LIVE_TOOLS.has(st.result.toolName))) parts.push(liveToolMessage(nonSearch, mode));
@@ -662,7 +685,7 @@ export class ConversationAgentOrchestrator {
       rejectedClaims: x.rejectedClaims || [],
       backendActions: x.backendActions || [],
       // Prompt 21: speech provenance (reasons only — never the rejected sentence text / names)
-      ...(x.naturalSpeech ? { naturalSpeech: { source: x.naturalSpeech.source, language: x.naturalSpeech.language, segments: x.naturalSpeech.segments.length, rejected: x.naturalSpeech.rejected.map(r => r.reason), fallbackReason: x.naturalSpeech.fallbackReason ?? null } } : {}),
+      ...(x.naturalSpeech ? { naturalSpeech: { source: x.naturalSpeech.source, language: x.naturalSpeech.language, segments: x.naturalSpeech.segments.length, rejected: x.naturalSpeech.rejected.map(r => r.reason), fallbackReason: x.naturalSpeech.fallbackReason ?? null, ...(x.naturalSpeech.authoredBy ? { authoredBy: x.naturalSpeech.authoredBy } : {}), ...(x.naturalSpeech.general ? { general: true } : {}) } } : {}),
       resultSetId: (s.searchResults as any)?.resultId ?? s.searchMeta?.resultId ?? null,
       activeJourneyId: this.context.activeJourneyId(a.sessionId),
       interruption: !!x.interruption,
@@ -731,7 +754,7 @@ export class ConversationAgentOrchestrator {
       // was unavailable / rejected. responseMessage keeps the authoritative backend reply.
       assistantText: a.stale ? '' : (x.naturalSpeech?.source === 'LLM' && x.naturalSpeech.text ? x.naturalSpeech.text : a.message),
       conversationContext,
-      ...(!a.stale && x.naturalSpeech ? { speech: { segments: x.naturalSpeech.segments, source: x.naturalSpeech.source, language: x.naturalSpeech.language, ...(x.naturalSpeech.fallbackReason ? { fallbackReason: x.naturalSpeech.fallbackReason } : {}) } } : {})
+      ...(!a.stale && x.naturalSpeech ? { speech: { segments: x.naturalSpeech.segments, source: x.naturalSpeech.source, language: x.naturalSpeech.language, ...(x.naturalSpeech.authoredBy ? { authoredBy: x.naturalSpeech.authoredBy } : {}), ...(x.naturalSpeech.fallbackReason ? { fallbackReason: x.naturalSpeech.fallbackReason } : {}) } } : {})
     };
   }
 
@@ -826,4 +849,17 @@ export function factGuard(message: string, steps: ToolCallStep[], mode: 'TEXT' |
     if (amounts.some(a => !known.has(a))) return deterministic();
   }
   return message;
+}
+
+
+/** Prompt 23: key session fields an agent reply depends on (no PII) — used to detect a reply that went stale. */
+function agentSessionSig(s: any): string {
+  // the pending QUESTION is re-derived by the backend after every loop (the composer appends it when missing) — not a fact
+  return JSON.stringify([s?.review?.version ?? s?.review?.reviewVersion ?? null,
+    s?.selectedTrain?.number ?? null, s?.selectedClass ?? null, s?.passengersCount ?? null, s?.date ?? null, s?.searchResultsVersion ?? null]);
+}
+
+/** Prompt 23: the runtime refused a tool call of this turn as a backend-controlled / forbidden action (booking, payment, …). */
+function forbiddenAttempted(rt: ToolRuntimeResult): boolean {
+  return (rt.toolExecutions || []).some(r => r.status === 'REJECTED' && r.rejectionReason === 'FORBIDDEN_ACTION');
 }

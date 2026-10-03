@@ -20,7 +20,7 @@
  * normalized tool results.
  */
 import type { LLMProvider } from '../providers/llm-provider';
-import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE } from '../providers/llm-provider';
+import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE, type AgentTranscriptStep, type SessionUpdateOutcomeView } from '../providers/llm-provider';
 import type { AgentDecision, OrchestratorError, TurnRecord } from '../decisions/agent-decision';
 import type { ToolCall, ToolDefinition } from '../tools/tool-registry';
 import { REGISTERED_TOOLS } from '../tools/tool-registry';
@@ -41,6 +41,10 @@ import type { ToolExecutionPlanNode } from '@shared/turn-engine';
 import type { ToolExecutionRecord, LLMToolResult, ToolExecutionStatus } from '@shared/railway-tool-runtime';
 
 export const MAX_TOOL_CALL_ITERATIONS = 8; // deterministic hard cap (configurable via constructor)
+/** Prompt 23: rejected session-update proposals a native agent may react to within one turn. */
+const MAX_NATIVE_RECOVERIES = 2;
+/** Prompt 23: rejections that always end the turn with the backend's own wording (never agent recovery). */
+const NATIVE_FINAL_ERRORS = new Set(['SENSITIVE_DATA_REJECTED', 'SENSITIVE_REQUEST_REJECTED', 'BOOKING_ACCESS_DENIED', 'SESSION_VERSION_CONFLICT', 'STALE_TOOL_RESULT', 'INVALID_LLM_OUTPUT']);
 
 export interface NormalizedToolResult {
   toolName: string;
@@ -236,7 +240,15 @@ export class BoundToolRuntime {
     const applyOutcomes: ApplyOutcome[] = [];
     const turnResults: TurnToolResultView[] = [];
     const localHistory: HistoryMsg[] = [...history];
+    // Prompt 23: the agent's own steps this turn (replayed natively as assistant tool_calls + tool results)
+    const transcript: AgentTranscriptStep[] = [];
+    const outcomeView = (o: ApplyOutcome): SessionUpdateOutcomeView => ({
+      applied: [...(o.applied || [])], notes: [...(o.notes || []), ...(o.directAnswer ? [o.directAnswer] : [])].map(n => String(n).slice(0, 400)),
+      ...(o.error ? { error: { code: String(o.error.code), message: String(o.error.message || '').slice(0, 300) } } : {}),
+      ...(o.replan ? { replan: true } : {}), ...(o.blockTools ? { blocked: true } : {})
+    });
     let lastDecision: AgentDecision | null = null;
+    let nativeRecoveries = 0;
     let lastError: OrchestratorError | undefined;
     let llmLatencyMs = 0;
     const H = this.hooks;
@@ -280,7 +292,8 @@ export class BoundToolRuntime {
         inputMode: mode,
         tools: REGISTERED_TOOLS,
         context: H.buildContext?.(),
-        currentTurnToolResults: [...turnResults]
+        currentTurnToolResults: [...turnResults],
+        agentTranscript: transcript.map(st => ({ ...st, toolCalls: [...st.toolCalls], results: [...st.results] }))
       })).decision;
       } catch (e: any) {
         llmLatencyMs += Date.now() - t0;
@@ -296,14 +309,27 @@ export class BoundToolRuntime {
         ...(typeof decision.acknowledgement === 'string' && decision.acknowledgement ? { acknowledgement: decision.acknowledgement.slice(0, 160) } : {}) }));
       if (H.isStale?.()) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Obsolete request stopped.' });
 
+      const step: AgentTranscriptStep = {
+        ...(decision.native?.assistantContent ? { assistantContent: decision.native.assistantContent } : {}),
+        toolCalls: (decision.toolCalls || []).map(c => ({ callId: c.callId, name: String(c.name), arguments: c.arguments || {} })),
+        ...(decision.native?.sessionUpdateCallId ? { sessionUpdate: { callId: decision.native.sessionUpdateCallId, arguments: decision.native.sessionUpdateArgs || {} } } : {}),
+        results: []
+      };
+      transcript.push(step);
+
       // Deterministically apply this decision's entities/references BEFORE its tool calls.
       if (H.applyDecision) {
         const outcome = H.applyDecision(decision);
+        if (step.sessionUpdate) step.sessionUpdateOutcome = outcomeView(outcome);
         applyOutcomes.push(outcome);
         this.allowedTools = outcome.allowedTools;
         // Prompt 22: the backend applied a journey-level change the LLM proposed (new journey) — this decision was made
         // against the OLD journey, so its tool calls are dropped and the LLM decides again on the fresh session.
         if (outcome.replan && !outcome.blockTools) continue;
+        // Prompt 23: a native agent hears WHY its proposal was rejected (nothing was applied, its tools were not run)
+        // and answers / asks / tries a valid alternative itself — validated again. Safety rejections stay final.
+        if (outcome.blockTools && outcome.error && decision.continueAfterApply && !outcome.lifecycle && !outcome.directAnswer
+          && !NATIVE_FINAL_ERRORS.has(String(outcome.error.code)) && nativeRecoveries < MAX_NATIVE_RECOVERIES) { nativeRecoveries++; continue; }
         if (outcome.blockTools) {
           // a deterministic backend answer (post-booking record) is never mixed with LLM wording
           return done(outcome.error?.message || (outcome.directAnswer || outcome.lifecycle ? '' : (decision.finalMessage || decision.clarification || '')), 'blocked', outcome.error);
@@ -312,6 +338,8 @@ export class BoundToolRuntime {
 
       const toolCalls = decision.toolCalls || [];
       if (toolCalls.length === 0) {
+        // Prompt 23: a native agent that proposed a session update waits for its validated outcome → ask it again
+        if (decision.continueAfterApply) continue;
         const msg = decision.finalMessage || decision.clarification || '';
         return done(msg, 'final');
       }
@@ -361,6 +389,7 @@ export class BoundToolRuntime {
           return true;
         }
       });
+      { const ids = new Set(step.toolCalls.map(c => c.callId)); step.results = turnResults.filter(r => ids.has(String(r.callId))); }
       if (staleHit) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Late result from an obsolete request was ignored.' });
       if (stopErr) return done('', 'tool_limit', stopErr);   // composer adds verified facts + the limit message once
     }

@@ -158,6 +158,13 @@ export interface AgentDecision {
    */
   acknowledgement?: string;
   /**
+   * Prompt 23 (native tool calling): the model asked for a booking-session update and expects its outcome before it
+   * answers — the runtime applies the proposal and calls the LLM again even when no railway tool was requested.
+   */
+  continueAfterApply?: boolean;
+  /** Prompt 23: provider bookkeeping to replay this step natively (tool_call id of the session update, raw args). */
+  native?: { sessionUpdateCallId?: string; sessionUpdateArgs?: Record<string, any>; assistantContent?: string };
+  /**
    * Prompt 15: OPTIONAL lifecycle-action label (BookingLifecycleAction enum). Untrusted hint only —
    * parsed against the closed enum (unknown → UNSUPPORTED_ACTION) and never executed on its own.
    */

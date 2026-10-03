@@ -243,7 +243,7 @@ describe('P22 G3 — the LLM is the conversational intelligence', () => {
         : { intent: 'SEARCH_TRAINS', action: 'SEARCH_TRAINS', entities: { originRaw: 'Amritsar', destinationRaw: 'Delhi', dateRaw: 'kal' }, acknowledgement: 'Ek second, dekhta hoon.', toolCalls: [{ name: 'SEARCH_TRAINS', arguments: { origin: 'Amritsar', destination: 'Delhi', date: 'kal' } }] };
       return { ok: true, status: 200, text: async () => '', json: async () => ({ choices: [{ message: { content: JSON.stringify(dec) } }] }) };
     };
-    const remote = new OpenAICompatibleLLMProvider({ apiKey: 'sk-test-remote', baseUrl: 'https://llm.test/v1', model: 'm1', timeoutMs: 1000, fetch: fetchImpl as any });
+    const remote = new OpenAICompatibleLLMProvider({ toolMode: 'json', apiKey: 'sk-test-remote', baseUrl: 'https://llm.test/v1', model: 'm1', timeoutMs: 1000, fetch: fetchImpl as any });
     const rh = mk({ llm: remote });
     const ok = await rh.say('Amritsar se Delhi kal jaana hai');
     expect(calls).toEqual(['decision', 'decision', 'speech']);

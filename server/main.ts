@@ -1,3 +1,5 @@
+// Prompt 23: local .env (gitignored) → process.env, never overriding real env vars. Must stay the first import.
+import './config/load-dotenv';
 import { bookingPreparationSummary } from './booking/preparation/booking-preparation';
 import { preparationErrorTypeOf } from '@shared/booking-preparation';
 import { parseReconciliationConfig } from './booking/lifecycle/reconciliation-config';

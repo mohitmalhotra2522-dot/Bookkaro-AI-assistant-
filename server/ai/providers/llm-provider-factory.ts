@@ -1,10 +1,13 @@
 /**
- * PROMPT 21 — LLM provider selection from SERVER env vars (keys never reach the browser, never logged).
- *   LLM_PROVIDER=openai-compatible  LLM_API_KEY=…  LLM_MODEL=…  [LLM_BASE_URL=https://api.openai.com/v1]  [LLM_TIMEOUT_MS=8000]
- * Default / incomplete config → MockLLMProvider (offline development / tests), with the reason logged at startup.
- * A configured remote provider is NEVER silently replaced by the mock at runtime (Prompt 22).
+ * PROMPT 21/23 — LLM provider selection from SERVER env vars (keys never reach the browser, never logged).
+ *   LLM_PROVIDER=openai-compatible  LLM_API_KEY=…  LLM_MODEL=…  [LLM_BASE_URL=https://api.openai.com/v1]
+ *   [LLM_TIMEOUT_MS=8000]  [LLM_TOOL_MODE=native|json]
+ * No LLM_PROVIDER (or "mock") → MockLLMProvider (offline development / tests).
+ * Prompt 23: a real provider that was REQUESTED but is misconfigured (unknown provider, missing key/model, bad URL)
+ * fails CLOSED — every turn gets the safe LLM_UNAVAILABLE reply with the session untouched. It is never silently
+ * swapped for the mock, another model or a rule-based engine. A configured provider is never replaced at runtime.
  */
-import type { LLMProvider } from './llm-provider';
+import { LLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult } from './llm-provider';
 import { MockLLMProvider } from './mock-llm';
 import { OpenAICompatibleLLMProvider, type FetchLike } from './openai-compatible-llm';
 
@@ -14,21 +17,37 @@ export interface LLMProviderSelection {
   info: { providerId: string; model: string | null; configured: boolean; reason: string };
 }
 
+/** Prompt 23: stands in for a requested-but-misconfigured real LLM — always unavailable, never answers by itself. */
+export class UnavailableLLMProvider implements LLMProvider {
+  readonly providerId = 'llm-unavailable';
+  readonly modelName: string | null = null;
+  constructor(readonly reason: string) {}
+  async init(): Promise<void> { /* nothing to initialise */ }
+  async generateStructuredDecision(_input: LLMTurnInput): Promise<LLMTurnResult> { throw new LLMProviderError('LLM_NOT_CONFIGURED'); }
+  async generateSpokenResponse(): Promise<null> { return null; }
+}
+
 export function createLLMProvider(env: Record<string, string | undefined> = {}, o: { fetch?: FetchLike } = {}): LLMProviderSelection {
-  const mock = new MockLLMProvider();
   const kind = String(env.LLM_PROVIDER || 'mock').trim().toLowerCase();
-  if (kind === 'mock' || kind === '') return { provider: mock, info: { providerId: mock.providerId, model: mock.modelName, configured: true, reason: 'DEFAULT_MOCK' } };
-  if (kind !== 'openai-compatible' && kind !== 'openai') {
-    return { provider: mock, info: { providerId: mock.providerId, model: mock.modelName, configured: false, reason: 'UNKNOWN_PROVIDER_FALLBACK_TO_MOCK' } };
+  if (kind === 'mock' || kind === '') {
+    const mock = new MockLLMProvider();
+    return { provider: mock, info: { providerId: mock.providerId, model: mock.modelName, configured: true, reason: 'DEFAULT_MOCK' } };
   }
+  const unavailable = (reason: string): LLMProviderSelection => {
+    const p = new UnavailableLLMProvider(reason);
+    return { provider: p, info: { providerId: p.providerId, model: null, configured: false, reason } };
+  };
+  if (kind !== 'openai-compatible' && kind !== 'openai') return unavailable('UNKNOWN_LLM_PROVIDER');
   const apiKey = String(env.LLM_API_KEY || '').trim();
   const model = String(env.LLM_MODEL || '').trim();
   const baseUrl = String(env.LLM_BASE_URL || 'https://api.openai.com/v1').trim();
-  if (!apiKey || !model) return { provider: mock, info: { providerId: mock.providerId, model: mock.modelName, configured: false, reason: !apiKey ? 'MISSING_LLM_API_KEY_FALLBACK_TO_MOCK' : 'MISSING_LLM_MODEL_FALLBACK_TO_MOCK' } };
-  if (!/^https?:\/\//i.test(baseUrl)) return { provider: mock, info: { providerId: mock.providerId, model: mock.modelName, configured: false, reason: 'INVALID_LLM_BASE_URL_FALLBACK_TO_MOCK' } };
+  if (!apiKey) return unavailable('MISSING_LLM_API_KEY');
+  if (!model) return unavailable('MISSING_LLM_MODEL');
+  if (!/^https?:\/\/[^\s/]+/i.test(baseUrl)) return unavailable('INVALID_LLM_BASE_URL');
   const t = Number(env.LLM_TIMEOUT_MS);
   const timeoutMs = Number.isFinite(t) && t >= 1000 && t <= 60000 ? t : 8000;
+  const toolMode = String(env.LLM_TOOL_MODE || 'native').trim().toLowerCase() === 'json' ? 'json' : 'native';
   // Prompt 22: no hidden rule-based fallback at runtime — a failed remote call yields the safe LLM_UNAVAILABLE reply
-  const provider = new OpenAICompatibleLLMProvider({ apiKey, model, baseUrl, timeoutMs, fetch: o.fetch });
+  const provider = new OpenAICompatibleLLMProvider({ apiKey, model, baseUrl, timeoutMs, fetch: o.fetch, toolMode });
   return { provider, info: { providerId: provider.providerId, model, configured: true, reason: 'ENV_CONFIGURED' } };
 }

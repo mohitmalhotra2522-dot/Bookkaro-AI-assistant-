@@ -97,9 +97,9 @@ describe('P22 G2 — LLM tool surface', () => {
 describe('P22 G2 — real OpenAI-compatible adapter readiness', () => {
   it('[4] off by default; enabled only by server env with key + model; info never contains the key', () => {
     expect(createLLMProvider({}).info).toMatchObject({ providerId: 'mock-llm', reason: 'DEFAULT_MOCK' });
-    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_MODEL: 'm' }).info.reason).toBe('MISSING_LLM_API_KEY_FALLBACK_TO_MOCK');
-    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: KEY }).info.reason).toBe('MISSING_LLM_MODEL_FALLBACK_TO_MOCK');
-    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: KEY, LLM_MODEL: 'm', LLM_BASE_URL: 'ftp://x' }).info.reason).toBe('INVALID_LLM_BASE_URL_FALLBACK_TO_MOCK');
+    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_MODEL: 'm' }).info.reason).toBe('MISSING_LLM_API_KEY');
+    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: KEY }).info.reason).toBe('MISSING_LLM_MODEL');
+    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: KEY, LLM_MODEL: 'm', LLM_BASE_URL: 'ftp://x' }).info.reason).toBe('INVALID_LLM_BASE_URL');
     const sel = createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: KEY, LLM_MODEL: 'gpt-x', LLM_TIMEOUT_MS: '2500' }, { fetch: async () => okJson('{}') as any });
     expect(sel.info).toMatchObject({ providerId: 'openai-compatible', model: 'gpt-x', configured: true, reason: 'ENV_CONFIGURED' });
     expect(JSON.stringify(sel.info)).not.toContain(KEY);
@@ -111,7 +111,7 @@ describe('P22 G2 — real OpenAI-compatible adapter readiness', () => {
 
   it('[5] sends the key only as a Bearer header to the configured endpoint; a valid JSON decision is parsed', async () => {
     const seen: any[] = [];
-    const p = new OpenAICompatibleLLMProvider({ apiKey: KEY, baseUrl: 'https://llm.example/v1/', model: 'm', timeoutMs: 1000, fetch: async (url, init) => { seen.push({ url, init }); return okJson(JSON.stringify({ intent: 'SEARCH_TRAINS', action: 'SEARCH_TRAINS', entities: { originRaw: 'Amritsar' }, toolCalls: [{ name: 'SEARCH_TRAINS', arguments: {} }] })) as any; } });
+    const p = new OpenAICompatibleLLMProvider({ toolMode: 'json', apiKey: KEY, baseUrl: 'https://llm.example/v1/', model: 'm', timeoutMs: 1000, fetch: async (url, init) => { seen.push({ url, init }); return okJson(JSON.stringify({ intent: 'SEARCH_TRAINS', action: 'SEARCH_TRAINS', entities: { originRaw: 'Amritsar' }, toolCalls: [{ name: 'SEARCH_TRAINS', arguments: {} }] })) as any; } });
     const r = await p.generateStructuredDecision(turnInput());
     expect(seen[0].url).toBe('https://llm.example/v1/chat/completions');
     expect(seen[0].init.headers.authorization).toBe(`Bearer ${KEY}`);
@@ -131,7 +131,7 @@ describe('P22 G2 — real OpenAI-compatible adapter readiness', () => {
       ['array json', async () => okJson('[1,2]'), 'LLM_BAD_RESPONSE']
     ];
     for (const [label, f, code, status] of cases) {
-      const p = new OpenAICompatibleLLMProvider({ apiKey: KEY, baseUrl: 'https://llm.example/v1', model: 'm', timeoutMs: 30, fetch: f });
+      const p = new OpenAICompatibleLLMProvider({ toolMode: 'json', apiKey: KEY, baseUrl: 'https://llm.example/v1', model: 'm', timeoutMs: 30, fetch: f });
       const err: any = await p.generateStructuredDecision(turnInput()).then(() => null, e => e);
       expect(isLLMProviderError(err), label).toBe(true);
       expect(err.code, label).toBe(code);
@@ -143,7 +143,7 @@ describe('P22 G2 — real OpenAI-compatible adapter readiness', () => {
   });
 
   it('[7] a failing remote LLM in the real pipeline → fixed LLM_UNAVAILABLE reply, no state change, no railway call, no mock takeover', async () => {
-    const remote = new OpenAICompatibleLLMProvider({ apiKey: KEY, baseUrl: 'https://llm.example/v1', model: 'm', timeoutMs: 1000, fetch: async () => ({ ok: false, status: 503, json: async () => ({}), text: async () => '' }) as any });
+    const remote = new OpenAICompatibleLLMProvider({ toolMode: 'json', apiKey: KEY, baseUrl: 'https://llm.example/v1', model: 'm', timeoutMs: 1000, fetch: async () => ({ ok: false, status: 503, json: async () => ({}), text: async () => '' }) as any });
     const h = mk(remote);
     const searchSpy = vi.spyOn(MockRailwayProvider.prototype, 'searchTrains');
     for (const mode of ['TEXT', 'VOICE'] as const) {

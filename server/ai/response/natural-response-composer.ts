@@ -51,6 +51,18 @@ export interface NaturalComposeInput {
   timeoutMs?: number;
   /** Streaming: grounded sentence ready to speak (index-ordered). */
   onSegment?: (index: number, text: string) => void;
+  /**
+   * Prompt 23: the native agent's own final answer, written after it saw this turn's tool results and the backend's
+   * outcomes. When present (and still fresh — decided by the orchestrator) its sentences are judged instead of asking
+   * the provider for a second wording call.
+   */
+  agentText?: string | null;
+  /**
+   * Prompt 23: general railway-knowledge turn (no tool, no session change, no error). Judged for what it can falsely
+   * claim (unknown train numbers, PNR-like numbers, fares, availability, counts, booking success, grounding) — not for
+   * mentioning cities, train types, days or small numbers that are part of a general explanation.
+   */
+  general?: boolean;
 }
 
 export interface NaturalComposeResult {
@@ -61,9 +73,12 @@ export interface NaturalComposeResult {
   rejected: Array<{ sentence: string; reason: string }>;
   fallbackReason?: string;
   streamed: number;
+  /** Prompt 23: AGENT = the native agent's own final answer (validated); WORDING = separate spoken-wording call. */
+  authoredBy?: 'AGENT' | 'WORDING';
+  general?: boolean;
 }
 
-const SAFETY = new Set(['SENSITIVE_REQUEST_REJECTED', 'SENSITIVE_DATA_REJECTED', 'BOOKING_ACCESS_DENIED', 'INVALID_LLM_OUTPUT', 'SESSION_VERSION_CONFLICT']);
+const SAFETY = new Set(['FORBIDDEN_ACTION', 'SENSITIVE_REQUEST_REJECTED', 'SENSITIVE_DATA_REJECTED', 'BOOKING_ACCESS_DENIED', 'INVALID_LLM_OUTPUT', 'SESSION_VERSION_CONFLICT']);
 const CLASS_RE = /\b(1A|2A|3A|3E|CC|EC|SL|2S|FC)\b/g;
 const AVAIL_RE = /\b(available|availability hai|waiting|WL|RAC|seats?|khaali|bhari|full)\b/i;
 const SUCCESS_RE = /\b(book ho (gaya|gayi|gyi|chuka|chuki)|booked|booking (ho gayi|confirm(ed)?|successful|safal)|ticket (confirm|ban|book) (ho )?(gaya|gayi|chuka)|payment (ho gaya|done|successful)|pnr (number )?(hai|is|mil))/i;
@@ -135,8 +150,10 @@ export class NaturalResponseComposer {
     if (i.sensitive) return fallback('SENSITIVE_TURN');
     if (i.error && SAFETY.has(i.error.code)) return fallback('SAFETY_ERROR');
     if (i.error?.code === 'LLM_UNAVAILABLE') return fallback('LLM_UNAVAILABLE');
-    if (typeof i.llm.generateSpokenResponse !== 'function') return fallback('PROVIDER_NO_SPOKEN_RESPONSE');
+    const agentText = typeof i.agentText === 'string' && i.agentText.trim() ? i.agentText.trim() : null;
+    if (!agentText && typeof i.llm.generateSpokenResponse !== 'function') return fallback('PROVIDER_NO_SPOKEN_RESPONSE');
     const mode = i.mode || 'VOICE';
+    const general = !!i.general && !!agentText;
 
     // ---- the authoritative fact base for grounding ----
     const views = toolViews(i.steps);
@@ -170,8 +187,10 @@ export class NaturalResponseComposer {
     const streamable = !!i.onSegment && !confirmationTurn && !reviewTurn;
     const question = i.pendingQuestion ? (SHORT_Q[String(s.pendingInteraction?.type || '')] || SHORT_Q[i.pendingQuestionCode || ''] || i.pendingQuestion) : null;
     // Part 18 — voice stays concise: never longer than the text reply (short replies may take a natural lead-in)
-    const maxLen = mode === 'TEXT' ? Math.min(600, Math.max(i.backendReply.length, 160)) : Math.min(260, Math.max(i.backendReply.length, confirmationTurn ? 140 : 90));
-    const maxSentences = mode === 'TEXT' ? 5 : 3;
+    const maxLen = general ? (mode === 'TEXT' ? 900 : 320)
+      : agentText ? (mode === 'TEXT' ? 600 : 260)
+      : mode === 'TEXT' ? Math.min(600, Math.max(i.backendReply.length, 160)) : Math.min(260, Math.max(i.backendReply.length, confirmationTurn ? 140 : 90));
+    const maxSentences = general ? (mode === 'TEXT' ? 7 : 4) : mode === 'TEXT' ? 5 : 3;
     // ---- Prompt 22: extra authoritative fact sets ----
     const stations = new Set<string>([s.origin, s.destination, ...trains.flatMap(t => [t.origin, t.destination]),
       (s.review as any)?.snapshot?.origin, (s.review as any)?.snapshot?.destination,
@@ -207,22 +226,31 @@ export class NaturalResponseComposer {
       if (containsChainOfThought(t)) return 'CHAIN_OF_THOUGHT';
       if (soundsRobotic(t)) return 'ROBOTIC_PHRASING';
       // class codes ("3A", "2S") are checked as classes, not as free numbers
-      for (const m of t.replace(CLASS_RE, ' ').match(/\d+(?:\.\d+)?/g) || []) if (!nums.has(Number(m))) return `UNGROUNDED_NUMBER:${m}`;
-      for (const c of t.match(CLASS_RE) || []) if (!classes.has(c)) return `UNGROUNDED_CLASS:${c}`;
+      if (general) {
+        // general explanation: specific identifiers are still never invented
+        for (const m of t.match(/\b\d{5}\b/g) || []) if (!knownTrainNums.has(m) && !userTrainNums.has(m)) return `UNGROUNDED_TRAIN_NUMBER:${m}`;
+        if (/\b\d{10}\b/.test(t)) return 'UNGROUNDED_NUMBER:PNR_LIKE';
+        if (/\b\d{1,2}[:.]\d{2}\b/.test(t)) return 'UNGROUNDED_TIME';
+      } else {
+        for (const m of t.replace(CLASS_RE, ' ').match(/\d+(?:\.\d+)?/g) || []) if (!nums.has(Number(m))) return `UNGROUNDED_NUMBER:${m}`;
+        for (const c of t.match(CLASS_RE) || []) if (!classes.has(c)) return `UNGROUNDED_CLASS:${c}`;
+      }
       if (/₹|\brs\.?\s*\d|\brupay/i.test(t) && !fareKnown) return 'UNGROUNDED_FARE';
-      if (AVAIL_RE.test(t) && !/availability (check|dekh|verify)/i.test(t) && !availKnown) return 'UNGROUNDED_AVAILABILITY';
+      // general: explaining WL / RAC / seats is fine; a concrete availability claim (train / day / "available hai") is not
+      if (general ? (!availKnown && (POS_AVAIL_RE.test(t) || (AVAIL_RE.test(t) && /\b\d{5}\b|\b(aaj|today|kal|tomorrow|parso)\b/i.test(t))))
+        : (AVAIL_RE.test(t) && !/availability (check|dekh|verify)/i.test(t) && !availKnown)) return 'UNGROUNDED_AVAILABILITY';
       if (SUCCESS_RE.test(t) && !NEGATION_RE.test(t)) return 'BOOKING_SUCCESS_CLAIM';
       // ---- Prompt 22 grounding ----
       for (const m of t.matchAll(/(?:₹|\brs\.?\s?|\binr\s?)\s?([\d,]+(?:\.\d+)?)/gi)) { const n = Number(m[1].replace(/,/g, '')); if (!fareNums.has(n)) return `UNGROUNDED_FARE_AMOUNT:${n}`; }
-      for (const c of stationCodesIn(t)) if (!stations.has(c)) return `UNGROUNDED_STATION:${c}`;
-      for (const m of t.matchAll(CITY_RE)) if (!nameSources.includes(m[1].toLowerCase())) return `UNGROUNDED_STATION:${m[1]}`;
+      if (!general) for (const c of stationCodesIn(t)) if (!stations.has(c)) return `UNGROUNDED_STATION:${c}`;
+      if (!general) for (const m of t.matchAll(CITY_RE)) if (!nameSources.includes(m[1].toLowerCase())) return `UNGROUNDED_STATION:${m[1]}`;
       const saidNums = (t.match(/\b\d{5}\b/g) || []).filter(n => knownTrainNums.has(n) || knownNames.some(k => k.num === n));
-      for (const m of t.matchAll(TRAIN_NAME_RE)) {
+      if (!general || saidNums.length === 1) for (const m of t.matchAll(TRAIN_NAME_RE)) {
         const kw = m[1].toLowerCase();
         if (saidNums.length === 1) { const nm = knownNames.find(k => k.num === saidNums[0])?.name || ''; if (!nm.includes(kw)) return `UNGROUNDED_TRAIN_NAME:${m[1]}`; }
         else if (!knownNames.some(k => k.name.includes(kw)) && !`${i.backendReply} ${i.deterministicSpeech}`.toLowerCase().includes(kw)) return `UNGROUNDED_TRAIN_NAME:${m[1]}`;
       }
-      if (!NEGATION_RE.test(t)) for (const m of t.matchAll(DAY_RE)) { const r: any = resolveDate(m[1].toLowerCase()); if (!r?.ok || r.date !== s.date) return `UNGROUNDED_DATE:${m[1]}`; }
+      if (!general && !NEGATION_RE.test(t)) for (const m of t.matchAll(DAY_RE)) { const r: any = resolveDate(m[1].toLowerCase()); if (!r?.ok || r.date !== s.date) return `UNGROUNDED_DATE:${m[1]}`; }
       for (const m of t.matchAll(TRAIN_COUNT_RE)) if (!trainCounts.has(countOf(m[1]))) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
       for (const m of t.matchAll(PAX_COUNT_RE)) if (!paxCounts.has(countOf(m[1]))) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
       {
@@ -243,7 +271,9 @@ export class NaturalResponseComposer {
       if (!t) return;
       const why = judge(t);
       if (why) { rejected.push({ sentence: t.slice(0, 120), reason: why }); return; }
-      if (accepted.length >= maxSentences) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
+      // Prompt 23: an agent-authored reply keeps one sentence free for the pending question the backend appends
+      const cap = agentText && question && !hasQ() && !t.includes('?') ? maxSentences - 1 : maxSentences;
+      if (accepted.length >= cap) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       const reserve = question && !hasQ() && !t.includes('?') ? question.length + 1 : 0;
       if ((len() ? len() + 1 : 0) + t.length + reserve > maxLen) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       accepted.push(t);
@@ -261,9 +291,12 @@ export class NaturalResponseComposer {
     };
     let out: { text: string } | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
+    if (agentText) {
+      // Prompt 23: the agent already wrote its answer from this turn's results — judge it, no second LLM call
+      out = { text: agentText };
+    } else try {
       const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
-      const call = i.llm.generateSpokenResponse({
+      const call = i.llm.generateSpokenResponse!({
         userText: i.userText, inputMode: mode, language, session: s, stateBefore: i.stateBefore,
         reviewVersionBefore: i.reviewVersionBefore, selectedTrainBefore: i.selectedTrainBefore, selectedClassBefore: i.selectedClassBefore,
         passengersCountBefore: i.passengersCountBefore, pendingQuestion: question, pendingQuestionCode: i.pendingQuestionCode,
@@ -292,7 +325,7 @@ export class NaturalResponseComposer {
     }
     const segments = [...accepted];
     if (!streamable) segments.forEach((t, k) => i.onSegment?.(k, t));
-    return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length };
+    return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}) };
   }
 }
 

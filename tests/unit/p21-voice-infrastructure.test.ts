@@ -346,7 +346,7 @@ describe('P21 G2 — OpenAI-compatible provider + env factory', () => {
       if (mode === 'json') return { ok: true, status: 200, text: async () => '', json: async () => ({ choices: [{ message: { content: JSON.stringify({ intent: 'SEARCH_TRAINS', action: 'SEARCH_TRAINS', entities: { dateRaw: 'kal' }, confidence: 0.9, acknowledgement: 'Ek second, trains dekh raha hoon.', toolCalls: [{ name: 'SEARCH_TRAINS', arguments: { origin: 'ASR' } }, { name: 'BOOK_TICKET_NOW', arguments: {} }] }) } }] }) };
       return { ok: true, status: 200, text: async () => '', json: async () => ({}), body: sseBody(['data: {"choices":[{"delta":{"content":"Kal ke liye "}}]}\n', 'data: {"choices":[{"delta":{"content":"3 trainein mili hain."}}]}\n\ndata: [DONE]\n']) };
     };
-    const p = new OpenAICompatibleLLMProvider({ apiKey: KEY, baseUrl: 'https://llm.example.test/v1/', model: 'test-model', timeoutMs: 2000, fetch: f as any });
+    const p = new OpenAICompatibleLLMProvider({ toolMode: 'json', apiKey: KEY, baseUrl: 'https://llm.example.test/v1/', model: 'test-model', timeoutMs: 2000, fetch: f as any });
     const state = new ConversationStateManager();
     const s: any = state.createSession();
     const deltas: string[] = [];
@@ -370,12 +370,12 @@ describe('P21 G2 — OpenAI-compatible provider + env factory', () => {
     expect(fetchSpy).not.toHaveBeenCalled();                            // only the injected fetch was used
   });
 
-  it('[14] factory: mock by default; incomplete / unknown config falls back to mock; info never contains the key', () => {
+  it('[14] factory: mock by default; incomplete / unknown config fails closed (Prompt 23: never a silent mock); info never contains the key', () => {
     expect(createLLMProvider({}).info).toMatchObject({ providerId: 'mock-llm', reason: 'DEFAULT_MOCK' });
-    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_MODEL: 'm' }).info).toMatchObject({ providerId: 'mock-llm', configured: false, reason: 'MISSING_LLM_API_KEY_FALLBACK_TO_MOCK' });
-    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: 'k' }).info.reason).toBe('MISSING_LLM_MODEL_FALLBACK_TO_MOCK');
-    expect(createLLMProvider({ LLM_PROVIDER: 'something-else' }).info.reason).toBe('UNKNOWN_PROVIDER_FALLBACK_TO_MOCK');
-    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: 'k', LLM_MODEL: 'm', LLM_BASE_URL: 'ftp://x' }).info.reason).toBe('INVALID_LLM_BASE_URL_FALLBACK_TO_MOCK');
+    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_MODEL: 'm' }).info).toMatchObject({ providerId: 'llm-unavailable', configured: false, reason: 'MISSING_LLM_API_KEY' });
+    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: 'k' }).info.reason).toBe('MISSING_LLM_MODEL');
+    expect(createLLMProvider({ LLM_PROVIDER: 'something-else' }).info.reason).toBe('UNKNOWN_LLM_PROVIDER');
+    expect(createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: 'k', LLM_MODEL: 'm', LLM_BASE_URL: 'ftp://x' }).info.reason).toBe('INVALID_LLM_BASE_URL');
     const sel = createLLMProvider({ LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: 'sk-live-VERYSECRET', LLM_MODEL: 'gpt-x', LLM_TIMEOUT_MS: '5000' });
     expect(sel.info).toEqual({ providerId: 'openai-compatible', model: 'gpt-x', configured: true, reason: 'ENV_CONFIGURED' });
     expect(JSON.stringify(sel.info)).not.toContain('VERYSECRET');

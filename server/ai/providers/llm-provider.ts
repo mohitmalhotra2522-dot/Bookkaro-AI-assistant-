@@ -38,6 +38,30 @@ export interface LLMTurnInput {
   context?: LLMContext;
   /** Tool results already produced in the CURRENT turn (multi-step chain). */
   currentTurnToolResults?: TurnToolResultView[];
+  /**
+   * Prompt 23 — the agent's own steps in the CURRENT turn, in order: what it requested (railway tool calls and/or a
+   * booking-session update proposal) and what came back (authoritative tool results + the backend's validated outcome
+   * of the proposal). Native tool-calling providers replay this as assistant tool_calls + tool messages.
+   */
+  agentTranscript?: AgentTranscriptStep[];
+}
+
+/** Prompt 23: the backend's validated outcome of one update_booking_session proposal (never raw user secrets). */
+export interface SessionUpdateOutcomeView {
+  applied: string[];
+  error?: { code: string; message: string };
+  /** Backend notes for this proposal (e.g. an ambiguity question) — authoritative wording of the outcome. */
+  notes: string[];
+  replan?: boolean;
+  blocked?: boolean;
+}
+export interface AgentTranscriptStep {
+  /** Optional short text the model sent together with its tool calls (spoken acknowledgement). */
+  assistantContent?: string;
+  toolCalls: Array<{ callId: string; name: string; arguments: Record<string, any> }>;
+  sessionUpdate?: { callId: string; arguments: Record<string, any> };
+  sessionUpdateOutcome?: SessionUpdateOutcomeView;
+  results: TurnToolResultView[];
 }
 
 /**
@@ -92,6 +116,12 @@ export interface LLMTurnResult {
  */
 export interface LLMProvider {
   readonly providerId: string;
+  /**
+   * Prompt 23: true when the provider's own final agent answer (written AFTER it saw this turn's tool results and the
+   * backend's session outcomes) is the reply to show/speak — the composer then validates that text instead of asking
+   * for a second wording call. Undefined/false (MockLLM) → the separate generateSpokenResponse wording step.
+   */
+  readonly agentAuthoredReplies?: boolean;
   init(config: LLMProviderConfig): Promise<void>;
   /** One LLM step: given the current turn input (+ any prior tool results
    *  appended to history), return the next AgentDecision (tool calls or final). */
@@ -106,7 +136,8 @@ export interface LLMProvider {
  * no deterministic parser silently takes over the conversation.
  */
 export type LLMProviderErrorCode =
-  | 'LLM_TIMEOUT' | 'LLM_NETWORK_ERROR' | 'LLM_AUTH_ERROR' | 'LLM_RATE_LIMITED' | 'LLM_HTTP_ERROR' | 'LLM_BAD_RESPONSE' | 'LLM_ABORTED';
+  | 'LLM_TIMEOUT' | 'LLM_NETWORK_ERROR' | 'LLM_AUTH_ERROR' | 'LLM_RATE_LIMITED' | 'LLM_HTTP_ERROR' | 'LLM_BAD_RESPONSE' | 'LLM_ABORTED'
+  | 'LLM_NOT_CONFIGURED';
 export class LLMProviderError extends Error {
   readonly code: LLMProviderErrorCode;
   readonly status?: number;
