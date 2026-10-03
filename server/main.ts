@@ -16,6 +16,7 @@ import { randomUUID } from 'crypto';
 import { parseBookingProviderConfig } from './booking/provider/booking-provider-config';
 import { createProductionBookingProviderRegistry } from './booking/provider/booking-provider-registry';
 import { bookingExecutionView } from './booking/provider/booking-provider-execution-service';
+import { ConversationTurnEngine } from './ai/turn-engine/conversation-turn-engine';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider)
 const llmProvider = new MockLLMProvider();
@@ -35,6 +36,8 @@ const orchestrator = new ConversationAgentOrchestrator(llmProvider, stateManager
   bookingProviderConfig: parseBookingProviderConfig(process.env),
   bookingReconciliation: { config: parseReconciliationConfig(process.env) }
 });
+// Prompt 18: ConversationTurnEngine — one logical turn per message, lifecycle, ordered events, interruption.
+const turnEngine = new ConversationTurnEngine(orchestrator, stateManager);
 const executionCapability = () => orchestrator.gateway.capability();
 const executorCapability = () => orchestrator.preparation.handoffSessions.capability();
 /** Client view of the handoff session — status + frozen capability only (snapshot stays server-side). */
@@ -59,14 +62,16 @@ await server.register(cors, { origin: true });
  */
 server.post('/api/chat', async (request, reply) => {
   const body = request.body as any;
-  const { text, mode, expectedSessionVersion, searchResultsVersion, reviewVersion, clientMessageId } = body || {};
+  const { text, mode, expectedSessionVersion, searchResultsVersion, reviewVersion, clientMessageId, bargeIn } = body || {};
   let { sessionId } = body || {};
   if (!text || typeof text !== 'string') return reply.status(400).send({ error: 'text required' });
   if (text.length > 2000) return reply.status(413).send({ error: 'text too long' });
   if (!sessionId || typeof sessionId !== 'string' || !stateManager.hasSession(sessionId)) {
     sessionId = stateManager.createSession().sessionId;
   }
-  const result = await orchestrator.processTurn(sessionId, text, mode === 'VOICE' ? 'VOICE' : 'TEXT', {
+  // Prompt 18: TEXT and STT transcripts share the SAME turn engine → orchestrator → runtime pipeline
+  const result = await turnEngine.processTurn(sessionId, text, mode === 'VOICE' ? 'VOICE' : 'TEXT', {
+    interruptPrevious: bargeIn === true,
     expectedSessionVersion: typeof expectedSessionVersion === 'number' ? expectedSessionVersion : undefined,
     searchResultsVersion: typeof searchResultsVersion === 'number' ? searchResultsVersion : undefined,
     reviewVersion: typeof reviewVersion === 'number' ? reviewVersion : undefined,
@@ -106,8 +111,45 @@ server.post('/api/chat', async (request, reply) => {
     context: { ...ctx, eventLog: (ctx.eventLog || []).slice(-15) },
     toolActivity: result.toolActivity,
     dataSourceLabel: railwayRegistry.getActive().label,
-    turnLog: result.turnLog
+    turnLog: result.turnLog,
+    // Prompt 18: logical turn + typed response + honest progress; presentable=false → do not show / speak
+    turn: { turnId: result.turn.turnId, sequence: result.turn.sequence, status: result.turn.status, presentation: result.turn.presentation },
+    assistantTurnResponse: result.assistantTurnResponse,
+    progress: result.progress,
+    presentable: result.presentable,
+    lastEventSeq: turnEngine.events.lastSeq(sessionId)
   });
+});
+
+/** Prompt 18: ordered turn events (polling; seq-ordered, safe data only) — progress for the minimal UI. */
+server.get('/api/session/:id/turn-events', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  const after = Math.max(0, Number((request.query as any)?.after) || 0);
+  return reply.send({ sessionId: id, events: turnEngine.events.since(id, after).slice(0, 200), lastSeq: turnEngine.events.lastSeq(id) });
+});
+
+/** Prompt 18: barge-in / stop — marks the presentation or in-flight turn INTERRUPTED (no provider cancel, session untouched). */
+server.post('/api/session/:id/interrupt', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  const reason = (request.body as any)?.reason === 'BARGE_IN' ? 'BARGE_IN' : 'USER_STOP';
+  return reply.send({ sessionId: id, ...turnEngine.interrupt(id, reason) });
+});
+
+/** Prompt 18: reconnect (text or voice) — same session, current turn status, latest response; never re-runs actions. */
+server.get('/api/session/:id/resume', async (request, reply) => {
+  const { id } = request.params as any;
+  const snap = turnEngine.resume(id);
+  if (!snap) return reply.status(404).send({ error: 'unknown session' });
+  return reply.send(snap);
+});
+
+/** Prompt 18: conversation history (logical turns; masked / redacted). */
+server.get('/api/session/:id/conversation', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  return reply.send({ sessionId: id, turns: turnEngine.getTurns(id) });
 });
 
 /**
@@ -219,7 +261,7 @@ server.get('/api/health', async (_, reply) => {
     ok: true,
     provider: railwayRegistry.getActiveId(),
     providerLabel: railwayRegistry.getActive().label,
-    orchestrator: 'ConversationAgentOrchestrator.v6 (Prompt 12 booking provider boundary)',
+    orchestrator: 'ConversationTurnEngine + ConversationAgentOrchestrator (Prompt 18 conversation loop)',
     executionCapability: executionCapability(),
     executorCapability: executorCapability(),
     // static capability only — no live health check, never reported "healthy" without one

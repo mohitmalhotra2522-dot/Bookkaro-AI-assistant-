@@ -55,6 +55,10 @@ import type { BookingExecutorAdapterRegistry } from '../../booking/handoff/booki
 import { BookingExecutionGateway } from '../../booking/execution/booking-execution-gateway';
 import type { BookingExecutorRegistry } from '../../booking/execution/booking-executor-registry';
 import type { ExecutionConfig } from '../../booking/execution/execution-config';
+import type { TurnLoopObserver } from '../runtime/llm-tool-runtime';
+import { ConversationContextBuilder, ToolResultContextStore } from '../turn-engine/conversation-context-builder';
+import { pendingQuestionCode } from '../turn-engine/pending-question';
+import { detectBareDay, resolveMonthAnswer } from '../turn-engine/ambiguous-date-clarifier';
 
 export interface ProcessTurnOptions {
   /** Prompt 17: client-generated id of ONE user message. A duplicate DELIVERY (retry, reconnect,
@@ -70,6 +74,10 @@ export interface ProcessTurnOptions {
   /** For a confirmation tap on a review card: the reviewVersion it was rendered
    *  from. Confirming an obsolete review → CONFIRMATION_VERSION_MISMATCH. */
   reviewVersion?: number;
+  /** Prompt 18: the ConversationTurnEngine owns the logical turn id (one user message = one turn). */
+  turnId?: string;
+  /** Prompt 18: turn lifecycle / streaming observer (status + events only — never mutates the session). */
+  observer?: TurnLoopObserver & { onStatus?: (status: 'GENERATING_RESPONSE') => void };
 }
 
 export interface OrchestratorOptions {
@@ -127,7 +135,7 @@ interface TurnExtras {
 }
 
 const SENSITIVE_REPLY = 'Main kabhi password, OTP, CAPTCHA, CVV, card, UPI PIN ya IRCTC credentials nahi maangta. Kripya aisi jaankari share na karein.';
-const NON_RAILWAY_REPLY = 'Main railway booking aur train jaankari mein hi madad kar sakta hoon.';
+const NON_RAILWAY_REPLY = 'Main railway booking aur train information mein help kar sakta hoon.';
 const MAX_INPUT_CHARS = 500;
 const MAX_TURN_HISTORY = 100;
 
@@ -147,6 +155,9 @@ export class ConversationAgentOrchestrator {
   readonly lifecycleActions: BookingLifecycleActionService;
   /** Prompt 16: derived conversation context + tiny conversational memory (never authoritative). */
   readonly context = new ConversationContextManager();
+  /** Prompt 18: structured tool-result memory (bounded; HISTORICAL across turns — never a data cache). */
+  readonly toolResultMemory = new ToolResultContextStore();
+  readonly contextBuilder = new ConversationContextBuilder(this.toolResultMemory);
 
   constructor(
     private readonly llm: LLMProvider,
@@ -189,7 +200,7 @@ export class ConversationAgentOrchestrator {
       return p;
     }
     const startedAt = Date.now();
-    const turnId = uuid();
+    const turnId = opts.turnId || uuid();
     const requestId = uuid();
     const s0 = this.state.getSession(sessionId);
     // names present at turn start (a passenger removed this turn is still redacted in its log)
@@ -247,8 +258,25 @@ export class ConversationAgentOrchestrator {
         message: NON_RAILWAY_REPLY, rejection: 'UNKNOWN_INTENT', rt: null, decision: null, changes: [] });
     }
 
-    // ---- Prompt 16: explicit NEW BOOKING → new active journey (history store untouched) ----
+    // ---- Prompt 18 (Part 52): bare day number ("22") → ask which month; never assume ----
     let llmInput = normalizedInput;
+    const pi0 = s0.pendingInteraction;
+    if (pi0?.type === 'CLARIFICATION_REQUIRED' && pi0.data?.kind === 'DATE_MONTH') {
+      const expr = resolveMonthAnswer(normalizedInput, pi0.data as any);
+      if (expr) llmInput = expr;   // "October" → "22 October" — DateResolver stays authoritative
+    } else if (!utter.newBooking) {
+      const amb = detectBareDay(normalizedInput, s0);
+      if (amb) {
+        const sA = this.state.getSession(sessionId);
+        sA.pendingInteraction = { type: 'CLARIFICATION_REQUIRED', hint: amb.message, setAtTurnId: turnId,
+          data: { kind: 'DATE_MONTH', day: amb.day, candidates: amb.candidates, labels: amb.labels } } as any;
+        (sA as any).pendingQuestion = pendingQuestionCode(sA.pendingInteraction);
+        return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
+          message: amb.message, error: { code: 'AMBIGUOUS_DATE', message: amb.message }, rt: null, decision: null, changes: [], extra });
+      }
+    }
+
+    // ---- Prompt 16: explicit NEW BOOKING → new active journey (history store untouched) ----
     if (utter.newBooking) {
       const nj = this.startNewJourney(sessionId, turnId, events);
       if (!nj.ok) {
@@ -275,14 +303,18 @@ export class ConversationAgentOrchestrator {
     const bound = this.runtime.bind(guard.getSession, guard.commit, {
       requestId,
       // Prompt 17: correlation ids for tool execution records + explicit fresh request (never cached anyway)
-      sessionId, turnId, forceFresh: isExplicitFreshRequest(llmInput),
+      sessionId, turnId, forceFresh: isExplicitFreshRequest(llmInput), observer: opts.observer,
       isStale: () => guard.isStale(),
       buildContext: () => {
         // Prompt 16: structured context package — authoritative session view + structured conversation
         // context + journey-scoped recent turns (never the unlimited transcript)
+        // Prompt 18: ConversationContextBuilder — bounded recent turns + authoritative turn context
+        // (pending question code, journeyVersion, structured tool results; earlier turns HISTORICAL)
         const sc = this.state.getSession(sessionId);
-        return { ...buildLLMContext(sc, this.getHistory(sessionId), undefined, this.postBooking.contextFor(sessionId)),
-          conversationContext: summarizeContext(this.context.snapshot(sc, this.activeBookingOf(sessionId)), sc) };
+        const cc = this.context.snapshot(sc, this.activeBookingOf(sessionId));
+        return { ...this.contextBuilder.build({ session: sc, history: this.getHistory(sessionId), turnId, postBooking: this.postBooking.contextFor(sessionId),
+            intents: { lastUserIntent: cc.lastUserIntent, lastAssistantIntent: cc.lastAssistantIntent } }),
+          conversationContext: summarizeContext(cc, sc) };
       },
       emit: (type, data) => { if (!guard.isStale()) { this.state.emit(sessionId, type, turnId, data); events.push(type); } },
       grounding: (text: string) => this.postBooking.grounding(sessionId, text),
@@ -397,6 +429,7 @@ export class ConversationAgentOrchestrator {
     sess.pendingInteraction = { ...((overrideValid && override) || derivePendingInteraction(sess)), setAtTurnId: turnId };
 
     extra.rejectedClaims = [];
+    try { opts.observer?.onStatus?.('GENERATING_RESPONSE'); } catch { /* observer only */ }
     const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
@@ -538,9 +571,13 @@ export class ConversationAgentOrchestrator {
       journeyVersion: syncJourneyVersion(s),
       toolExecutions: (a.rt?.toolExecutions || []).map(r => ({ ...r, argumentsSummary: maskPnrDeep(r.argumentsSummary) })),
       toolRounds: a.rt?.toolRounds ?? 0,
+      toolPlans: (a.rt?.toolPlans || []).map(n => ({ ...n, arguments: maskPnrDeep(n.arguments) })),
       freshRequested: isExplicitFreshRequest(a.normalizedInput)
     };
     if (!a.stale) {
+      // Prompt 18: BookingSession tracks the Part 19 pending-question code (derived, authoritative)
+      (s as any).pendingQuestion = pendingQuestionCode(s.pendingInteraction);
+      this.toolResultMemory.record(a.sessionId, a.turnId, steps as any, s);
       this.context.noteTools(a.sessionId, steps, s);
       this.context.noteIntents(a.sessionId, a.decision?.intent, pendingQuestionOf(s.pendingInteraction) || (a.error ? 'ERROR' : 'ANSWER'));
     }
@@ -577,6 +614,7 @@ export class ConversationAgentOrchestrator {
     const r = this.state.resetForNewJourney(sessionId);
     if (!r.ok) return { ok: false, message: 'Pichli booking ka status abhi verify ho raha hai — uske final hone ke baad nayi booking shuru karenge.' };
     const journeyId = this.context.startNewJourney(sessionId);
+    this.toolResultMemory.clear(sessionId);
     this.state.emit(sessionId, 'NEW_JOURNEY_STARTED', turnId, { journeyId, cleared: r.cleared || [] });
     events.push('NEW_JOURNEY_STARTED');
     return { ok: true, journeyId };

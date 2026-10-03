@@ -341,7 +341,7 @@ export class ContextualTurnApplier {
       }
       if (e.changeRequested === 'passengers') return { ...out, pendingOverride: { type: 'PASSENGERS_REQUIRED' }, applied: ['CHANGE_PASSENGERS_REQUESTED'] };
       if (e.changeRequested === 'train') {
-        if (!currentResults(s).length) return fail('MISSING_REQUIRED_FIELD', 'Abhi koi train list nahi hai. Pehle trains search kar lete hain.');
+        if (!currentResults(s).length) return fail('MISSING_REQUIRED_FIELD', 'Kaunsi train? Current search results available nahi hain. Pehle trains search kar lete hain.');
         this.rewindTo(sessionId, BookingState.SHOWING_TRAINS);
         return { ...out, applied: ['CHANGE_TRAIN_REQUESTED'] };
       }
@@ -716,7 +716,7 @@ export class ContextualTurnApplier {
 
   private refine(s: BookingSession, kind: 'FASTEST' | 'EARLIEST_ARRIVAL' | 'ALTERNATIVES', value?: string): string {
     const ts = currentResults(s);
-    if (!ts.length) return 'Abhi koi train list nahi hai. Pehle trains search kar lete hain.';
+    if (!ts.length) return 'Kaunsi train? Current search results available nahi hain. Pehle trains search kar lete hain.';
     if (kind === 'ALTERNATIVES') {
       const others = ts.filter(t => t.trainNumber !== value);
       if (!others.length) return `Is route aur date par ${value || 'is train'} ke alawa koi train nahi mili.`;

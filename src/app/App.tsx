@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useChatStore } from '../state/chatStore';
-import { createSession, sendMessage, executeBooking, reconcileBooking } from '../lib/api';
+import { createSession, sendMessage, executeBooking, reconcileBooking, fetchTurnEvents, interruptTurn, resumeSession } from '../lib/api';
+import { reduceTurnEvent, EMPTY_TURN_VIEW, type TurnStreamView } from '@shared/turn-engine';
 import { useVoice } from '../voice/useVoice';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { MicButton } from '../components/voice/MicButton';
@@ -30,6 +31,23 @@ const App: React.FC = () => {
   const [meta, setMeta] = useState<InspectorMeta>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const voice = useVoice();
+  // Prompt 18: last streamed event seq (ordered; duplicates / out-of-order events ignored by the reducer)
+  const turnViewRef = useRef<TurnStreamView>(EMPTY_TURN_VIEW);
+  // Prompt 18: bumped on every mic tap (barge-in) — a reply that arrives after it is shown but never spoken
+  const speechGenRef = useRef(0);
+
+  // Prompt 18: reconnect — when the connection returns, recover the SAME session (no new session, nothing re-run)
+  useEffect(() => {
+    const onOnline = () => {
+      if (!sessionId) return;
+      resumeSession(sessionId).then((snap) => {
+        if (!snap) { createSession().then((id) => setSessionId(id)); return; }
+        setMeta((m) => ({ ...m, state: snap.bookingState, journeyVersion: snap.journeyVersion }));
+      });
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [sessionId, setSessionId]);
 
   useEffect(() => {
     if (!sessionId) {
@@ -42,17 +60,36 @@ const App: React.FC = () => {
   }, [messages]);
 
   const send = useCallback(
-    async (text: string, mode: 'TEXT' | 'VOICE', extra: { searchResultsVersion?: number; reviewVersion?: number } = {}) => {
+    async (text: string, mode: 'TEXT' | 'VOICE', extra: { searchResultsVersion?: number; reviewVersion?: number; bargeIn?: boolean } = {}) => {
       if (!text.trim() || !sessionId || isLoading) return;
       addMessage({ id: `u-${Date.now()}`, role: 'user', content: text.trim(), timestamp: Date.now(), inputMode: mode });
       setInputText('');
       setLoading(true);
       setToolActivity(null);
       setLastInputMode(mode);
+      // Prompt 18: honest progress from real tool events (no percentages); voice speaks a short ack only
+      let acked = false;
+      let polling = true;
+      const speechGen = speechGenRef.current;
+      const maySpeak = () => mode === 'VOICE' && speechGen === speechGenRef.current;
+      const poll = async () => {
+        while (polling) {
+          const r = await fetchTurnEvents(sessionId, turnViewRef.current.lastSeq).catch(() => null);
+          for (const ev of r?.events || []) {
+            turnViewRef.current = reduceTurnEvent(turnViewRef.current, ev);
+            if (maySpeak() && !acked && ev.type === 'TOOL_PROGRESS' && ev.data?.speechText) { acked = true; voice.speak(String(ev.data.speechText)); }
+          }
+          if (polling && turnViewRef.current.progressText) setToolActivity(turnViewRef.current.progressText);
+          await new Promise((res) => setTimeout(res, 350));
+        }
+      };
+      void poll();
       try {
         const resp = await sendMessage(sessionId, text.trim(), mode, extra);
-        // A response from an obsolete request must never be shown or spoken.
-        if (resp.stale) return;
+        polling = false;
+        if (typeof resp.lastEventSeq === 'number' && resp.lastEventSeq > turnViewRef.current.lastSeq) turnViewRef.current = { ...turnViewRef.current, lastSeq: resp.lastEventSeq };
+        // A response from an obsolete / superseded request must never be shown or spoken.
+        if (resp.stale || resp.presentable === false) return;
         if (resp.sessionId && resp.sessionId !== sessionId) setSessionId(resp.sessionId);
         setMeta({
           state: resp.state, pendingType: resp.pendingInteraction?.type, pendingQuestion: resp.pendingQuestion,
@@ -61,6 +98,8 @@ const App: React.FC = () => {
           executionCapability: resp.executionCapability,
           tools: (resp.turnLog?.toolExecutions || []).map((t: any) => ({ tool: t.tool, status: t.status, fresh: !!t.fresh, latencyMs: t.latencyMs ?? null, parallelGroup: t.parallelGroup ?? null, rejectionReason: t.rejectionReason ?? null })),
           journeyVersion: resp.turnLog?.journeyVersion,
+          turn: resp.turn ? { sequence: resp.turn.sequence, status: resp.turn.status, responseType: resp.assistantTurnResponse?.type ?? null,
+            grounding: resp.turnLog?.turnEngine?.groundingStatus ?? null, superseded: !!resp.turnLog?.turnEngine?.superseded, interrupted: !!resp.turnLog?.turnEngine?.interrupted } : undefined,
           conversation: resp.conversationContext ? {
             activeJourneyId: resp.conversationContext.activeJourneyId, pendingQuestion: resp.conversationContext.pendingQuestion,
             missingFields: resp.conversationContext.missingFields || [], activeBookingId: resp.conversationContext.activeBookingId,
@@ -73,13 +112,14 @@ const App: React.FC = () => {
         addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: resp.message, timestamp: Date.now() });
         setContext(resp.context);
         resp.cards.forEach((card: any) => addCard(card));
-        if (mode === 'VOICE') {
+        if (maySpeak()) {
           // Prompt 16: concise validated speechText (same facts as the text reply); falls back to the text
           voice.speak(resp.assistantResponse?.speechText || resp.message);
         }
       } catch (e: any) {
         setError(e.message || 'कुछ गलत हुआ।');
       } finally {
+        polling = false;
         setLoading(false);
         setToolActivity(null);
       }
@@ -112,11 +152,16 @@ const App: React.FC = () => {
   }, [sessionId, addMessage, addCard, setError]);
 
   const handleMicStart = useCallback(() => {
+    // Prompt 18: tapping the mic while TTS plays = barge-in → stop speech, mark the presentation INTERRUPTED,
+    // then the new STT transcript is a NEW turn in the SAME session
+    const bargeIn = voice.isSpeaking() || isLoading;
+    speechGenRef.current += 1;
     voice.cancelSpeak();
+    if (bargeIn && sessionId) void interruptTurn(sessionId, 'BARGE_IN');
     voice.startRecording((transcript) => {
-      send(transcript, 'VOICE');
+      send(transcript, 'VOICE', bargeIn ? { bargeIn: true } : {});
     });
-  }, [voice, send]);
+  }, [voice, send, sessionId, isLoading]);
 
   const handleMicStop = useCallback(() => voice.stopRecording(), [voice]);
 
@@ -275,7 +320,7 @@ const App: React.FC = () => {
         {isLoading && (
           <div style={{ padding: '0 16px', marginBottom: 12, display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{ padding: '12px 16px', borderRadius: '18px 18px 18px 4px', background: '#fff', fontSize: 14, color: '#9e9e9e' }}>
-              {toolActivity || 'Railway tools check kar raha hoon…'}
+              {toolActivity || 'Soch raha hoon…'}
             </div>
           </div>
         )}

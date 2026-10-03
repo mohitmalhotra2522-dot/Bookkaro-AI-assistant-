@@ -8,8 +8,10 @@
 import type { BookingSession } from '@shared/entities';
 import { BookingState } from '@shared/states';
 import type { LLMToolResult, ToolExecutionRecord } from '@shared/railway-tool-runtime';
+import type { ToolExecutionPlanNode } from '@shared/turn-engine';
 import type { ToolCall } from '../tools/tool-registry';
 import { ToolCallValidator, type ValidatedToolCall } from '../tools/tool-call-validator';
+import type { ToolRetryPolicy } from './tool-retry-policy';
 import { RailwayToolRuntime, type RailwayToolExecutor, type ExecutedCall, ToolTurn } from './railway-tool-runtime';
 import { reconcileProviderAnswers } from './provider-conflict';
 import type { ToolGrounding } from '../../booking/post-booking/post-booking-service';
@@ -86,11 +88,12 @@ function hash(s: string) { let h = 0; for (let i = 0; i < s.length; i++) h = (h 
 
 export class MockRailwayToolRuntime {
   private readonly validator = new ToolCallValidator();
-  constructor(private readonly opts: { timeoutMs?: number } = {}) {}
+  /** Prompt 18: retry policy pass-through; backoff sleep is a no-op by default (deterministic, no real waiting). */
+  constructor(private readonly opts: { timeoutMs?: number; retryPolicy?: ToolRetryPolicy; sleep?: (ms: number) => Promise<void> } = {}) {}
 
   /** Run ONE turn's calls through the real runtime with a scripted executor. */
-  async runTurn(calls: ToolCall[][], session: BookingSession, userText: string, executor: ScriptedRailwayExecutor, turnId = 't1'): Promise<{ results: LLMToolResult[]; records: ToolExecutionRecord[]; stopped: boolean }> {
-    const rt = new RailwayToolRuntime({ timeoutMs: this.opts.timeoutMs ?? 50 });
+  async runTurn(calls: ToolCall[][], session: BookingSession, userText: string, executor: ScriptedRailwayExecutor, turnId = 't1'): Promise<{ results: LLMToolResult[]; records: ToolExecutionRecord[]; stopped: boolean; plans: ToolExecutionPlanNode[] }> {
+    const rt = new RailwayToolRuntime({ timeoutMs: this.opts.timeoutMs ?? 50, retryPolicy: this.opts.retryPolicy, sleep: this.opts.sleep ?? (async () => { /* no real backoff in mocks */ }) });
     const ground: ToolGrounding = { userText, bookings: [], pnrOwner: () => 'NONE', bookingOwner: () => 'NONE' };
     const turn = rt.beginTurn({
       sessionId: session.sessionId, turnId, requestId: `req-${turnId}`, userText, getSession: () => session,
@@ -115,7 +118,7 @@ export class MockRailwayToolRuntime {
       });
       if (r === 'stop') { stopped = true; break; }
     }
-    return { results, records: turn.records, stopped };
+    return { results, records: turn.records, stopped, plans: turn.plans };
   }
 
   async run(scenario: MockToolScenario): Promise<ScenarioOutcome> {

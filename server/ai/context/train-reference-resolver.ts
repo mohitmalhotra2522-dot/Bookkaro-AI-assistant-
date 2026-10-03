@@ -90,7 +90,7 @@ export class TrainReferenceResolver {
         ok: false, code: 'MISSING_REQUIRED_FIELD',
         message: ref.kind === 'TRAIN_NUMBER'
           ? `${ref.value} abhi current search results mein nahi hai. Pehle route aur date ke liye trains search kar lete hain.`
-          : 'Abhi koi train list nahi hai. Pehle trains search kar lete hain.'
+          : 'Kaunsi train? Current search results available nahi hain. Pehle trains search kar lete hain.'
       };
     }
     const one = (t: ResultTrain): TrainRefResolution => ({ ok: true, train: t, displayIndex: t.displayIndex });

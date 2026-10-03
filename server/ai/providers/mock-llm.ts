@@ -109,7 +109,7 @@ export class MockLLMProvider implements LLMProvider {
     const turn = input.currentTurnToolResults ?? this.toolResultsSinceLastUser(input.history);
 
     if (SENSITIVE_RE.test(t)) return this.final('UNKNOWN', 'Main kabhi password, OTP, CAPTCHA, card ya UPI PIN nahi maangta. Kripya aisi jaankari share na karein.');
-    if (NON_RAILWAY_RE.test(t) && !/\b(train|railway|ticket|fare|kiraya)\b/.test(t)) return this.final('UNKNOWN', 'Main railway booking aur train jaankari mein hi madad kar sakta hoon.');
+    if (NON_RAILWAY_RE.test(t) && !/\b(train|railway|ticket|fare|kiraya)\b/.test(t)) return this.final('UNKNOWN', 'Main railway booking aur train information mein help kar sakta hoon.');
     // Prompt 17: "cancelled trains" is a LIVE provider fact → request the approved tool (never answer from memory)
     if (!turn.length && /\b(cancel(led)?|radd?) (hui |huyi |hue )?trains?\b|\btrains? (jo )?(cancel(led)?|radd?) (hui|huyi|hai|hain)\b/.test(t)) {
       return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [{ callId: uuid(), name: 'GET_CANCELLED_TRAINS' as any, arguments: {} }]);

@@ -66,6 +66,14 @@ export interface AvailabilityResult {
   available: boolean;
   status: string;
   dataSource: 'MOCK' | 'LIVE';
+  /** Prompt 18 (Part 36): provenance of THIS check — never treated as permanent (a new request re-checks). */
+  fetchedAt?: string;
+  toolExecutionId?: string;
+  trainNumber?: string;
+  travelClass?: string;
+  date?: string;
+  origin?: string;
+  destination?: string;
 }
 
 export interface FareResult {
@@ -74,6 +82,10 @@ export interface FareResult {
   breakdown: Record<string, number>;
   currency: 'INR';
   dataSource: 'MOCK' | 'LIVE';
+  /** Prompt 18 (Part 37): provenance + fare basis (provider-computed; the LLM never calculates fare). */
+  fetchedAt?: string;
+  toolExecutionId?: string;
+  fareBasis?: { trainNumber?: string; travelClass?: string; passengersCount?: number; origin?: string; destination?: string; date?: string };
 }
 
 export type Gender = 'MALE' | 'FEMALE' | 'OTHER';
@@ -141,6 +153,8 @@ export interface BookingSession {
   fare?: FareResult;
   availability?: Record<string, AvailabilityResult>;
   bookingState: import('./states').BookingState;
+  /** Prompt 18 (Part 19): pending question code derived from pendingInteraction (MISSING_DATE, SELECT_TRAIN, CONFIRM_REVIEW …). */
+  pendingQuestion?: import('./turn-engine').PendingQuestionCode | null;
   reviewConfirmed: boolean;
   irctcHandoffReady: boolean;
   currentPassengerIndex: number;

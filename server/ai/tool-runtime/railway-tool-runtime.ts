@@ -25,6 +25,15 @@ import { normalizeToolErrorCode, statusForError, safeErrorMessage, SAFE_ERROR_ME
 import { syncJourneyVersion, journeyKeyOf } from './journey-version';
 import { maskPnr } from '../../booking/post-booking/pnr-validator';
 import { v4 as uuidv4 } from '../orchestrator/utils';
+import type { ToolExecutionPlanNode } from '@shared/turn-engine';
+import { DEFAULT_TOOL_RETRY_POLICY, shouldRetry, type ToolRetryPolicy } from './tool-retry-policy';
+import { buildToolExecutionPlan, unsatisfiedDependency } from './tool-execution-plan';
+
+/** Prompt 18: lifecycle observer (turn engine streaming events). Never receives raw arguments. */
+export interface ToolObserver {
+  onRecord?: (rec: ToolExecutionRecord, phase: 'REQUESTED' | 'STARTED' | 'COMPLETED' | 'FAILED' | 'RETRY') => void;
+  onPlan?: (nodes: readonly ToolExecutionPlanNode[]) => void;
+}
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
 export const MAX_TOOL_ROUNDS_PER_TURN = 5;
@@ -74,6 +83,8 @@ export interface ToolTurnContext {
   isStale?: () => boolean;
   /** Part 7: the user explicitly asked for fresh data this turn. Informational — runtime never caches anyway. */
   forceFresh?: boolean;
+  /** Prompt 18: streaming / observability hooks. */
+  observer?: ToolObserver;
 }
 
 export type PreparedCall =
@@ -99,7 +110,9 @@ export interface ExecutedCall {
 const SELECTION_TOOLS = new Set(['CHECK_AVAILABILITY', 'GET_FARE']);
 
 export class RailwayToolRuntime {
-  constructor(readonly opts: { timeoutMs?: number; maxCallsPerTurn?: number; maxRounds?: number; loopThreshold?: number } = {}) {}
+  constructor(readonly opts: { timeoutMs?: number; maxCallsPerTurn?: number; maxRounds?: number; loopThreshold?: number;
+    /** Prompt 18: backend retry policy (default: 1 retry for transient provider errors). */
+    retryPolicy?: ToolRetryPolicy; sleep?: (ms: number) => Promise<void> } = {}) {}
   beginTurn(ctx: ToolTurnContext): ToolTurn { return new ToolTurn(ctx, this.opts); }
 }
 
@@ -113,8 +126,15 @@ export class ToolTurn {
   readonly maxCalls: number;
   readonly maxRounds: number;
   readonly loopThreshold: number;
+  /** Prompt 18: dependency graph of every round run in this turn (LLM rounds + backend prep). */
+  readonly plans: ToolExecutionPlanNode[] = [];
+  private planRounds = 0;
+  readonly retryPolicy: ToolRetryPolicy;
+  private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(readonly ctx: ToolTurnContext, opts: RailwayToolRuntime['opts']) {
+    this.retryPolicy = opts.retryPolicy ?? DEFAULT_TOOL_RETRY_POLICY;
+    this.sleep = opts.sleep ?? ((ms: number) => new Promise(r => setTimeout(r, ms)));
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
     this.maxCalls = opts.maxCallsPerTurn ?? MAX_TOOL_CALLS_PER_TURN;
     this.maxRounds = opts.maxRounds ?? MAX_TOOL_ROUNDS_PER_TURN;
@@ -141,15 +161,18 @@ export class ToolTurn {
       tool: String(tc?.name ?? ''), journeyVersion: syncJourneyVersion(s),
       argumentsHash: hashArguments(String(tc?.name ?? ''), tc?.arguments || {}), argumentsSummary: safeSummary(tc?.arguments || {}),
       provider: null, requestedAt: new Date().toISOString(), startedAt: null, completedAt: null,
-      status: 'REQUESTED', fresh: false, latencyMs: null, resultCount: null, rejectionReason: null, parallelGroup: null
+      status: 'REQUESTED', fresh: false, latencyMs: null, resultCount: null, rejectionReason: null, parallelGroup: null,
+      attempt: 1, retryOf: null, planNodeId: null
     };
     this.records.push(rec);
+    this.notify(rec, 'REQUESTED');
     return rec;
   }
 
   private reject(tc: ToolCall, rec: ToolExecutionRecord, code: string, message: string, stop = false, details?: any, normalizedOverride?: ToolErrorCode): PreparedCall {
     const normalized = normalizedOverride ?? normalizeToolErrorCode(code);
     rec.status = 'REJECTED'; rec.rejectionReason = normalizedOverride ?? code; rec.completedAt = new Date().toISOString();
+    this.notify(rec, 'FAILED');
     const msg = safeErrorMessage(normalized, message || SAFE_ERROR_MESSAGE[normalized]);
     return {
       ok: false, tc, record: rec, stop, error: { code, normalized, message: msg, details },
@@ -199,10 +222,35 @@ export class ToolTurn {
     return true;
   }
 
-  /** Execute one prepared call: fresh provider call, timeout, normalization. Never commits by itself. */
+  private notify(rec: ToolExecutionRecord, phase: Parameters<NonNullable<ToolObserver['onRecord']>>[1]) {
+    try { this.ctx.observer?.onRecord?.(rec, phase); } catch { /* observers never break execution */ }
+  }
+
+  /**
+   * Execute one prepared call (fresh provider call, timeout, normalization) with the backend
+   * ToolRetryPolicy (Prompt 18): a transient failure may be retried while the turn is still current;
+   * every retry is a NEW execution record (new toolExecutionId, retryOf → previous). Never commits.
+   */
   async execute(p: Extract<PreparedCall, { ok: true }>, executor: RailwayToolExecutor): Promise<ExecutedCall> {
-    const rec = p.record;
+    let x = await this.executeOnce(p, p.record, executor);
+    let retries = 0;
+    while (!x.success && !x.stale && x.error && shouldRetry(this.retryPolicy, x.error.normalized, retries) && this.isCurrent(p)) {
+      retries++;
+      this.notify(x.record, 'RETRY');
+      await this.sleep(this.retryPolicy.backoffMs(retries));
+      if (!this.isCurrent(p)) break;   // superseded while backing off → never retried for an obsolete turn
+      const prev = x.record;
+      const rec = this.newRecord(p.tc);
+      rec.attempt = retries + 1; rec.retryOf = prev.toolExecutionId; rec.planNodeId = prev.planNodeId ?? null;
+      rec.parallelGroup = prev.parallelGroup; rec.argumentsHash = prev.argumentsHash; rec.argumentsSummary = prev.argumentsSummary;
+      x = await this.executeOnce(p, rec, executor);
+    }
+    return x;
+  }
+
+  private async executeOnce(p: Extract<PreparedCall, { ok: true }>, rec: ToolExecutionRecord, executor: RailwayToolExecutor): Promise<ExecutedCall> {
     rec.status = 'RUNNING'; rec.startedAt = new Date().toISOString();
+    this.notify(rec, 'STARTED');
     const t0 = Date.now();
     let timedOut = false;
     const guard = { canApply: () => !timedOut && this.isCurrent(p) };
@@ -223,6 +271,7 @@ export class ToolTurn {
       rec.fresh = status === 'SUCCEEDED';
       rec.resultCount = x.success ? countOf(p.vt.name, x.data) : null;
       if (x.error) rec.rejectionReason = x.error.code;
+      this.notify(rec, status === 'SUCCEEDED' ? 'COMPLETED' : 'FAILED');
       const out: ExecutedCall = {
         prepared: p, record: rec, success: !!x.success, empty: !!x.empty, data: x.data, error: x.error, provider,
         latencyMs, timedOut, stale: !!x.stale, result: undefined as any
@@ -288,6 +337,15 @@ export class ToolTurn {
     /** Identical call inside the SAME parallel segment — answered by the original's result (one provider call). */
     onDuplicate?: (tc: ToolCall, original: ExecutedCall) => void;
   }): Promise<'done' | 'stop'> {
+    // Prompt 18: ToolExecutionPlan — dependency graph for this round (SEARCH → train-dependent quotes)
+    const plan = buildToolExecutionPlan(calls, ++this.planRounds);
+    this.plans.push(...plan);
+    const nodeQueue = [...plan];
+    const nodeFor = (tc: ToolCall) => { const i = nodeQueue.findIndex(n => n.callId === String(tc?.callId ?? '') && n.tool === String(tc?.name ?? '')); return i >= 0 ? nodeQueue.splice(i, 1)[0] : nodeQueue.shift(); };
+    const nodeByCall = new Map<ToolCall, ToolExecutionPlanNode>();
+    for (const c of calls) { const n = nodeFor(c); if (n) { nodeByCall.set(c, n); n.arguments = safeSummary((c?.arguments as any) || {}); } }
+    const emptyNodes = new Set<string>();
+    try { this.ctx.observer?.onPlan?.(plan); } catch { /* ignore */ }
     for (const seg of ToolTurn.segments(calls)) {
       if (this.ctx.isStale?.()) return 'stop';
       const prepared: Array<PreparedCall | null | { alias: number; tc: ToolCall }> = [];
@@ -295,12 +353,23 @@ export class ToolTurn {
       let stop = false;
       for (const tc of seg) {
         if (stop) break;
-        if (h.fromLLM) { const a = this.admit(tc); if (a) { prepared.push(a); stop = true; continue; } }
-        if (h.skip?.(tc)) { prepared.push(null); continue; }
+        const node = nodeByCall.get(tc);
+        if (h.fromLLM) { const a = this.admit(tc); if (a) { if (node) { node.status = 'REJECTED'; node.toolExecutionId = a.record.toolExecutionId; } prepared.push(a); stop = true; continue; } }
+        if (h.skip?.(tc)) { if (node) node.status = 'SKIPPED_DUPLICATE'; prepared.push(null); continue; }
         const key = `${tc?.name}|${stableJson(tc?.arguments || {})}`;
         const prev = inSeg.get(key);
-        if (prev !== undefined && (prepared[prev] as any)?.ok) { prepared.push({ alias: prev, tc }); continue; }
+        if (prev !== undefined && (prepared[prev] as any)?.ok) { if (node) node.status = 'SKIPPED_DUPLICATE'; prepared.push({ alias: prev, tc }); continue; }
+        // a dependent call never runs before its dependency succeeded with usable results
+        const unmet = node ? unsatisfiedDependency(node, plan) : null;
+        if (node && (unmet || node.dependencies.some(d => emptyNodes.has(d)))) {
+          const r = this.reject(tc, this.newRecord(tc), 'DEPENDENCY_NOT_SATISFIED', SAFE_ERROR_MESSAGE.DEPENDENCY_NOT_SATISFIED) as Extract<PreparedCall, { ok: false }>;
+          r.record.planNodeId = node.planNodeId;
+          node.status = 'BLOCKED'; node.toolExecutionId = r.record.toolExecutionId;
+          prepared.push(r);
+          continue;
+        }
         const p = this.prepare(tc, h.fromLLM, true);
+        if (node) { node.toolExecutionId = p.record.toolExecutionId; p.record.planNodeId = node.planNodeId; if (!p.ok) node.status = 'REJECTED'; else node.status = 'RUNNING'; }
         if (p.ok) inSeg.set(key, prepared.length);
         prepared.push(p);
         if (!p.ok && p.stop) stop = true;
@@ -318,7 +387,13 @@ export class ToolTurn {
         if (!p.ok) { h.onRejected(p); continue; }
         const x = executed[k++];
         byIndex.set(i, x);
-        if (!h.onExecuted(x)) return 'stop';
+        const node = nodeByCall.get(p.tc);
+        if (node) {
+          node.toolExecutionId = x.record.toolExecutionId;
+          node.status = x.stale ? 'CANCELLED' : x.success ? 'SUCCEEDED' : 'FAILED';
+          if (x.success && x.empty) emptyNodes.add(node.planNodeId);
+        }
+        if (!h.onExecuted(x)) { if (node && node.status === 'SUCCEEDED') node.status = 'CANCELLED'; return 'stop'; }
       }
       if (stop) return 'stop';
     }

@@ -12,7 +12,7 @@ const RUNTIME_CODES: ReadonlySet<string> = new Set([
   'UNKNOWN_TOOL', 'TOOL_NOT_IMPLEMENTED', 'TOOL_CALL_REJECTED', 'FORBIDDEN_ACTION', 'FORBIDDEN_ARGUMENT',
   'TOOL_CALL_LIMIT_EXCEEDED', 'TOOL_LOOP_DETECTED', 'STALE_TOOL_RESULT', 'PROVIDER_DATA_CONFLICT',
   'TOOL_FAILED', 'TOOL_TIMEOUT', 'INVALID_REQUEST', 'NO_RESULTS', 'PROVIDER_UNAVAILABLE', 'RATE_LIMITED',
-  'AUTH_ERROR', 'DATA_UNAVAILABLE', 'UNKNOWN'
+  'AUTH_ERROR', 'DATA_UNAVAILABLE', 'UNKNOWN', 'DEPENDENCY_NOT_SATISFIED'
 ]);
 
 export function normalizeToolErrorCode(raw: string | undefined | null): ToolErrorCode {
@@ -58,6 +58,7 @@ export const SAFE_ERROR_MESSAGE: Record<ToolErrorCode, string> = {
   TOOL_CALL_LIMIT_EXCEEDED: 'Request bahut lambi ho gayi — thoda simple karke poochiye.',
   TOOL_LOOP_DETECTED: 'Ye jaankari dobara nahi mangwa raha — upar wala verified result hi current hai.',
   STALE_TOOL_RESULT: 'Purana result ignore kiya gaya.',
+  DEPENDENCY_NOT_SATISFIED: 'Pehle wala step verify nahi ho paaya, isliye ye check abhi nahi kiya.',
   PROVIDER_DATA_CONFLICT: 'Railway providers ki jaankari mel nahi kha rahi — abhi verified result available nahi hai.'
 };
 

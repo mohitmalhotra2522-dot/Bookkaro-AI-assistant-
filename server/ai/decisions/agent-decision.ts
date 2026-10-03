@@ -279,6 +279,10 @@ export interface TurnRecord {
   journeyVersion?: number;
   toolExecutions?: import('@shared/railway-tool-runtime').ToolExecutionRecord[];
   toolRounds?: number;
+  /** Prompt 18: ToolExecutionPlan nodes (dependency graph; arguments safe/masked). */
+  toolPlans?: import('@shared/turn-engine').ToolExecutionPlanNode[];
+  /** Prompt 18: ConversationTurnEngine observability (attached by the engine). */
+  turnEngine?: Record<string, any>;
   freshRequested?: boolean;
   /** Prompt 10 — PII-free execution-gateway log line (if the gateway ran this turn). */
   execution?: import('@shared/booking-execution').ExecutionLogRecord;

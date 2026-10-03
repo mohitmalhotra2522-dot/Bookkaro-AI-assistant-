@@ -43,7 +43,9 @@ export type ToolErrorCode =
   | 'AUTH_ERROR' | 'DATA_UNAVAILABLE' | 'UNKNOWN'
   // runtime-level (provider NOT called)
   | 'UNKNOWN_TOOL' | 'TOOL_NOT_IMPLEMENTED' | 'TOOL_CALL_REJECTED' | 'FORBIDDEN_ACTION' | 'FORBIDDEN_ARGUMENT'
-  | 'TOOL_CALL_LIMIT_EXCEEDED' | 'TOOL_LOOP_DETECTED' | 'STALE_TOOL_RESULT' | 'PROVIDER_DATA_CONFLICT';
+  | 'TOOL_CALL_LIMIT_EXCEEDED' | 'TOOL_LOOP_DETECTED' | 'STALE_TOOL_RESULT' | 'PROVIDER_DATA_CONFLICT'
+  // Prompt 18: a dependent call whose dependency (e.g. SEARCH_TRAINS) did not succeed
+  | 'DEPENDENCY_NOT_SATISFIED';
 
 /** Part 4 — what the LLM may emit. Raw expressions ("kal", "Delhi") are allowed; the backend resolves them. */
 export interface LLMToolCall {
@@ -97,4 +99,9 @@ export interface ToolExecutionRecord {
   resultCount: number | null;
   rejectionReason: string | null;
   parallelGroup: number | null;
+  /** Prompt 18: 1 = first attempt; a backend retry is a NEW record (new id) with retryOf → previous id. */
+  attempt?: number;
+  retryOf?: string | null;
+  /** Prompt 18: ToolExecutionPlan node (dependency graph) this execution belongs to. */
+  planNodeId?: string | null;
 }

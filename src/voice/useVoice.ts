@@ -115,6 +115,9 @@ export function useVoice() {
     }
   }, []);
 
+  /** Prompt 18: true while TTS is playing (a mic tap then is a barge-in → presentation INTERRUPTED). */
+  const isSpeaking = useCallback(() => typeof window !== 'undefined' && 'speechSynthesis' in window && window.speechSynthesis.speaking, []);
+
   const cancelSpeak = useCallback(() => {
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -129,6 +132,7 @@ export function useVoice() {
     stopRecording,
     speak,
     cancelSpeak,
+    isSpeaking,
     isSupported: typeof window !== 'undefined' && !!(
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     )

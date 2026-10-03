@@ -35,7 +35,8 @@ import { v4 as uuidv4 } from '../orchestrator/utils';
 import type { ToolGrounding } from '../../booking/post-booking/post-booking-service';
 import { PnrStatusService, LiveTrainStatusService } from '../../booking/post-booking/pnr-status-service';
 import { maskPnr } from '../../booking/post-booking/pnr-validator';
-import { RailwayToolRuntime, ToolTurn, type ExecutedCall, type PreparedCall, type RailwayToolExecutor } from '../tool-runtime/railway-tool-runtime';
+import { RailwayToolRuntime, ToolTurn, type ExecutedCall, type PreparedCall, type RailwayToolExecutor, type ToolObserver } from '../tool-runtime/railway-tool-runtime';
+import type { ToolExecutionPlanNode } from '@shared/turn-engine';
 import type { ToolExecutionRecord, LLMToolResult, ToolExecutionStatus } from '@shared/railway-tool-runtime';
 
 export const MAX_TOOL_CALL_ITERATIONS = 8; // deterministic hard cap (configurable via constructor)
@@ -97,6 +98,13 @@ export interface RuntimeHooks {
   turnId?: string;
   /** Prompt 17: the user explicitly asked for fresh / re-checked data this turn (recorded; never cached anyway). */
   forceFresh?: boolean;
+  /** Prompt 18: turn-engine observer (LLM rounds + tool execution lifecycle → streaming events). */
+  observer?: TurnLoopObserver;
+}
+
+/** Prompt 18: loop observer — status / streaming only; it can never change the loop or the session. */
+export interface TurnLoopObserver extends ToolObserver {
+  onLLM?: (phase: 'start' | 'end', round: number, info?: { toolCalls: number; final: boolean }) => void;
 }
 
 function stableJson(v: any): string {
@@ -128,6 +136,8 @@ export interface ToolRuntimeResult {
   toolExecutions?: ToolExecutionRecord[];
   /** Prompt 17: LLM rounds that requested tools. */
   toolRounds?: number;
+  /** Prompt 18: ToolExecutionPlan nodes (dependency graph) of every round in this turn. */
+  toolPlans?: ToolExecutionPlanNode[];
 }
 
 export interface RuntimeInput {
@@ -213,7 +223,8 @@ export class BoundToolRuntime {
       validate: (tc: ToolCall, s: BookingSession) => self.validator.validate(tc, s, self.hooks.grounding?.(ctx.userText)) as any,
       allowedTools: () => self.allowedTools,
       isStale: () => !!self.hooks.isStale?.(),
-      forceFresh: !!hooks.forceFresh
+      forceFresh: !!hooks.forceFresh,
+      observer: hooks.observer
     } as any);
     this.executor = { providerLabel: tools.providerLabel, execute: (vt, guard) => this.executeTool(vt, guard) };
   }
@@ -246,7 +257,7 @@ export class BoundToolRuntime {
     const done = (finalMessage: string, stopReason: ToolRuntimeResult['stopReason'], error?: OrchestratorError): ToolRuntimeResult => ({
       finalMessage, finalDecision: lastDecision || dummyDecision(), steps, stopReason, error,
       latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs, deduplicated,
-      toolExecutions: this.turn.records, toolRounds: this.turn.roundsUsed
+      toolExecutions: this.turn.records, toolRounds: this.turn.roundsUsed, toolPlans: this.turn.plans
     });
 
     for (let iter = 0; iter < this.maxIterations; iter++) {
@@ -254,6 +265,7 @@ export class BoundToolRuntime {
       const sess = this.getSession();
       const missing = computeMissing(sess);
       const t0 = Date.now();
+      safeObs(() => H.observer?.onLLM?.('start', iter));
       const decision = (await this.llm.generateStructuredDecision({
         userText,
         history: localHistory,
@@ -267,6 +279,7 @@ export class BoundToolRuntime {
       })).decision;
       llmLatencyMs += Date.now() - t0;
       lastDecision = decision;
+      safeObs(() => H.observer?.onLLM?.('end', iter, { toolCalls: (decision.toolCalls || []).length, final: !(decision.toolCalls || []).length }));
       if (H.isStale?.()) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Obsolete request stopped.' });
 
       // Deterministically apply this decision's entities/references BEFORE its tool calls.
@@ -551,20 +564,26 @@ export class BoundToolRuntime {
       }
       case 'CHECK_AVAILABILITY': {
         const s = this.getSession();
-        this.commitSession({ availability: { ...(s.availability || {}), [vt.arguments.travelClass]: { ...r.data, dataSource: source, ...r.provenance } } } as any);
+        this.commitSession({ availability: { ...(s.availability || {}), [vt.arguments.travelClass]: { ...r.data, dataSource: source, ...r.provenance,
+          fetchedAt: r.provenance?.retrievedAt || r.timestamp, toolExecutionId: r.toolExecutionId,
+          trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, date: vt.arguments.date || s.date, origin: s.origin, destination: s.destination } } } as any);
         H.emit?.('AVAILABILITY_CHECKED', { trainNumber: r.data?.trainNumber, travelClass: r.data?.travelClass, status: r.data?.status, date: r.data?.date });
         break;
       }
       case 'GET_FARE': {
         const s = this.getSession();
         // Route the fare was computed for (authoritative session journey) → freshness check can detect route changes.
-        this.commitSession({ fare: { ...r.data, dataSource: source, origin: s.origin, destination: s.destination, date: vt.arguments.date || s.date, ...r.provenance } } as any);
+        this.commitSession({ fare: { ...r.data, dataSource: source, origin: s.origin, destination: s.destination, date: vt.arguments.date || s.date, ...r.provenance,
+          fetchedAt: r.provenance?.retrievedAt || r.timestamp, toolExecutionId: r.toolExecutionId,
+          fareBasis: { trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, passengersCount: r.data?.passengersCount ?? s.passengersCount, origin: s.origin, destination: s.destination, date: vt.arguments.date || s.date } } } as any);
         H.emit?.('FARE_CHECKED', { trainNumber: r.data?.trainNumber, travelClass: r.data?.travelClass, total: r.data?.total, passengersCount: r.data?.passengersCount });
         break;
       }
     }
   }
 }
+
+function safeObs(f: () => void) { try { f(); } catch { /* observers never break the loop */ } }
 
 function computeMissing(s: BookingSession): string[] {
   const m: string[] = [];
