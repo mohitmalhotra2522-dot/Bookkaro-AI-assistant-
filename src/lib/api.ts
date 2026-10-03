@@ -28,6 +28,8 @@ export interface ChatResponse {
   /** Prompt 10 — execution boundary (real booking disabled). */
   executionCapability?: { realBookingEnabled: boolean; configuredExecutor: string; effectiveExecutor: string; reason: string; executionPossible: false; configErrors: string[] };
   /** Prompt 16 — structured AssistantResponse + derived conversation context (no secrets, PNR masked). */
+  /** Prompt 21/22: shared turn metadata (assistantText = grounded LLM wording shown to the user). */
+  voice?: { assistantText: string; speechText: string; shouldSpeak: boolean; [k: string]: any };
   assistantResponse?: { text: string; speechText: string; clarification: string | null; requiresConfirmation: boolean; rejectedClaims: string[]; error: { code: string; recoveryCode: string | null; message: string } | null };
   conversationContext?: { activeJourneyId: string; pendingQuestion: string | null; missingFields: string[]; selectedTrain: string | null; selectedClass: string | null; activeBookingId: string | null; activePnrMasked: string | null; displayedResults: { resultSetId: string | null; items: ReadonlyArray<unknown> } };
   handoff?: { handoffId: string; status: string; statusReason: string | null; reviewVersion: number; expiresAt: string } | null;

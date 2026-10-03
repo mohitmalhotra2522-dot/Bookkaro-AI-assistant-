@@ -24,7 +24,9 @@ export const RAILWAY_TOOL_NAMES: readonly RailwayToolName[] = Object.freeze(Obje
 /** Backend-controlled actions — NEVER executable through the LLM tool runtime (Part "NON-LLM-DIRECT"). */
 export const FORBIDDEN_LLM_ACTIONS = Object.freeze([
   'EXECUTE_BOOKING', 'CANCEL_BOOKING', 'MODIFY_BOOKING', 'CHANGE_JOURNEY', 'CHANGE_CLASS', 'CHANGE_PASSENGER',
-  'PROCESS_REFUND', 'PAYMENT', 'IRCTC_LOGIN', 'OTP', 'CAPTCHA', 'SUBMIT_BOOKING'
+  'PROCESS_REFUND', 'PAYMENT', 'IRCTC_LOGIN', 'OTP', 'CAPTCHA', 'SUBMIT_BOOKING',
+  // Prompt 22 Part 3: explicit names (matched case-insensitively, e.g. "executeBooking")
+  'BOOK_TICKET', 'EXECUTEBOOKING', 'BOOKINGPROVIDERADAPTER.EXECUTE', 'MAKE_PAYMENT', 'UPI_PAYMENT', 'CARD_PAYMENT', 'FINAL_SUBMISSION'
 ] as const);
 export type ForbiddenLlmAction = typeof FORBIDDEN_LLM_ACTIONS[number];
 

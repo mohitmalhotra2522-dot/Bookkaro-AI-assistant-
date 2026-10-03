@@ -26,10 +26,11 @@ export interface GroundingResult {
 
 const SENT_SPLIT = /(?<=[.!?।])\s+/;
 const TIME = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)/g;
-const PUNCTUAL = /\b(usually on time|generally on time|on time|time par (chal|pahunch)|samay par|late (chal|ho|hai)|delay(ed)? (hai|chal)|running late|kitni late)\b/i;
+// Prompt 22: widened — "time pe chal rahi", "chal rahi hai", "pahunch gayi", platform numbers are live claims too
+const PUNCTUAL = /\b(usually on time|generally on time|on time|on schedule|time (par|pe|se) (chal|pahunch|aa)|samay (par|pe)|late (chal|ho|hai)|der se (chal|pahunch)|delay(ed)? (hai|chal)|running late|kitni late|chal rahi hai|pahunch (gayi|chuki)|platform (number |no\.? )?\d+)\b/i;
 const PNR_STATUS = /\bpnr\b[^.?!]*\b(confirm(ed)?|cnf|waiting|wl|rac|chart (ban|prepared)|cancel(led)?)\b/i;
 const AVAIL_CODE = /\b(AVL|AVAILABLE|RAC|WL|GNWL|RLWL|PQWL|TQWL)\s*[-/]?\s*\d+\b/;
-const CANCELLED = /\b(train|gaadi|gadi)\b[^.?!]*\b(cancel(led)? (hai|ho gayi|kar di)|rad (hai|ho gayi)|cancelled)\b/i;
+const CANCELLED = /\b(train|gaadi|gadi)\b[^.?!]*\b(cancel(led)? (hai|ho gayi|kar di)|rad (hai|ho gayi)|cancelled)\b|\b\d{5}\b[^.?!]*\b(cancel(led)?|radd?)\b(?!\s+(karna|karni|karni hai|karo|kar sakte|request))/i;
 
 function collectTimes(v: any, out: Set<string>) {
   if (v === undefined || v === null) return;

@@ -99,3 +99,25 @@ export interface LLMProvider {
   /** Prompt 21 (optional): word the final spoken reply; null → the backend reply is used. */
   generateSpokenResponse?(input: SpokenResponseInput): Promise<SpokenResponseResult | null>;
 }
+
+/**
+ * PROMPT 22 — normalized LLM provider failure. Carries ONLY a code (+ HTTP status): never the request,
+ * the response body, the prompt or the API key. The runtime turns it into the safe LLM_UNAVAILABLE reply;
+ * no deterministic parser silently takes over the conversation.
+ */
+export type LLMProviderErrorCode =
+  | 'LLM_TIMEOUT' | 'LLM_NETWORK_ERROR' | 'LLM_AUTH_ERROR' | 'LLM_RATE_LIMITED' | 'LLM_HTTP_ERROR' | 'LLM_BAD_RESPONSE' | 'LLM_ABORTED';
+export class LLMProviderError extends Error {
+  readonly code: LLMProviderErrorCode;
+  readonly status?: number;
+  constructor(code: LLMProviderErrorCode, status?: number) {
+    super(status ? `${code}:${status}` : code);
+    this.name = 'LLMProviderError';
+    this.code = code;
+    if (status) this.status = status;
+  }
+}
+export const isLLMProviderError = (e: unknown): e is LLMProviderError => !!e && (e as any).name === 'LLMProviderError' && typeof (e as any).code === 'string';
+
+/** Prompt 22: the ONLY reply when the conversational LLM fails (fixed safety text; no state change, no guessing). */
+export const LLM_UNAVAILABLE_MESSAGE = 'Maaf kijiye, main abhi jawab nahi de paa raha. Aapki booking details safe hain — thodi der mein dobara boliye.';

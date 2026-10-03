@@ -4,12 +4,14 @@
  *
  *  - generateStructuredDecision: JSON AgentDecision (+ optional fact-free acknowledgement). The output is untrusted:
  *    the existing decision validators / RailwayToolRuntime / state actions check everything before execution.
- *    Any transport / parse failure → the deterministic fallback provider decides that turn (the turn never breaks).
+ *    Prompt 22: any transport / parse failure throws a normalized LLMProviderError (code + HTTP status only). The
+ *    runtime answers with the safe LLM_UNAVAILABLE reply and changes nothing — a deterministic parser NEVER silently
+ *    takes over the conversation.
  *  - generateSpokenResponse: natural spoken wording, STREAMED (SSE deltas) — grounded sentence-by-sentence by
  *    NaturalResponseComposer before any of it is spoken.
  * The API key stays server-side, is never logged and is never sent to the browser. `fetch` is injectable (tests).
  */
-import type { LLMProvider, LLMTurnInput, LLMTurnResult, SpokenResponseInput, SpokenResponseResult } from './llm-provider';
+import { LLMProviderError, isLLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult, type SpokenResponseInput, type SpokenResponseResult } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
 import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT } from '../prompts/system-prompt';
 import { v4 as uuid } from '../orchestrator/utils';
@@ -23,8 +25,6 @@ export interface OpenAICompatibleConfig {
   baseUrl: string;
   model: string;
   timeoutMs: number;
-  /** Deterministic provider used when the remote call fails (never leaves a turn without a decision). */
-  fallback: LLMProvider;
   fetch?: FetchLike;
   temperature?: number;
 }
@@ -36,8 +36,8 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
   readonly providerId = 'openai-compatible';
   readonly modelName: string;
   private readonly f: FetchLike;
-  /** Count of turns decided by the fallback because the remote call failed (observability; no content). */
-  fallbackDecisions = 0;
+  /** Count of failed remote decision calls (observability only; no content). */
+  failedDecisions = 0;
 
   constructor(private readonly cfg: OpenAICompatibleConfig) {
     this.modelName = cfg.model;
@@ -50,14 +50,21 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
   private headers(): Record<string, string> { return { 'content-type': 'application/json', authorization: `Bearer ${this.cfg.apiKey}` }; }
 
   private async post(body: any, signal?: AbortSignal) {
-    if (!this.f) throw new Error('FETCH_UNAVAILABLE');
+    if (!this.f) throw new LLMProviderError('LLM_NETWORK_ERROR');
     const ctrl = new AbortController();
+    let timedOut = false;
     const onAbort = () => ctrl.abort();
     signal?.addEventListener?.('abort', onAbort);
-    const timer = setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, this.cfg.timeoutMs);
     try {
-      const res = await this.f(this.endpoint(), { method: 'POST', headers: this.headers(), body: JSON.stringify(body), signal: ctrl.signal });
-      if (!res.ok) throw new Error(`LLM_HTTP_${res.status}`);     // status only — never the response body / key
+      let res: Awaited<ReturnType<FetchLike>>;
+      try {
+        res = await this.f(this.endpoint(), { method: 'POST', headers: this.headers(), body: JSON.stringify(body), signal: ctrl.signal });
+      } catch {
+        throw new LLMProviderError(timedOut ? 'LLM_TIMEOUT' : signal?.aborted ? 'LLM_ABORTED' : 'LLM_NETWORK_ERROR');
+      }
+      // status only — never the response body, the prompt or the key
+      if (!res.ok) throw new LLMProviderError(res.status === 401 || res.status === 403 ? 'LLM_AUTH_ERROR' : res.status === 429 ? 'LLM_RATE_LIMITED' : 'LLM_HTTP_ERROR', res.status);
       return res;
     } finally { clearTimeout(timer); signal?.removeEventListener?.('abort', onAbort); }
   }
@@ -80,19 +87,22 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
           { role: 'user', content: JSON.stringify(user) }
         ]
       });
-      const j = await res.json();
-      const content = j?.choices?.[0]?.message?.content;
-      const decision = toDecision(JSON.parse(String(content || '{}')), input);
-      return { decision };
-    } catch {
-      this.fallbackDecisions++;
-      return this.cfg.fallback.generateStructuredDecision(input);
+      let raw: any;
+      try {
+        const j = await res.json();
+        raw = JSON.parse(String(j?.choices?.[0]?.message?.content ?? ''));
+      } catch { throw new LLMProviderError('LLM_BAD_RESPONSE'); }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new LLMProviderError('LLM_BAD_RESPONSE');
+      return { decision: toDecision(raw, input) };
+    } catch (e) {
+      this.failedDecisions++;
+      throw isLLMProviderError(e) ? e : new LLMProviderError('LLM_BAD_RESPONSE');
     }
   }
 
   async generateSpokenResponse(input: SpokenResponseInput): Promise<SpokenResponseResult | null> {
     const facts = {
-      userText: input.userText, language: input.language, backendReply: input.backendReply, pendingQuestion: input.pendingQuestion,
+      userText: input.userText, outputMode: input.inputMode, language: input.language, backendReply: input.backendReply, pendingQuestion: input.pendingQuestion,
       state: input.session.bookingState, stateBefore: input.stateBefore, error: input.error,
       session: {
         origin: input.session.originName || input.session.origin, destination: input.session.destinationName || input.session.destination,
@@ -107,6 +117,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
       messages: [{ role: 'system', content: VOICE_RESPONSE_STYLE_PROMPT }, { role: 'user', content: JSON.stringify(facts) }]
     };
     const res = await this.post(body, input.signal);
+    try {
     if (body.stream && res.body && typeof res.body.getReader === 'function') {
       // Part 14 — Server-Sent Events: forward content deltas as they arrive
       const reader = res.body.getReader();
@@ -131,6 +142,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     const text = String(j?.choices?.[0]?.message?.content || '').trim();
     if (text && input.onDelta) input.onDelta(text);
     return text ? { text } : null;
+    } catch (e) { throw isLLMProviderError(e) ? e : new LLMProviderError('LLM_BAD_RESPONSE'); }
   }
 }
 

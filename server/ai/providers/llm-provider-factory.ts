@@ -1,7 +1,8 @@
 /**
  * PROMPT 21 — LLM provider selection from SERVER env vars (keys never reach the browser, never logged).
  *   LLM_PROVIDER=openai-compatible  LLM_API_KEY=…  LLM_MODEL=…  [LLM_BASE_URL=https://api.openai.com/v1]  [LLM_TIMEOUT_MS=8000]
- * Default / incomplete config → deterministic MockLLMProvider (tests stay offline and deterministic).
+ * Default / incomplete config → MockLLMProvider (offline development / tests), with the reason logged at startup.
+ * A configured remote provider is NEVER silently replaced by the mock at runtime (Prompt 22).
  */
 import type { LLMProvider } from './llm-provider';
 import { MockLLMProvider } from './mock-llm';
@@ -27,6 +28,7 @@ export function createLLMProvider(env: Record<string, string | undefined> = {}, 
   if (!/^https?:\/\//i.test(baseUrl)) return { provider: mock, info: { providerId: mock.providerId, model: mock.modelName, configured: false, reason: 'INVALID_LLM_BASE_URL_FALLBACK_TO_MOCK' } };
   const t = Number(env.LLM_TIMEOUT_MS);
   const timeoutMs = Number.isFinite(t) && t >= 1000 && t <= 60000 ? t : 8000;
-  const provider = new OpenAICompatibleLLMProvider({ apiKey, model, baseUrl, timeoutMs, fallback: mock, fetch: o.fetch });
+  // Prompt 22: no hidden rule-based fallback at runtime — a failed remote call yields the safe LLM_UNAVAILABLE reply
+  const provider = new OpenAICompatibleLLMProvider({ apiKey, model, baseUrl, timeoutMs, fetch: o.fetch });
   return { provider, info: { providerId: provider.providerId, model, configured: true, reason: 'ENV_CONFIGURED' } };
 }

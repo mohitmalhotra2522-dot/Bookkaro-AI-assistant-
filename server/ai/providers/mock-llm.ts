@@ -11,6 +11,7 @@ import { isPureAffirmation, isPureNegation } from '../context/pending-interactio
 import { canonicalClassToken, AC_CLASSES } from '../context/class-reference-resolver';
 import { factFromTool, TOOL_LABEL } from '../context/response-formatter';
 import { extractPnrCandidate } from '../../booking/post-booking/pnr-validator';
+import { normalizeUtterance } from '../conversation/input-normalizer';
 
 /**
  * Deterministic MockLLMProvider (Prompt 8) — behaves like a tool-calling LLM:
@@ -134,6 +135,13 @@ export class MockLLMProvider implements LLMProvider {
     const turn = input.currentTurnToolResults ?? this.toolResultsSinceLastUser(input.history);
 
     if (SENSITIVE_RE.test(t)) return this.final('UNKNOWN', 'Main kabhi password, OTP, CAPTCHA, card ya UPI PIN nahi maangta. Kripya aisi jaankari share na karein.');
+    // Prompt 22: an explicit new / another booking is the LLM's interpretation (entities.newJourney) — the backend
+    // grounds it in the user's words, resets the journey and asks the LLM again on the fresh session.
+    const nb = normalizeUtterance(raw);
+    if (nb.newBooking) {
+      const sub = nb.remainder ? this.decide({ ...input, userText: nb.remainder }) : this.final('BOOK_TRAIN', '');
+      return { ...sub, entities: { ...(sub.entities || {}), newJourney: true } };
+    }
     if (NON_RAILWAY_RE.test(t) && !/\b(train|railway|ticket|fare|kiraya)\b/.test(t)) return this.final('UNKNOWN', 'Main railway booking aur train information mein help kar sakta hoon.');
     // Prompt 17: "cancelled trains" is a LIVE provider fact → request the approved tool (never answer from memory)
     if (!turn.length && /\b(cancel(led)?|radd?) (hui |huyi |hue )?trains?\b|\btrains? (jo )?(cancel(led)?|radd?) (hui|huyi|hai|hain)\b/.test(t)) {

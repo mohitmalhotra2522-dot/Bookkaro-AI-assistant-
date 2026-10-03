@@ -9,7 +9,11 @@
  *     → accepted sentences stream out immediately as SPEECH_SEGMENTs (TTS can start before the turn ends)
  *     → the pending question is guaranteed; a confirmation turn must say the ticket is NOT booked
  *   Any failure (no provider capability, timeout, nothing accepted, sensitive turn) → deterministic speech.
- * The deterministic responseMessage (TEXT) is never changed: only VOICE speechText uses this wording.
+ * Prompt 22: the SAME composer words the TEXT reply too (assistantText). responseMessage stays the authoritative
+ * backend reply (the fact base + safe fallback). Extra grounding: stations / cities, train names (bound to the train
+ * number they are said with), day words (aaj / kal / parso vs the session date), count words, availability status
+ * (no upgrade "available" over WL / RAC, exact WL / RAC numbers) and ₹ amounts only from fare fields. Live-status
+ * turns (PNR / running status / cancelled trains) keep the authoritative rendering of the provider result.
  */
 import type { LLMProvider, TurnToolResultView } from '../providers/llm-provider';
 import type { BookingSession } from '@shared/entities';
@@ -17,6 +21,8 @@ import { BookingState } from '@shared/states';
 import { containsChainOfThought, soundsRobotic, segmentForSpeech, splitSentences } from '@shared/voice/voice-response-policy';
 import { detectLanguageStyle, type LanguageStyle } from '@shared/voice/language-style';
 import { railwayResponseGrounding } from '../tool-runtime/railway-response-grounding';
+import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
+import { resolveDate } from '../../railway/resolvers/date-resolver';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -24,6 +30,8 @@ export interface NaturalComposeInput {
   userText: string;
   /** Backend TEXT reply (authoritative wording of this turn's facts). */
   backendReply: string;
+  /** Prompt 22: output channel (TEXT chat reply or VOICE speech). Default VOICE. */
+  mode?: 'TEXT' | 'VOICE';
   /** Deterministic VOICE speech (the fallback). */
   deterministicSpeech: string;
   stateBefore: BookingState;
@@ -61,6 +69,31 @@ const AVAIL_RE = /\b(available|availability hai|waiting|WL|RAC|seats?|khaali|bha
 const SUCCESS_RE = /\b(book ho (gaya|gayi|gyi|chuka|chuki)|booked|booking (ho gayi|confirm(ed)?|successful|safal)|ticket (confirm|ban|book) (ho )?(gaya|gayi|chuka)|payment (ho gaya|done|successful)|pnr (number )?(hai|is|mil))/i;
 const NEGATION_RE = /\b(nahi|nahin|na|not|no|never|abhi tak nahi)\b/i;
 const NOT_BOOKED_RE = /(book nahi|booked nahi|nahi hua|not (been )?booked|no ticket|ticket book nahi)/i;
+const LIVE_TOOLS = new Set(['CHECK_PNR', 'TRACK_TRAIN', 'GET_CANCELLED_TRAINS']);
+const TRAIN_NAME_RE = /\b(jan shatabdi|shatabdi|rajdhani|duronto|vande bharat|garib rath|humsafar|tejas|intercity|sampark kranti|superfast|express|mail|antyodaya|double decker)\b/gi;
+const CITY_RE = /\b(mumbai|bombay|kolkata|calcutta|howrah|chennai|madras|bangalore|bengaluru|hyderabad|secunderabad|pune|jaipur|lucknow|kanpur|patna|ahmedabad|surat|bhopal|indore|agra|varanasi|banaras|prayagraj|allahabad|jammu|katra|dehradun|haridwar|shimla|kalka|pathankot|firozpur|ferozpur|bathinda|bikaner|jodhpur|udaipur|gwalior|nagpur|goa|guwahati|bhubaneswar|puri|ranchi|raipur|moradabad|bareilly|meerut|saharanpur|ambala|panipat|sonipat|karnal|kurukshetra|phagwara|pune|kota|ajmer)\b/gi;
+const DAY_RE = /\b(aaj|today|kal|tomorrow|parso|parson|day after tomorrow)\b/gi;
+const TRAIN_COUNT_RE = /\b(\d+|ek|one|do|two|teen|three|char|chaar|four|paanch|five|chhe|six)\s+(trains?|trainein|gaadiyan)\b/gi;
+const PAX_COUNT_RE = /\b(\d+|ek|one|do|two|teen|three|char|chaar|four|paanch|five|chhe|six)\s+(passengers?|yatri|log)\b/gi;
+const COUNT_WORD: Record<string, number> = { ek: 1, one: 1, do: 2, two: 2, teen: 3, three: 3, char: 4, chaar: 4, four: 4, paanch: 5, five: 5, chhe: 6, six: 6 };
+const POS_AVAIL_RE = /\b(seats? (available|khaali|mil (jaayegi|jayegi|jaegi))|available (hain|hai|h)\b|confirm(ed)? seats?|pakki seats?|seats? (confirm|pakki))/i;
+const normStatus = (x: string) => String(x || '').toUpperCase().replace(/WAIT\s*LIST(ED)?|WAITING(\s+LIST)?|GNWL|PQWL|RLWL|RSWL/g, 'WL').replace(/\s+/g, ' ').trim();
+const lcPad = (x: string) => ` ${String(x || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ')} `;
+function stationCodesIn(text: string): Set<string> {
+  const t = lcPad(text); const out = new Set<string>();
+  for (const [k, v] of Object.entries(STATION_ALIASES)) if (t.includes(` ${k} `)) out.add(v.code);
+  for (const [k, c] of Object.entries(AMBIGUOUS_STATION_NAMES)) if (t.includes(` ${k} `)) for (const x of c) out.add(x.code);
+  return out;
+}
+/** Numbers under fare-bearing keys only (a ₹ amount must be a fare / total the provider or the review returned). */
+function collectFare(into: Set<number>, v: any, key = '', inFare = false, depth = 0) {
+  if (v === null || v === undefined || depth > 7) return;
+  const f = inFare || /fare|total|amount|perpassenger|price/i.test(key);
+  if (typeof v === 'number') { if (f && Number.isFinite(v)) into.add(Math.abs(v)); return; }
+  if (typeof v === 'string') { if (f) for (const m of v.match(/\d+(?:\.\d+)?/g) || []) into.add(Number(m)); return; }
+  if (Array.isArray(v)) { for (const x of v.slice(0, 40)) collectFare(into, x, key, f, depth + 1); return; }
+  if (typeof v === 'object') for (const [k, x] of Object.entries(v)) collectFare(into, x, k, f, depth + 1);
+}
 const SHORT_Q: Record<string, string> = {
   TRAIN_SELECTION_REQUIRED: 'Kaunsi train chahiye?', CLASS_SELECTION_REQUIRED: 'Kaunsi class chahiye?',
   REVIEW_APPROVAL_REQUIRED: 'Confirm karna hai?', CONFIRMATION_REQUIRED: 'Confirm karna hai?'
@@ -101,10 +134,14 @@ export class NaturalResponseComposer {
     if (!i.deterministicSpeech) return { text: '', segments: [], source: 'FALLBACK', language, rejected: [], fallbackReason: 'EMPTY', streamed: 0 };
     if (i.sensitive) return fallback('SENSITIVE_TURN');
     if (i.error && SAFETY.has(i.error.code)) return fallback('SAFETY_ERROR');
+    if (i.error?.code === 'LLM_UNAVAILABLE') return fallback('LLM_UNAVAILABLE');
     if (typeof i.llm.generateSpokenResponse !== 'function') return fallback('PROVIDER_NO_SPOKEN_RESPONSE');
+    const mode = i.mode || 'VOICE';
 
     // ---- the authoritative fact base for grounding ----
     const views = toolViews(i.steps);
+    // Prompt 14/22: PNR / running status / cancelled trains → authoritative rendering of the provider result only
+    if (views.some(v => LIVE_TOOLS.has(String(v.toolName)))) return fallback('LIVE_STATUS_AUTHORITATIVE');
     const nums = new Set<number>();
     collectNumbers(nums, i.backendReply);
     collectNumbers(nums, i.deterministicSpeech);
@@ -133,7 +170,30 @@ export class NaturalResponseComposer {
     const streamable = !!i.onSegment && !confirmationTurn && !reviewTurn;
     const question = i.pendingQuestion ? (SHORT_Q[String(s.pendingInteraction?.type || '')] || SHORT_Q[i.pendingQuestionCode || ''] || i.pendingQuestion) : null;
     // Part 18 — voice stays concise: never longer than the text reply (short replies may take a natural lead-in)
-    const maxLen = Math.min(260, Math.max(i.backendReply.length, confirmationTurn ? 140 : 90));
+    const maxLen = mode === 'TEXT' ? Math.min(600, Math.max(i.backendReply.length, 160)) : Math.min(260, Math.max(i.backendReply.length, confirmationTurn ? 140 : 90));
+    const maxSentences = mode === 'TEXT' ? 5 : 3;
+    // ---- Prompt 22: extra authoritative fact sets ----
+    const stations = new Set<string>([s.origin, s.destination, ...trains.flatMap(t => [t.origin, t.destination]),
+      (s.review as any)?.snapshot?.origin, (s.review as any)?.snapshot?.destination,
+      ...stationCodesIn(i.userText), ...stationCodesIn(i.backendReply), ...stationCodesIn(i.deterministicSpeech)].filter(Boolean).map(String));
+    const sel: any = s.selectedTrain;
+    const knownNames: Array<{ num: string; name: string }> = [
+      ...trains.map(t => ({ num: String(t.trainNumber), name: String(t.trainName || '').toLowerCase() })),
+      ...(sel?.number ? [{ num: String(sel.number), name: String(sel.name || sel.trainName || '').toLowerCase() }] : []),
+      ...views.filter(v => v.ok && v.data && (v.data as any).trainNumber).map(v => ({ num: String((v.data as any).trainNumber), name: String((v.data as any).trainName || (v.data as any).name || '').toLowerCase() }))
+    ];
+    const nameSources = `${knownNames.map(k => k.name).join(' ')} ${i.backendReply} ${i.deterministicSpeech} ${i.userText} ${s.originName || ''} ${s.destinationName || ''}`.toLowerCase();
+    const statuses: Array<{ cls: string; status: string }> = [
+      ...Object.entries((s.availability || {}) as Record<string, any>).map(([c, v]) => ({ cls: c, status: String(v?.status ?? v ?? '') })),
+      ...views.filter(v => v.ok && v.toolName === 'CHECK_AVAILABILITY' && v.data).map(v => ({ cls: String((v.data as any).travelClass || ''), status: String((v.data as any).status || '') }))
+    ];
+    // counts are checked against THE count (not any number seen this turn)
+    const trainCounts = new Set<number>([trains.length, ...[...`${i.backendReply} ${i.deterministicSpeech}`.matchAll(/(\d+)\s+(?:trains?|trainein)/gi)].map(m => Number(m[1]))]);
+    const paxCounts = new Set<number>([s.passengersCount, (s.passengers || []).length, ...(i.userText.match(/\b\d{1,2}\b/g) || []).map(Number)].filter((n): n is number => typeof n === 'number'));
+    const countOf = (w: string) => /^\d+$/.test(w) ? Number(w) : COUNT_WORD[w.toLowerCase()];
+    const fareNums = new Set<number>();
+    collectFare(fareNums, { fare: s.fare, review: (s.review as any)?.snapshot, trains, steps: views.filter(v => v.ok).map(v => v.toolName === 'GET_FARE' ? { fare: v.data } : { data: v.data }) });
+    for (const m of `${i.backendReply} ${i.deterministicSpeech}`.matchAll(/₹\s?([\d,]+(?:\.\d+)?)/g)) fareNums.add(Number(m[1].replace(/,/g, '')));
 
     const accepted: string[] = [];
     const rejected: NaturalComposeResult['rejected'] = [];
@@ -152,6 +212,26 @@ export class NaturalResponseComposer {
       if (/₹|\brs\.?\s*\d|\brupay/i.test(t) && !fareKnown) return 'UNGROUNDED_FARE';
       if (AVAIL_RE.test(t) && !/availability (check|dekh|verify)/i.test(t) && !availKnown) return 'UNGROUNDED_AVAILABILITY';
       if (SUCCESS_RE.test(t) && !NEGATION_RE.test(t)) return 'BOOKING_SUCCESS_CLAIM';
+      // ---- Prompt 22 grounding ----
+      for (const m of t.matchAll(/(?:₹|\brs\.?\s?|\binr\s?)\s?([\d,]+(?:\.\d+)?)/gi)) { const n = Number(m[1].replace(/,/g, '')); if (!fareNums.has(n)) return `UNGROUNDED_FARE_AMOUNT:${n}`; }
+      for (const c of stationCodesIn(t)) if (!stations.has(c)) return `UNGROUNDED_STATION:${c}`;
+      for (const m of t.matchAll(CITY_RE)) if (!nameSources.includes(m[1].toLowerCase())) return `UNGROUNDED_STATION:${m[1]}`;
+      const saidNums = (t.match(/\b\d{5}\b/g) || []).filter(n => knownTrainNums.has(n) || knownNames.some(k => k.num === n));
+      for (const m of t.matchAll(TRAIN_NAME_RE)) {
+        const kw = m[1].toLowerCase();
+        if (saidNums.length === 1) { const nm = knownNames.find(k => k.num === saidNums[0])?.name || ''; if (!nm.includes(kw)) return `UNGROUNDED_TRAIN_NAME:${m[1]}`; }
+        else if (!knownNames.some(k => k.name.includes(kw)) && !`${i.backendReply} ${i.deterministicSpeech}`.toLowerCase().includes(kw)) return `UNGROUNDED_TRAIN_NAME:${m[1]}`;
+      }
+      if (!NEGATION_RE.test(t)) for (const m of t.matchAll(DAY_RE)) { const r: any = resolveDate(m[1].toLowerCase()); if (!r?.ok || r.date !== s.date) return `UNGROUNDED_DATE:${m[1]}`; }
+      for (const m of t.matchAll(TRAIN_COUNT_RE)) if (!trainCounts.has(countOf(m[1]))) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
+      for (const m of t.matchAll(PAX_COUNT_RE)) if (!paxCounts.has(countOf(m[1]))) return `UNGROUNDED_COUNT:${m[1]} ${m[2]}`;
+      {
+        const mentioned: string[] = [...(t.match(CLASS_RE) || [])];
+        const rel = statuses.filter(x => !mentioned.length || mentioned.includes(x.cls));
+        if (POS_AVAIL_RE.test(t) && !NEGATION_RE.test(t) && rel.length && !rel.some(x => /^(AVAIL|AVBL|CURR_AVBL)/i.test(x.status))) return 'AVAILABILITY_MISMATCH';
+        for (const m of t.matchAll(/\b(WL|waitlist|waiting(?:\s+list)?)\s*(\d+)/gi)) if (!rel.some(x => normStatus(x.status) === `WL ${m[2]}`)) return `AVAILABILITY_MISMATCH:WL ${m[2]}`;
+        for (const m of t.matchAll(/\bRAC\s*(\d+)/gi)) if (!rel.some(x => normStatus(x.status) === `RAC ${m[1]}`)) return `AVAILABILITY_MISMATCH:RAC ${m[1]}`;
+      }
       // a train number the USER said, inside a negative statement ("14542 is list mein nahi hai"), is not a fact claim
       const probe = NEGATION_RE.test(t) ? t.replace(/\b\d{5}\b/g, m => userTrainNums.has(m) && !knownTrainNums.has(m) ? 'woh train' : m) : t;
       const g = railwayResponseGrounding.validate(probe, { session: s, steps: i.steps, records: (i.records || []) as any });
@@ -163,7 +243,7 @@ export class NaturalResponseComposer {
       if (!t) return;
       const why = judge(t);
       if (why) { rejected.push({ sentence: t.slice(0, 120), reason: why }); return; }
-      if (accepted.length >= 3) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
+      if (accepted.length >= maxSentences) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       const reserve = question && !hasQ() && !t.includes('?') ? question.length + 1 : 0;
       if ((len() ? len() + 1 : 0) + t.length + reserve > maxLen) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       accepted.push(t);
@@ -184,7 +264,7 @@ export class NaturalResponseComposer {
     try {
       const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : undefined;
       const call = i.llm.generateSpokenResponse({
-        userText: i.userText, inputMode: 'VOICE', language, session: s, stateBefore: i.stateBefore,
+        userText: i.userText, inputMode: mode, language, session: s, stateBefore: i.stateBefore,
         reviewVersionBefore: i.reviewVersionBefore, selectedTrainBefore: i.selectedTrainBefore, selectedClassBefore: i.selectedClassBefore,
         passengersCountBefore: i.passengersCountBefore, pendingQuestion: question, pendingQuestionCode: i.pendingQuestionCode,
         backendReply: i.backendReply, toolResults: views, appliedActions: i.appliedActions, changes: i.changes, error: i.error,

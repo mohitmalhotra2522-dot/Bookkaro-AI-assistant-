@@ -408,8 +408,9 @@ describe('P21 G3 — parity, failures, fallback, recovery, security (Parts 21, 3
     for (const k of ['origin', 'destination', 'date', 'selectedClass', 'passengersCount', 'bookingState']) expect(v.s()[k]).toEqual(t.s()[k]);
     expect(v.s().selectedTrain.number).toBe(t.s().selectedTrain.number);
     expect(Object.keys(rv).filter(k => k !== 'speech').sort()).toEqual(Object.keys(rt).filter(k => k !== 'speech').sort());
-    expect(rt.voice).toMatchObject({ shouldSpeak: false, presentable: true, assistantText: rt.responseMessage, state: rt.newState });
-    expect(rv.voice).toMatchObject({ shouldSpeak: true, presentable: true, assistantText: rv.responseMessage, state: rv.newState });
+    // Prompt 22: assistantText = the grounded LLM wording in BOTH modes (responseMessage = authoritative backend reply)
+    expect(rt.voice).toMatchObject({ shouldSpeak: false, presentable: true, assistantText: 'Theek hai, 2 passengers. Pehle passenger ka naam?', state: rt.newState });
+    expect(rv.voice).toMatchObject({ shouldSpeak: true, presentable: true, assistantText: rv.voice.speechText, state: rv.newState });
     expect(rt.responseMessage).toBe('2 passengers ke details chahiye. Pehle passenger ka naam bataiye.');   // TEXT reply unchanged by P21
     expect(rv.responseMessage).toBe('Pehle passenger ka naam?');                                           // existing P19 short voice reply
     expect(rv.voice.speechText).toBe('Theek hai, 2 passengers. Pehle passenger ka naam?');                // natural wording → speech only
@@ -451,7 +452,7 @@ describe('P21 G3 — parity, failures, fallback, recovery, security (Parts 21, 3
     v.agent.listen();
     const o = await v.utter('Amritsar se Delhi kal');
     await v.drain();
-    expect(o!.assistantText).toBe(h.eng.getTurns(h.sid).slice(-1)[0].assistantResponse!.text);
+    expect(o!.assistantText).toBe(h.eng.getTurns(h.sid).slice(-1)[0].assistantResponse!.speechText);   // reply kept although TTS failed
     expect(v.agent.snapshot().textFallback).toBe(true);
   });
 

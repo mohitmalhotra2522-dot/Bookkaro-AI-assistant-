@@ -95,6 +95,9 @@ export interface ApplyOutcome {
   lifecycle?: boolean;
   /** Prompt 15: provider work the orchestrator runs after the applier (never an LLM tool). */
   lifecyclePlan?: LifecyclePlan;
+  /** Prompt 22: a journey-level change the LLM proposed was applied (new journey) → the LLM decides again on the
+   *  fresh session; this decision's tool calls (made against the old journey) never run. */
+  replan?: boolean;
 }
 
 const ALLOWED_INTENTS = new Set(['GENERAL_RAILWAY_QUERY', 'BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'CANCEL_BOOKING', 'MODIFY_BOOKING', 'CHECK_REFUND_STATUS', 'UNKNOWN']);

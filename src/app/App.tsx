@@ -117,7 +117,8 @@ const App: React.FC = () => {
           } : undefined
         });
         if (resp.toolActivity) setToolActivity(resp.toolActivity);
-        addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: resp.message, timestamp: Date.now() });
+        // Prompt 22: show the grounded LLM wording (assistantText); the backend reply only when it is unavailable
+        addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: resp.voice?.assistantText || resp.message, timestamp: Date.now() });
         setContext(resp.context);
         resp.cards.forEach((card: any) => addCard(card));
         void maySpeak;   // Prompt 21: speech is owned by the voice agent (current turn only)

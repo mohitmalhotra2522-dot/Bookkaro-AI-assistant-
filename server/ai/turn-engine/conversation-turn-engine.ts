@@ -331,8 +331,9 @@ export class ConversationTurnEngine {
     const speechText = response ? (response.speechText || response.text) : '';
     const voice: VoiceTurnOutcome = {
       sessionId: sid, turnId: turn.turnId, sequence: turn.sequence, journeyVersion: jvNow, presentable: !!response,
-      assistantText: response ? response.text : '', speechText,
-      segments: response ? (r.speech?.segments?.length ? r.speech.segments.map(maskPnrsInText) : []) : [],
+      // Prompt 22: the text the user reads = grounded LLM wording (TEXT + VOICE); responseMessage when unavailable
+      assistantText: response ? maskPnrsInText((r as any).assistantText || response.text) : '', speechText,
+      segments: response && mode === 'VOICE' ? (r.speech?.segments?.length ? r.speech.segments.map(maskPnrsInText) : []) : [],
       shouldSpeak: mode === 'VOICE' && !!response && !!speechText, interruptible: true, responsePriority: priority,
       state: sNow.bookingState, requiresTool: recs.length > 0, error: r.error ? { code: r.error.code, message: r.error.message } : null
     };

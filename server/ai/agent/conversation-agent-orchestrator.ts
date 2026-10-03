@@ -135,6 +135,8 @@ export interface AgentTurnResult {
   conversationContext: ConversationContext;
   /** Prompt 21: VOICE speech plan (LLM-worded + grounded, or deterministic fallback). */
   speech?: { segments: string[]; source: 'LLM' | 'FALLBACK'; language: string; fallbackReason?: string };
+  /** Prompt 22: the text shown to the user (grounded LLM wording in TEXT and VOICE; backend reply as fallback). */
+  assistantText?: string;
 }
 
 /** Prompt 16: per-turn observability extras carried to finish(). */
@@ -276,10 +278,8 @@ export class ConversationAgentOrchestrator {
       return this.finish({ sessionId, turnId, requestId, startedAt, userText: safeInput, normalizedInput: safeInput, mode, stateBefore, pendingBefore, cards, events,
         message: msg, error: err, rejection: 'SENSITIVE_REQUEST_REJECTED', rt: null, decision: null, changes: [] });
     }
-    if (NON_RAILWAY_PATTERNS.some(re => re.test(normalizedInput)) && !/(train|railway|pnr|ticket|kiraya|fare|ट्रेन|रेल)/i.test(normalizedInput)) {
-      return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-        message: NON_RAILWAY_REPLY, rejection: 'UNKNOWN_INTENT', rt: null, decision: null, changes: [] });
-    }
+    // Prompt 22: off-topic input is no longer short-circuited before the LLM — the LLM interprets every
+    // non-sensitive turn first; the scope guard below only validates its outcome (safety refusal).
 
     // ---- Prompt 18 (Part 52): bare day number ("22") → ask which month; never assume ----
     let llmInput = normalizedInput;
@@ -315,25 +315,10 @@ export class ConversationAgentOrchestrator {
       }
     }
 
-    // ---- Prompt 16: explicit NEW BOOKING → new active journey (history store untouched) ----
-    if (utter.newBooking) {
-      const nj = this.startNewJourney(sessionId, turnId, events);
-      if (!nj.ok) {
-        const err: OrchestratorError = { code: 'ACTION_NOT_ALLOWED', message: nj.message };
-        return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-          message: err.message, error: err, rejection: 'ACTION_NOT_ALLOWED', rt: null, decision: null, changes: [], extra });
-      }
-      extra.backendActions = ['NEW_JOURNEY_STARTED'];
-      if (!utter.remainder) {
-        const sN = this.state.getSession(sessionId);
-        sN.pendingInteraction = { type: 'ORIGIN_REQUIRED', data: { route: true }, setAtTurnId: turnId };
-        const prev = this.postBooking.store.getBookingsForSession(sessionId).length;
-        const msg = `Theek hai, nayi booking shuru karte hain${prev ? ' — pichli booking history safe hai' : ''}. Kahan se kahan jaana hai?`;
-        return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-          message: msg, rt: null, decision: null, changes: ['newJourney'], extra });
-      }
-      llmInput = utter.remainder;
-    }
+    // ---- Prompt 22: an explicit NEW BOOKING is interpreted by the LLM (entities.newJourney) — never by a pre-LLM
+    //      regex. The backend only GROUNDS that proposal in the user's own words (Prompt 16 phrase set) and performs
+    //      the validated journey reset (history store untouched); the LLM then decides again on the fresh journey.
+    let newJourneyDone = false;
 
     // ---- Tool-calling loop with per-decision deterministic application ----
     const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges, rawText: llmInput, requestId, contextPatches: [], rejectedPatches: [] };
@@ -361,8 +346,33 @@ export class ConversationAgentOrchestrator {
         if (guard.isStale()) return;
         this.postBooking.onLiveTool(sessionId, phase, name, args, result, (type, data) => { this.state.emit(sessionId, type, turnId, data); events.push(type); });
       },
-      applyDecision: (d: AgentDecision): ApplyOutcome => {
+      applyDecision: (dIn: AgentDecision): ApplyOutcome => {
         if (guard.isStale()) return { notes: [], blockTools: true, applied: [], error: { code: 'STALE_TOOL_RESULT', message: '' } };
+        let d = dIn;
+        if ((d as any)?.entities?.newJourney) {
+          d = { ...d, entities: { ...(d.entities || {}) } };
+          delete (d.entities as any).newJourney;
+          if (!newJourneyDone) {
+            if (!utter.newBooking) {
+              // ungrounded proposal (the user never asked for a new booking) → ignored; the journey is untouched
+              events.push('NEW_JOURNEY_PROPOSAL_REJECTED');
+            } else {
+              newJourneyDone = true;
+              const nj = this.startNewJourney(sessionId, turnId, events);
+              if (!nj.ok) return { notes: [], blockTools: true, applied: ['NEW_JOURNEY_REJECTED'], error: { code: 'ACTION_NOT_ALLOWED', message: nj.message } };
+              ctx.changes.push('newJourney');   // NEW_JOURNEY_STARTED is logged via the outcome's `applied`
+              ctx.rawText = utter.remainder;   // grounding / classifiers see only the new journey's own words
+              if (!utter.remainder) {
+                const prev = this.postBooking.store.getBookingsForSession(sessionId).length;
+                pendingOverride = { type: 'ORIGIN_REQUIRED', data: { route: true }, setAtTurnId: turnId };
+                this.state.getSession(sessionId).pendingInteraction = pendingOverride;
+                return { notes: [], blockTools: true, applied: ['NEW_JOURNEY_STARTED'],
+                  directAnswer: `Theek hai, nayi booking shuru karte hain${prev ? ' — pichli booking history safe hai' : ''}. Kahan se kahan jaana hai?` };
+              }
+              return { notes: [], blockTools: false, applied: ['NEW_JOURNEY_STARTED'], replan: true };
+            }
+          }
+        }
         const o = this.applier.apply(sessionId, d, ctx);
         if (o.pendingOverride) pendingOverride = o.pendingOverride;
         return o;
@@ -381,6 +391,21 @@ export class ConversationAgentOrchestrator {
     if (rt.stopReason === 'stale' || guard.stale) {
       return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards: [], events,
         message: '', stale: true, error: { code: 'STALE_TOOL_RESULT', message: 'Late result from an obsolete request was ignored.' }, rt, decision: rt.finalDecision, changes: ctx.changes });
+    }
+
+    // ---- Prompt 22: the conversational LLM failed before any verified result → the safe LLM_UNAVAILABLE reply only.
+    //      No deterministic parser takes over, no tool runs, the session is unchanged.
+    if (rt.stopReason === 'error' && rt.error?.code === 'LLM_UNAVAILABLE' && !rt.steps.length && !ctx.changes.length) {
+      const q = questionFor(s0.pendingInteraction, this.state.getSession(sessionId), mode);
+      return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
+        message: q ? `${rt.error.message} ${q}` : rt.error.message, error: rt.error, rt, decision: null, changes: [], extra });
+    }
+    // ---- Prompt 22: scope guard AFTER the LLM — an off-topic turn the LLM did not turn into railway work gets the
+    //      fixed scope refusal (a real LLM must not answer weather / news / jokes from its own knowledge).
+    if (!rt.steps.length && !ctx.changes.length && !rt.applyOutcomes.some(o => o.applied.length || o.directAnswer)
+      && NON_RAILWAY_PATTERNS.some(re => re.test(normalizedInput)) && !/(train|railway|pnr|ticket|kiraya|fare|ट्रेन|रेल)/i.test(normalizedInput)) {
+      return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
+        message: NON_RAILWAY_REPLY, rejection: 'UNKNOWN_INTENT', rt, decision: rt.finalDecision, changes: [] });
     }
 
     for (const st of rt.steps) {
@@ -473,12 +498,13 @@ export class ConversationAgentOrchestrator {
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     const turnError = blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined);
-    // ---- Prompt 21: VOICE natural wording (LLM) — every sentence grounded; deterministic speech otherwise ----
-    if (mode === 'VOICE' && opts.naturalSpeech !== false && message) {
+    // ---- Prompt 21/22: natural wording by the LLM for TEXT and VOICE — every sentence grounded against authoritative
+    //      data; the backend reply (responseMessage) stays the authoritative fact base + safe fallback ----
+    if (opts.naturalSpeech !== false && message && !(turnError?.code === 'LLM_UNAVAILABLE')) {
       try {
         extra.naturalSpeech = await naturalResponseComposer.compose({
-          llm: this.llm, session: sess, userText: normalizedInput, backendReply: message,
-          deterministicSpeech: speechOf(message, 'VOICE', questionFor(sess.pendingInteraction, sess, 'VOICE')),
+          llm: this.llm, session: sess, userText: normalizedInput, backendReply: message, mode,
+          deterministicSpeech: mode === 'VOICE' ? speechOf(message, 'VOICE', questionFor(sess.pendingInteraction, sess, 'VOICE')) : message,
           stateBefore, reviewVersionBefore: voiceBefore.reviewVersion, selectedTrainBefore: voiceBefore.train,
           selectedClassBefore: voiceBefore.cls, passengersCountBefore: voiceBefore.count,
           steps: [...rt.steps, ...(prep?.steps || [])], appliedActions: extra.backendActions || [],
@@ -488,7 +514,7 @@ export class ConversationAgentOrchestrator {
           pendingQuestion: pendingQuestionCode(sess.pendingInteraction) ? questionFor(sess.pendingInteraction, sess, 'VOICE') || null : null,
           history: (this.history.get(sessionId) || []).slice(-8) as any, records: this.postBooking.store.getBookingsForSession(sessionId) as any,
           sensitive: sensitiveInput, timeoutMs: this.naturalSpeechTimeoutMs,
-          onSegment: opts.onSpeechSegment
+          onSegment: mode === 'VOICE' ? opts.onSpeechSegment : undefined
         });
       } catch { /* composition never breaks a turn: deterministic speech is used */ }
     }
@@ -553,11 +579,13 @@ export class ConversationAgentOrchestrator {
       if (st.result.toolName === 'TRACK_TRAIN') cards.push({ type: 'live_status', data: st.result.data });
     }
     parts.push(...progress);
-    if (rt.stopReason === 'tool_limit' && rt.error) {
+    const llmLost = rt.stopReason === 'error' && rt.error?.code === 'LLM_UNAVAILABLE';
+    if ((rt.stopReason === 'tool_limit' && rt.error) || llmLost) {
       // Prompt 17: limit / loop stop keeps the VERIFIED results of this turn (deterministic phrasing) + one notice
+      // Prompt 22: same when the LLM failed AFTER verified tool results (facts only — never a guess)
       const facts = [...new Set(nonSearch.filter(st => st.status === 'ok' && !LIVE_TOOLS.has(st.result.toolName)).map(st => factFromTool(st.result.toolName, st.result.data, mode)).filter(Boolean))];
       for (const f of facts) if (!parts.join(' ').includes(f)) parts.push(f);
-      if (!parts.join(' ').includes(rt.error.message)) parts.push(rt.error.message);
+      if (!llmLost && rt.error && !parts.join(' ').includes(rt.error.message)) parts.push(rt.error.message);
     }
     const joined = parts.join(' ');
     if (q && !joined.includes(q)) parts.push(q);
@@ -699,6 +727,9 @@ export class ConversationAgentOrchestrator {
         // Prompt 21: VOICE speech = LLM-worded, grounded sentences (TEXT reply + facts unchanged)
         return !a.stale && a.mode === 'VOICE' && x.naturalSpeech?.text ? { ...ar, speechText: x.naturalSpeech.text } : ar;
       })(),
+      // Prompt 22: what the user reads — the grounded LLM wording (both modes); the backend reply when the LLM wording
+      // was unavailable / rejected. responseMessage keeps the authoritative backend reply.
+      assistantText: a.stale ? '' : (x.naturalSpeech?.source === 'LLM' && x.naturalSpeech.text ? x.naturalSpeech.text : a.message),
       conversationContext,
       ...(!a.stale && x.naturalSpeech ? { speech: { segments: x.naturalSpeech.segments, source: x.naturalSpeech.source, language: x.naturalSpeech.language, ...(x.naturalSpeech.fallbackReason ? { fallbackReason: x.naturalSpeech.fallbackReason } : {}) } } : {})
     };

@@ -101,6 +101,9 @@ export interface ExtractedEntities {
   originRaw?: string;
   destinationRaw?: string;
   dateRaw?: string;
+  /** Prompt 22: the LLM's interpretation that the user explicitly asked for a NEW / another booking.
+   *  A proposal only — the backend grounds it in the user's own words before resetting the journey. */
+  newJourney?: boolean;
   passengersCountRaw?: string;
   preferredTimeRaw?: string;
   preferredClassRaw?: string;
@@ -198,6 +201,8 @@ export type OrchestratorErrorCode =
   // ---- Prompt 17: RailwayToolRuntime ----
   | 'TOOL_LOOP_DETECTED'
   | 'TOOL_NOT_IMPLEMENTED'
+  // ---- Prompt 22: the conversational LLM could not be reached / returned unusable output ----
+  | 'LLM_UNAVAILABLE'
   | 'FORBIDDEN_ACTION'
   | 'FORBIDDEN_ARGUMENT'
   | 'TOOL_TIMEOUT'

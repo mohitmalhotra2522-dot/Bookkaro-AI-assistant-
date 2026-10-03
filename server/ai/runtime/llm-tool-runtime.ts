@@ -20,6 +20,7 @@
  * normalized tool results.
  */
 import type { LLMProvider } from '../providers/llm-provider';
+import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE } from '../providers/llm-provider';
 import type { AgentDecision, OrchestratorError, TurnRecord } from '../decisions/agent-decision';
 import type { ToolCall, ToolDefinition } from '../tools/tool-registry';
 import { REGISTERED_TOOLS } from '../tools/tool-registry';
@@ -266,7 +267,11 @@ export class BoundToolRuntime {
       const missing = computeMissing(sess);
       const t0 = Date.now();
       safeObs(() => H.observer?.onLLM?.('start', iter));
-      const decision = (await this.llm.generateStructuredDecision({
+      // Prompt 22: an LLM failure never hands the turn to a deterministic parser — the turn ends with the safe
+      // LLM_UNAVAILABLE reply; results already verified in this turn (if any) are kept, nothing else changes.
+      let decision: AgentDecision;
+      try {
+      decision = (await this.llm.generateStructuredDecision({
         userText,
         history: localHistory,
         state: sess.bookingState,
@@ -277,6 +282,14 @@ export class BoundToolRuntime {
         context: H.buildContext?.(),
         currentTurnToolResults: [...turnResults]
       })).decision;
+      } catch (e: any) {
+        llmLatencyMs += Date.now() - t0;
+        safeObs(() => H.observer?.onLLM?.('end', iter, { toolCalls: 0, final: true }));
+        return done('', 'error', { code: 'LLM_UNAVAILABLE', message: LLM_UNAVAILABLE_MESSAGE, details: { reason: isLLMProviderError(e) ? e.code : 'LLM_ERROR', iteration: iter } } as any);
+      }
+      if (!decision || typeof decision !== 'object') {
+        return done('', 'error', { code: 'LLM_UNAVAILABLE', message: LLM_UNAVAILABLE_MESSAGE, details: { reason: 'LLM_BAD_RESPONSE', iteration: iter } } as any);
+      }
       llmLatencyMs += Date.now() - t0;
       lastDecision = decision;
       safeObs(() => H.observer?.onLLM?.('end', iter, { toolCalls: (decision.toolCalls || []).length, final: !(decision.toolCalls || []).length,
@@ -288,6 +301,9 @@ export class BoundToolRuntime {
         const outcome = H.applyDecision(decision);
         applyOutcomes.push(outcome);
         this.allowedTools = outcome.allowedTools;
+        // Prompt 22: the backend applied a journey-level change the LLM proposed (new journey) — this decision was made
+        // against the OLD journey, so its tool calls are dropped and the LLM decides again on the fresh session.
+        if (outcome.replan && !outcome.blockTools) continue;
         if (outcome.blockTools) {
           // a deterministic backend answer (post-booking record) is never mixed with LLM wording
           return done(outcome.error?.message || (outcome.directAnswer || outcome.lifecycle ? '' : (decision.finalMessage || decision.clarification || '')), 'blocked', outcome.error);

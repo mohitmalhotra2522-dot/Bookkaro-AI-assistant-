@@ -113,6 +113,11 @@ export function mockSpokenResponse(i: SpokenResponseInput): string | null {
   const q = en && i.pendingQuestion ? (EN_Q[String((s as any).pendingInteraction?.type || '')] || i.pendingQuestion) : i.pendingQuestion;
 
   if (i.error && SAFETY_CODES.has(i.error.code)) return null;
+  // Prompt 22 — a fresh journey the backend just started (nothing else said yet): one natural question
+  const newJourney = i.appliedActions.includes('NEW_JOURNEY_STARTED');
+  if (newJourney && !i.toolResults.length && !s.origin && !s.destination) {
+    return en ? 'Sure, a new booking. Where are you travelling from and to?' : pick(['Bilkul, nayi booking. Kahan se kahan jaana hai?', 'Theek hai, naye safar ki baat karte hain. Kahan se kahan jaana hai?'], seed);
+  }
 
   // Part 36 — provider failure: honest, short; retry offered because these are read-only lookups (safe to repeat)
   if (failed.length && !ok.some(r => r.toolName !== 'SEARCH_TRAINS')) {
@@ -168,7 +173,7 @@ export function mockSpokenResponse(i: SpokenResponseInput): string | null {
     const lead = corrected && dw ? `Achha, ${dw}. ` : '';
     const t: any = s.selectedTrain;
     // Part 38 — the previously chosen train is NOT in the fresh list: say so plainly (never carry it over)
-    const dropped = i.selectedTrainBefore && !t ? (en ? `${i.selectedTrainBefore} isn't in the new list. ` : `${i.selectedTrainBefore} ${dw || 'nayi date'} ki list mein nahi hai. `) : '';
+    const dropped = i.selectedTrainBefore && !t && !newJourney ? (en ? `${i.selectedTrainBefore} isn't in the new list. ` : `${i.selectedTrainBefore} ${dw || 'nayi date'} ki list mein nahi hai. `) : '';
     // Part 38 — carry-over: the same train was re-derived from the NEW results
     if (t && i.selectedTrainBefore && t.number === i.selectedTrainBefore) {
       const keep = `${when} ke liye fresh trains dekh li — ${t.number} ismein bhi hai, toh wahi rakhi hai.`;

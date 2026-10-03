@@ -336,7 +336,7 @@ function sseBody(chunks: string[]) {
 }
 
 describe('P21 G2 — OpenAI-compatible provider + env factory', () => {
-  it('[13] streams spoken deltas (SSE); decision JSON → approved tools only; HTTP failure → deterministic fallback; key never leaks', async () => {
+  it('[13] streams spoken deltas (SSE); decision JSON → approved tools only; HTTP failure → normalized error (no hidden fallback); key never leaks', async () => {
     const KEY = 'sk-test-SECRET-123';
     const seen: any[] = [];
     let mode: 'sse' | 'json' | 'fail' = 'sse';
@@ -346,7 +346,7 @@ describe('P21 G2 — OpenAI-compatible provider + env factory', () => {
       if (mode === 'json') return { ok: true, status: 200, text: async () => '', json: async () => ({ choices: [{ message: { content: JSON.stringify({ intent: 'SEARCH_TRAINS', action: 'SEARCH_TRAINS', entities: { dateRaw: 'kal' }, confidence: 0.9, acknowledgement: 'Ek second, trains dekh raha hoon.', toolCalls: [{ name: 'SEARCH_TRAINS', arguments: { origin: 'ASR' } }, { name: 'BOOK_TICKET_NOW', arguments: {} }] }) } }] }) };
       return { ok: true, status: 200, text: async () => '', json: async () => ({}), body: sseBody(['data: {"choices":[{"delta":{"content":"Kal ke liye "}}]}\n', 'data: {"choices":[{"delta":{"content":"3 trainein mili hain."}}]}\n\ndata: [DONE]\n']) };
     };
-    const p = new OpenAICompatibleLLMProvider({ apiKey: KEY, baseUrl: 'https://llm.example.test/v1/', model: 'test-model', timeoutMs: 2000, fallback: new MockLLMProvider(), fetch: f as any });
+    const p = new OpenAICompatibleLLMProvider({ apiKey: KEY, baseUrl: 'https://llm.example.test/v1/', model: 'test-model', timeoutMs: 2000, fetch: f as any });
     const state = new ConversationStateManager();
     const s: any = state.createSession();
     const deltas: string[] = [];
@@ -361,11 +361,11 @@ describe('P21 G2 — OpenAI-compatible provider + env factory', () => {
     expect(d.toolCalls.map(t => t.name)).toEqual(['SEARCH_TRAINS']);  // unknown tool dropped (validators run downstream)
     expect(d.acknowledgement).toBe('Ek second, trains dekh raha hoon.');
     mode = 'fail';
-    const fb = await p.generateStructuredDecision(input);
-    expect(fb.decision).toBeTruthy();
-    expect(p.fallbackDecisions).toBe(1);
+    const fb = await p.generateStructuredDecision(input).catch((e: any) => e);
+    expect(fb).toMatchObject({ name: 'LLMProviderError', code: 'LLM_HTTP_ERROR', status: 503 });   // Prompt 22: never a silent mock decision
+    expect(p.failedDecisions).toBe(1);
     const err = await p.generateSpokenResponse({ ...(input as any), language: 'HINGLISH', backendReply: 'x', toolResults: [], appliedActions: [], changes: [], error: null, pendingQuestion: null, pendingQuestionCode: null, stateBefore: s.bookingState, reviewVersionBefore: null, selectedTrainBefore: null, selectedClassBefore: null, passengersCountBefore: null }).catch((e: any) => e);
-    expect(String(err?.message)).toBe('LLM_HTTP_503');
+    expect(String(err?.message)).toBe('LLM_HTTP_ERROR:503');
     expect(String(err?.message)).not.toContain(KEY);
     expect(fetchSpy).not.toHaveBeenCalled();                            // only the injected fetch was used
   });
