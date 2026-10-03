@@ -25,6 +25,10 @@ export interface RailwayToolMetadata {
   description: string;
   capability: ToolCapability;
   inputSchema: { fields: Record<string, ToolParam>; required: string[]; additionalProperties: false };
+  /** Required input fields (mirror of inputSchema.required — missing ⇒ ask the user, never call the provider). */
+  requiredFields: readonly string[];
+  /** Shape of the NormalizedRailwayResult returned to the LLM (provider-specific shapes never reach it). */
+  outputSchema: ToolOutputSchema;
   freshnessPolicy: FreshnessPolicy;
   /** States in which the tool may run ('ANY' = read-only lookup, valid everywhere). */
   allowedStates: 'ANY' | BookingState[];
@@ -37,6 +41,22 @@ export interface RailwayToolMetadata {
   /** True when the tool needs a resolved train (dependency ordering for parallel execution). */
   dependsOnSelection: boolean;
 }
+
+/** Normalized result contract per tool (Part 1 / Part 18). Every result also carries LLMToolResult metadata:
+ *  toolExecutionId, status, fresh, fetchedAt, provider, requestId. */
+export interface ToolOutputSchema { resultType: string; fields: readonly string[]; source: 'RAILWAY_PROVIDER' | 'NONE' }
+const OUT = (resultType: string, fields: string[]): ToolOutputSchema => Object.freeze({ resultType, fields: Object.freeze(fields), source: 'RAILWAY_PROVIDER' as const });
+export const TOOL_OUTPUT_SCHEMAS: Readonly<Record<RailwayToolName, ToolOutputSchema>> = Object.freeze({
+  SEARCH_TRAINS: OUT('NormalizedTrainSearchResult', ['resultId', 'origin', 'destination', 'date', 'trains[]{trainNumber,trainName,departure,arrival,duration,classes[]}']),
+  GET_TRAIN_INFO: OUT('NormalizedTrainInfo', ['trainNumber', 'trainName', 'origin', 'destination', 'runningDays', 'classes[]']),
+  GET_TIMETABLE: OUT('NormalizedTimetable', ['trainNumber', 'stops[]{stationCode,arrival,departure,day}']),
+  CHECK_AVAILABILITY: OUT('NormalizedAvailability', ['trainNumber', 'travelClass', 'date', 'status', 'count']),
+  GET_FARE: OUT('NormalizedFare', ['trainNumber', 'travelClass', 'passengersCount', 'perPassenger', 'total', 'currency']),
+  TRACK_TRAIN: OUT('NormalizedLiveStatus', ['trainNumber', 'currentStatus', 'currentStationCode', 'delayMinutes']),
+  CHECK_PNR: OUT('NormalizedPnrStatus', ['pnr(masked in logs)', 'status', 'chartStatus', 'passengers[]{number,bookingStatus,currentStatus}']),
+  GET_CANCELLED_TRAINS: OUT('NormalizedCancelledTrains', ['date', 'trains[]{trainNumber,trainName,cancellationType}']),
+  GENERAL_RAILWAY_ANSWER: Object.freeze({ resultType: 'NotApplicable', fields: Object.freeze([]), source: 'NONE' as const })
+});
 
 const schemaOf = (d: ToolDefinition | undefined): RailwayToolMetadata['inputSchema'] => ({
   fields: { ...(d?.parameters || {}) },
@@ -60,7 +80,8 @@ const entries: RailwayToolMetadata[] = [
   const d = def(e.name);
   return Object.freeze({
     name: e.name, description: d?.description || '', capability: e.capability,
-    inputSchema: schemaOf(d), freshnessPolicy: 'ALWAYS_FRESH' as const,
+    inputSchema: schemaOf(d), requiredFields: Object.freeze(schemaOf(d).required), outputSchema: TOOL_OUTPUT_SCHEMAS[e.name as RailwayToolName],
+    freshnessPolicy: 'ALWAYS_FRESH' as const,
     allowedStates: e.allowedStates || 'ANY', providerRoute: e.providerRoute,
     enabled: true, llmCallable: true, implemented: !!d, dependsOnSelection: e.dependsOnSelection
   });
@@ -70,12 +91,12 @@ const entries: RailwayToolMetadata[] = [
 // and a "general answer" is not a live-data tool. Both answer TOOL_NOT_IMPLEMENTED — never fake data.
 entries.push(Object.freeze({
   name: 'GET_CANCELLED_TRAINS', description: 'Cancelled trains from the railway provider (not available in Phase 1).',
-  capability: 'CANCELLED_TRAINS', inputSchema: { fields: {}, required: [], additionalProperties: false },
+  capability: 'CANCELLED_TRAINS', inputSchema: { fields: {}, required: [], additionalProperties: false }, requiredFields: [], outputSchema: TOOL_OUTPUT_SCHEMAS.GET_CANCELLED_TRAINS,
   freshnessPolicy: 'ALWAYS_FRESH', allowedStates: 'ANY', providerRoute: 'NONE', enabled: false, llmCallable: false, implemented: false, dependsOnSelection: false
 }) as RailwayToolMetadata);
 entries.push(Object.freeze({
   name: 'GENERAL_RAILWAY_ANSWER', description: 'General railway guidance only — never live trains, timings, availability, fare, PNR or status.',
-  capability: 'GENERAL_INFO', inputSchema: { fields: {}, required: [], additionalProperties: false },
+  capability: 'GENERAL_INFO', inputSchema: { fields: {}, required: [], additionalProperties: false }, requiredFields: [], outputSchema: TOOL_OUTPUT_SCHEMAS.GENERAL_RAILWAY_ANSWER,
   freshnessPolicy: 'NOT_APPLICABLE', allowedStates: 'ANY', providerRoute: 'NONE', enabled: false, llmCallable: false, implemented: false, dependsOnSelection: false
 }) as RailwayToolMetadata);
 
