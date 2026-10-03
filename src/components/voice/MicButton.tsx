@@ -6,9 +6,19 @@ interface Props {
   onStart: () => void;
   onStop: () => void;
   transcript: string;
+  /** Prompt 21: opt-in hands-free conversation mode (visible; one tap turns it off). */
+  conversationMode?: boolean;
+  onToggleConversationMode?: (on: boolean) => void;
+  agentState?: string;
+  /** TTS unavailable / failed → replies are shown as text only. */
+  textFallback?: boolean;
 }
 
-export const MicButton: React.FC<Props> = ({ isRecording, isSupported, onStart, onStop, transcript }) => {
+const STATE_LABEL: Record<string, string> = {
+  LISTENING: 'Sun raha hoon…', USER_SPEAKING: 'Sun raha hoon…', PROCESSING: 'Soch raha hoon…', SPEAKING: 'Bol raha hoon — beech mein bol sakte hain', INTERRUPTED: 'Ruk gaya — boliye'
+};
+
+export const MicButton: React.FC<Props> = ({ isRecording, isSupported, onStart, onStop, transcript, conversationMode, onToggleConversationMode, agentState, textFallback }) => {
   if (!isSupported) {
     return (
       <div style={{ padding: '12px 16px', color: '#9e9e9e', fontSize: 12, textAlign: 'center' }}>
@@ -38,8 +48,18 @@ export const MicButton: React.FC<Props> = ({ isRecording, isSupported, onStart, 
         }}
       >
         <span style={{ fontSize: 20 }}>{isRecording ? '⏹️' : '🎙️'}</span>
-        {isRecording ? 'Stop Recording' : 'Talk to AI'}
+        {isRecording ? (conversationMode ? 'Stop conversation' : 'Stop Recording') : 'Talk to AI'}
       </button>
+      {onToggleConversationMode && (
+        <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12, color: '#616161' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input type="checkbox" checked={!!conversationMode} onChange={(e) => onToggleConversationMode(e.target.checked)} />
+            Conversation mode {conversationMode ? '(mic on — interrupt anytime)' : '(off — tap to talk)'}
+          </label>
+          {agentState && STATE_LABEL[agentState] && <span style={{ fontStyle: 'italic' }}>{STATE_LABEL[agentState]}</span>}
+        </div>
+      )}
+      {textFallback && <div style={{ marginTop: 4, fontSize: 11, color: '#9e9e9e' }}>Voice output unavailable — replies are shown as text.</div>}
       {isRecording && transcript && (
         <div
           style={{

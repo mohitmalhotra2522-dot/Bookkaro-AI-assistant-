@@ -104,7 +104,7 @@ export interface RuntimeHooks {
 
 /** Prompt 18: loop observer — status / streaming only; it can never change the loop or the session. */
 export interface TurnLoopObserver extends ToolObserver {
-  onLLM?: (phase: 'start' | 'end', round: number, info?: { toolCalls: number; final: boolean }) => void;
+  onLLM?: (phase: 'start' | 'end', round: number, info?: { toolCalls: number; final: boolean; acknowledgement?: string }) => void;
 }
 
 function stableJson(v: any): string {
@@ -279,7 +279,8 @@ export class BoundToolRuntime {
       })).decision;
       llmLatencyMs += Date.now() - t0;
       lastDecision = decision;
-      safeObs(() => H.observer?.onLLM?.('end', iter, { toolCalls: (decision.toolCalls || []).length, final: !(decision.toolCalls || []).length }));
+      safeObs(() => H.observer?.onLLM?.('end', iter, { toolCalls: (decision.toolCalls || []).length, final: !(decision.toolCalls || []).length,
+        ...(typeof decision.acknowledgement === 'string' && decision.acknowledgement ? { acknowledgement: decision.acknowledgement.slice(0, 160) } : {}) }));
       if (H.isStale?.()) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Obsolete request stopped.' });
 
       // Deterministically apply this decision's entities/references BEFORE its tool calls.

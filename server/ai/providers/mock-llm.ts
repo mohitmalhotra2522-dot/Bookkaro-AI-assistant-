@@ -1,6 +1,7 @@
 import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { classifyLifecycleIntent } from '../../booking/lifecycle-actions/lifecycle-action-intent';
-import type { LLMProvider, LLMTurnInput, LLMTurnResult, TurnToolResultView } from './llm-provider';
+import type { LLMProvider, LLMTurnInput, LLMTurnResult, TurnToolResultView, SpokenResponseInput, SpokenResponseResult } from './llm-provider';
+import { mockAcknowledgement, mockSpokenResponse } from './mock-natural-voice';
 import type { AgentDecision, TrainReference, InfoRequest, ResultRefinement, ExtractedEntities, PassengerRef, PassengerUpdateRaw } from '../decisions/agent-decision';
 import type { ToolCall, RegisteredToolName } from '../tools/tool-registry';
 import { BookingState } from '@shared/states';
@@ -106,7 +107,22 @@ export class MockLLMProvider implements LLMProvider {
   async init(_config: any): Promise<void> {}
 
   async generateStructuredDecision(input: LLMTurnInput): Promise<LLMTurnResult> {
-    return { decision: this.decide(input) };
+    const decision = this.decide(input);
+    // Prompt 21 (Part 3): a short, fact-free acknowledgement while the requested tool runs (first round only)
+    if (decision.toolCalls?.length && !(input.currentTurnToolResults || []).length) {
+      const ack = mockAcknowledgement(decision, input);
+      if (ack) decision.acknowledgement = ack;
+    }
+    return { decision };
+  }
+
+  /** Prompt 21 (Parts 2, 16, 17): natural spoken reply from the authoritative post-turn facts only. */
+  async generateSpokenResponse(input: SpokenResponseInput): Promise<SpokenResponseResult | null> {
+    const text = mockSpokenResponse(input);
+    if (!text) return null;
+    // simulated token streaming (word deltas) so the streaming path is exercised offline
+    if (input.onDelta) for (const w of text.match(/\S+\s*/g) || []) input.onDelta(w);
+    return { text };
   }
 
   // ------------------------------------------------------------------ main

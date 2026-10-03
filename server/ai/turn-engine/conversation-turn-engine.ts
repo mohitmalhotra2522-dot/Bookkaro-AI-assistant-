@@ -27,6 +27,9 @@ import {
 import type { ToolExecutionRecord } from '@shared/railway-tool-runtime';
 import { TurnEventBus } from './turn-event-bus';
 import { toolProgressText, voiceAcknowledgement } from './progress-messages';
+import { normalizeTranscript } from '@shared/voice/stt-normalizer';
+import { validateAcknowledgement, type ResponsePriority } from '@shared/voice/voice-response-policy';
+import type { VoiceTurnOutcome } from '@shared/voice/conversational-voice-agent';
 import { pendingQuestionCode } from './pending-question';
 import { syncJourneyVersion } from '../tool-runtime/journey-version';
 import { maskPnrsInText } from '../../booking/post-booking/pnr-validator';
@@ -47,7 +50,16 @@ export interface EngineTurnResult extends AgentTurnResult {
   turnEvents: TurnEvent[];
   /** false → the client must not display / speak this response (Part 31). */
   presentable: boolean;
+  /** Prompt 21 (Parts 31/32): the voice view of the SAME logical result (TEXT and VOICE share it). */
+  voice: VoiceTurnOutcome;
 }
+
+export interface TurnEngineOptions {
+  /** Prompt 21 (Part 35): one fact-free status update if a tool runs longer than this (VOICE). Default 5000ms. */
+  longWaitMs?: number;
+}
+
+const LONG_WAIT_STATUS = 'Thoda time lag raha hai, bas ek moment.';
 
 export interface EngineTurnOptions extends Omit<ProcessTurnOptions, 'turnId' | 'observer'> {
   /** Voice barge-in: the user started speaking while TTS was playing (stop + mark INTERRUPTED). */
@@ -60,7 +72,7 @@ export class ConversationTurnEngine {
   private seq = new Map<string, number>();
   private deliveries = new Map<string, Map<string, Promise<EngineTurnResult>>>();
 
-  constructor(readonly orchestrator: ConversationAgentOrchestrator, private readonly state: ConversationStateManager) {}
+  constructor(readonly orchestrator: ConversationAgentOrchestrator, private readonly state: ConversationStateManager, private readonly options: TurnEngineOptions = {}) {}
 
   // ------------------------------------------------------------------ public API
 
@@ -147,6 +159,9 @@ export class ConversationTurnEngine {
     const sequence = (this.seq.get(sid) || 0) + 1;
     this.seq.set(sid, sequence);
     const sensitive = containsSensitiveRequest(userText);
+    // Prompt 21 (Part 4): STT cleanup for VOICE only (fillers, spoken digits, class names, repeated words)
+    const stt = mode === 'VOICE' && !sensitive ? normalizeTranscript(userText) : null;
+    const inputText = stt && stt.text ? stt.text : userText;
     const safeText = sensitive ? '[REDACTED SENSITIVE INPUT]' : maskPnrsInText(String(userText || '').slice(0, 500));
     const turn: ConversationTurn = {
       sessionId: sid, turnId: `turn_${uuid()}`, sequence, userInput: safeText, normalizedInput: '', inputMode: mode,
@@ -164,18 +179,28 @@ export class ConversationTurnEngine {
     this.emit(turn, 'TURN_STARTED', { mode });
 
     this.setStatus(turn, 'NORMALIZING');
-    turn.normalizedInput = sensitive ? safeText : maskPnrsInText(normalizeInput(userText));
+    turn.normalizedInput = sensitive ? safeText : maskPnrsInText(normalizeInput(inputText));
 
     // ---- observer: LLM rounds + tool lifecycle → status + streaming events (never mutates state) ----
     const running = new Map<string, string>();      // toolExecutionId → tool
     const records: ToolExecutionRecord[] = [];
     (turn as any)._records = records;
     let ackSpoken = false;
-    const progress = (text: string, speechText?: string) => {
+    let llmAck: string | null = null;
+    let ackSource: 'LLM' | 'DEFAULT' | null = null;
+    let longTimer: ReturnType<typeof setTimeout> | undefined;
+    let statusSent = false;
+    const progress = (text: string, speechText?: string, kind: 'ACK' | 'STATUS' = 'ACK') => {
       const r: AssistantTurnResponse = { type: 'TOOL_PROGRESS', text, ...(speechText ? { speechText } : {}), turnId: turn.turnId, sequence: turn.sequence };
       turn.progress.push(r);
-      this.emit(turn, 'TOOL_PROGRESS', { text, ...(speechText ? { speechText } : {}) });
+      this.emit(turn, 'TOOL_PROGRESS', { text, ...(speechText ? { speechText, kind } : {}) });
     };
+    // Part 3 — the LLM's acknowledgement is spoken only if it is fact-free (no result / fare / time / unknown number)
+    const knownTrains = (): string[] => {
+      const sx: any = this.state.getSession(sid);
+      return [sx.selectedTrain?.number, ...((sx.searchResults?.trains || []) as any[]).map((t: any) => t.trainNumber), ...(String(inputText).match(/\b\d{5}\b/g) || [])].filter(Boolean).map(String);
+    };
+    const isCurrentTurn = () => (this.seq.get(sid) || 0) === turn.sequence && !turn.interrupted;
     const observer: NonNullable<ProcessTurnOptions['observer']> = {
       onLLM: (phase, round, info) => {
         if (phase === 'start') {
@@ -183,6 +208,7 @@ export class ConversationTurnEngine {
           this.emit(turn, round === 0 ? 'LLM_THINKING' : 'LLM_CONTINUING', { round });
         } else {
           this.emit(turn, 'LLM_RESPONSE', { round, toolCalls: info?.toolCalls ?? 0, final: !!info?.final });
+          if (mode === 'VOICE' && !llmAck && info?.toolCalls && info.acknowledgement && validateAcknowledgement(info.acknowledgement, { trainNumbers: knownTrains() }).ok) llmAck = info.acknowledgement;
           if (info?.toolCalls) this.setStatus(turn, 'TOOL_CALLING');
         }
       },
@@ -196,7 +222,16 @@ export class ConversationTurnEngine {
             this.setStatus(turn, 'WAITING_FOR_TOOL');
             this.emit(turn, 'TOOL_STARTED', base);
             const text = toolProgressText([...running.values()]);
-            if (mode === 'VOICE' && !ackSpoken) { ackSpoken = true; progress(text, voiceAcknowledgement(rec.tool)); }
+            if (mode === 'VOICE' && !ackSpoken) {
+              // Part 35 — ONE acknowledgement, then silence (an optional single status update if it runs long)
+              ackSpoken = true;
+              ackSource = llmAck ? 'LLM' : 'DEFAULT';
+              progress(text, llmAck || voiceAcknowledgement(rec.tool));
+              const wait = this.options.longWaitMs ?? 5000;
+              if (wait > 0) longTimer = setTimeout(() => {
+                if (!statusSent && running.size && isCurrentTurn()) { statusSent = true; progress(toolProgressText([...running.values()]), LONG_WAIT_STATUS, 'STATUS'); }
+              }, wait);
+            }
             else progress(text);
             break;
           }
@@ -220,14 +255,24 @@ export class ConversationTurnEngine {
 
     let r: AgentTurnResult;
     try {
-      r = await this.orchestrator.processTurn(sid, userText, mode, { ...opts, turnId: turn.turnId, observer });
+      r = await this.orchestrator.processTurn(sid, inputText, mode, {
+        ...opts, turnId: turn.turnId, observer,
+        // Part 14 — grounded sentences stream out as SPEECH_SEGMENT events (current turn only)
+        onSpeechSegment: (index, text) => {
+          if (mode !== 'VOICE' || !isCurrentTurn()) return;
+          this.emit(turn, 'SPEECH_SEGMENT', { index, text: maskPnrsInText(text) });
+          try { opts.onSpeechSegment?.(index, text); } catch { /* observer only */ }
+        }
+      });
     } catch (e) {
+      if (longTimer) clearTimeout(longTimer);
       turn.errorCode = 'TURN_FAILED';
       this.finalize(turn, 'FAILED', t0);
       this.emit(turn, 'TURN_COMPLETED', { status: 'FAILED' });
       throw e;
     }
 
+    if (longTimer) clearTimeout(longTimer);
     // ---- superseded / relevance check (Parts 30, 31) ----
     const sNow = this.state.getSession(sid);
     const jvNow = syncJourneyVersion(sNow);
@@ -276,7 +321,20 @@ export class ConversationTurnEngine {
       sequence: turn.sequence, turnStatus: turn.status, llmLatencyMs: turn.llmLatencyMs, toolCount: turn.toolCount,
       toolExecutionIds: turn.toolExecutionIds, totalTurnLatencyMs: turn.totalTurnLatencyMs, finalResponseType: turn.finalResponseType,
       groundingStatus: turn.groundingStatus, superseded: turn.superseded, interrupted: turn.interrupted, errorCode: turn.errorCode,
-      journeyVersion: turn.journeyVersion, journeyVersionAfter: turn.journeyVersionAfter, presentation: turn.presentation
+      journeyVersion: turn.journeyVersion, journeyVersionAfter: turn.journeyVersionAfter, presentation: turn.presentation,
+      // Prompt 21: voice observability (no transcript text)
+      ...(mode === 'VOICE' ? { sttNormalization: stt?.applied || [], acknowledgementSource: ackSource, statusUpdate: statusSent, speechSource: r.speech?.source ?? null } : {})
+    };
+    // Part 33 — priority of THIS response: barge-in > correction / "ruko" > normal
+    const priority: ResponsePriority = opts.interruptPrevious ? 'INTERRUPT'
+      : (r.turnLog.interruption || (r.turnLog.contextChanges || []).some(c => c.kind === 'CORRECTION')) ? 'HIGH' : 'NORMAL';
+    const speechText = response ? (response.speechText || response.text) : '';
+    const voice: VoiceTurnOutcome = {
+      sessionId: sid, turnId: turn.turnId, sequence: turn.sequence, journeyVersion: jvNow, presentable: !!response,
+      assistantText: response ? response.text : '', speechText,
+      segments: response ? (r.speech?.segments?.length ? r.speech.segments.map(maskPnrsInText) : []) : [],
+      shouldSpeak: mode === 'VOICE' && !!response && !!speechText, interruptible: true, responsePriority: priority,
+      state: sNow.bookingState, requiresTool: recs.length > 0, error: r.error ? { code: r.error.code, message: r.error.message } : null
     };
     const publicTurn = this.publicTurn(turn);
     return {
@@ -286,7 +344,8 @@ export class ConversationTurnEngine {
       assistantTurnResponse: response,
       progress: [...turn.progress],
       turnEvents: this.events.forTurn(sid, turn.turnId),
-      presentable: !!response
+      presentable: !!response,
+      voice
     };
   }
 

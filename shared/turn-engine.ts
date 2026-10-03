@@ -74,7 +74,9 @@ export interface AssistantTurnResponse {
 export const TURN_EVENT_TYPES = [
   'TURN_STARTED', 'LLM_THINKING', 'LLM_RESPONSE', 'TOOL_REQUESTED', 'TOOL_STARTED', 'TOOL_PROGRESS',
   'TOOL_COMPLETED', 'TOOL_FAILED', 'TOOL_RETRY', 'LLM_CONTINUING', 'ASSISTANT_RESPONSE', 'TURN_COMPLETED',
-  'TURN_STATUS', 'TURN_INTERRUPTED', 'TURN_SUPERSEDED', 'PRESENTATION_INTERRUPTED'
+  'TURN_STATUS', 'TURN_INTERRUPTED', 'TURN_SUPERSEDED', 'PRESENTATION_INTERRUPTED',
+  // Prompt 21: grounded natural-response sentence ready for streaming TTS (index-ordered, current turn only)
+  'SPEECH_SEGMENT'
 ] as const;
 export type TurnEventType = typeof TURN_EVENT_TYPES[number];
 

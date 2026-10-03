@@ -3,7 +3,7 @@ import { preparationErrorTypeOf } from '@shared/booking-preparation';
 import { parseReconciliationConfig } from './booking/lifecycle/reconciliation-config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import { MockLLMProvider } from './ai/providers/mock-llm';
+import { createLLMProvider } from './ai/providers/llm-provider-factory';
 import { ConversationStateManager } from './ai/state/conversation-state';
 import { RailwayToolService } from './railway/tools/railway-tool-service';
 import { ConversationAgentOrchestrator } from './ai/agent/conversation-agent-orchestrator';
@@ -20,8 +20,11 @@ import { createProductionBookingProviderRegistry } from './booking/provider/book
 import { bookingExecutionView } from './booking/provider/booking-provider-execution-service';
 import { ConversationTurnEngine } from './ai/turn-engine/conversation-turn-engine';
 
-// Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider)
-const llmProvider = new MockLLMProvider();
+// Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
+// Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
+// incomplete config falls back to the mock. The key is never logged or sent to the client.
+const llmSelection = createLLMProvider(process.env);
+const llmProvider = llmSelection.provider;
 const stateManager = new ConversationStateManager();
 const railwayTools = new RailwayToolService();
 // Booking execution boundary (Prompt 10): server-side env only, parsed FAIL-CLOSED.
@@ -122,6 +125,8 @@ server.post('/api/chat', async (request, reply) => {
     assistantTurnResponse: result.assistantTurnResponse,
     progress: result.progress,
     presentable: result.presentable,
+    // Prompt 21 (Part 32): voice view of the same logical turn (shouldSpeak / interruptible / priority / segments)
+    voice: result.voice,
     lastEventSeq: turnEngine.events.lastSeq(sessionId)
   });
 });
@@ -267,6 +272,7 @@ server.get('/api/health', async (_, reply) => {
     provider: railwayRegistry.getActiveId(),
     providerLabel: railwayRegistry.getActive().label,
     orchestrator: 'ConversationTurnEngine + ConversationAgentOrchestrator (Prompt 18 conversation loop)',
+    llm: llmSelection.info,
     executionCapability: executionCapability(),
     executorCapability: executorCapability(),
     // static capability only — no live health check, never reported "healthy" without one
@@ -278,6 +284,6 @@ const PORT = 3000;
 await server.listen({ port: PORT, host: '0.0.0.0' });
 console.log(`Railway AI Assistant server running on http://localhost:${PORT}`);
 console.log(`Active railway provider: ${railwayRegistry.getActiveId()} (${railwayRegistry.getActive().label})`);
-console.log(`Active LLM provider: mock-llm (deterministic tool-calling agent)`);
+console.log(`Active LLM provider: ${llmSelection.info.providerId}${llmSelection.info.model ? ` (${llmSelection.info.model})` : ''} — ${llmSelection.info.reason}`);
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

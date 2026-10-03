@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useChatStore } from '../state/chatStore';
 import { createSession, sendMessage, executeBooking, reconcileBooking, fetchTurnEvents, interruptTurn, resumeSession } from '../lib/api';
 import { reduceTurnEvent, EMPTY_TURN_VIEW, type TurnStreamView } from '@shared/turn-engine';
-import { useVoice } from '../voice/useVoice';
+import { useConversationalVoice } from '../voice/useConversationalVoice';
+import { turnEventToVoiceEvent } from '@shared/voice/voice-events';
+import type { TurnProcessor, VoiceTurnEvent, VoiceTurnOutcome } from '@shared/voice/conversational-voice-agent';
 import { MessageBubble } from '../components/chat/MessageBubble';
 import { MicButton } from '../components/voice/MicButton';
 import { TrainCard, SearchStatus, ProviderErrorCard } from '../components/trains/TrainCard';
@@ -30,7 +32,6 @@ const App: React.FC = () => {
   const [lastInputMode, setLastInputMode] = useState<'TEXT' | 'VOICE'>('TEXT');
   const [meta, setMeta] = useState<InspectorMeta>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const voice = useVoice();
   // Prompt 18: last streamed event seq (ordered; duplicates / out-of-order events ignored by the reducer)
   const turnViewRef = useRef<TurnStreamView>(EMPTY_TURN_VIEW);
   // Prompt 18: bumped on every mic tap (barge-in) — a reply that arrives after it is shown but never spoken
@@ -60,15 +61,18 @@ const App: React.FC = () => {
   }, [messages]);
 
   const send = useCallback(
-    async (text: string, mode: 'TEXT' | 'VOICE', extra: { searchResultsVersion?: number; reviewVersion?: number; bargeIn?: boolean } = {}) => {
-      if (!text.trim() || !sessionId || isLoading) return;
+    async (text: string, mode: 'TEXT' | 'VOICE', extra: { searchResultsVersion?: number; reviewVersion?: number; bargeIn?: boolean } = {},
+      voiceTurn?: { onEvent: (e: VoiceTurnEvent) => void }): Promise<any> => {
+      // Prompt 21: a voice barge-in may start a new turn while the previous request is still in flight
+      if (!text.trim() || !sessionId || (isLoading && !extra.bargeIn)) return;
       addMessage({ id: `u-${Date.now()}`, role: 'user', content: text.trim(), timestamp: Date.now(), inputMode: mode });
       setInputText('');
       setLoading(true);
       setToolActivity(null);
       setLastInputMode(mode);
-      // Prompt 18: honest progress from real tool events (no percentages); voice speaks a short ack only
-      let acked = false;
+      // Prompt 18: honest progress from real tool events (no percentages). Prompt 21: in VOICE the shared
+      // ConversationalVoiceAgent speaks (one ack, streamed grounded sentences) — this function only transports.
+      let myTurn: string | null = null;
       let polling = true;
       const speechGen = speechGenRef.current;
       const maySpeak = () => mode === 'VOICE' && speechGen === speechGenRef.current;
@@ -77,7 +81,11 @@ const App: React.FC = () => {
           const r = await fetchTurnEvents(sessionId, turnViewRef.current.lastSeq).catch(() => null);
           for (const ev of r?.events || []) {
             turnViewRef.current = reduceTurnEvent(turnViewRef.current, ev);
-            if (maySpeak() && !acked && ev.type === 'TOOL_PROGRESS' && ev.data?.speechText) { acked = true; voice.speak(String(ev.data.speechText)); }
+            if (voiceTurn) {
+              if (!myTurn && ev.type === 'TURN_STARTED') myTurn = ev.turnId;
+              const v = ev.turnId === myTurn ? turnEventToVoiceEvent(ev) : null;
+              if (v) voiceTurn.onEvent(v);
+            }
           }
           if (polling && turnViewRef.current.progressText) setToolActivity(turnViewRef.current.progressText);
           await new Promise((res) => setTimeout(res, 350));
@@ -89,7 +97,7 @@ const App: React.FC = () => {
         polling = false;
         if (typeof resp.lastEventSeq === 'number' && resp.lastEventSeq > turnViewRef.current.lastSeq) turnViewRef.current = { ...turnViewRef.current, lastSeq: resp.lastEventSeq };
         // A response from an obsolete / superseded request must never be shown or spoken.
-        if (resp.stale || resp.presentable === false) return;
+        if (resp.stale || resp.presentable === false) return resp;
         if (resp.sessionId && resp.sessionId !== sessionId) setSessionId(resp.sessionId);
         setMeta({
           state: resp.state, pendingType: resp.pendingInteraction?.type, pendingQuestion: resp.pendingQuestion,
@@ -112,10 +120,8 @@ const App: React.FC = () => {
         addMessage({ id: `a-${Date.now()}`, role: 'assistant', content: resp.message, timestamp: Date.now() });
         setContext(resp.context);
         resp.cards.forEach((card: any) => addCard(card));
-        if (maySpeak()) {
-          // Prompt 16: concise validated speechText (same facts as the text reply); falls back to the text
-          voice.speak(resp.assistantResponse?.speechText || resp.message);
-        }
+        void maySpeak;   // Prompt 21: speech is owned by the voice agent (current turn only)
+        return resp;
       } catch (e: any) {
         setError(e.message || 'कुछ गलत हुआ।');
       } finally {
@@ -124,7 +130,7 @@ const App: React.FC = () => {
         setToolActivity(null);
       }
     },
-    [sessionId, isLoading, addMessage, setLoading, setToolActivity, setContext, addCard, voice, setError, setSessionId]
+    [sessionId, isLoading, addMessage, setLoading, setToolActivity, setContext, addCard, setError, setSessionId]
   );
 
   /** Explicit, user-initiated execution request (gateway → provider registry). Disabled provider in this build. */
@@ -151,22 +157,26 @@ const App: React.FC = () => {
     }
   }, [sessionId, addMessage, addCard, setError]);
 
-  const handleMicStart = useCallback(() => {
-    // Prompt 18: tapping the mic while TTS plays = barge-in → stop speech, mark the presentation INTERRUPTED,
-    // then the new STT transcript is a NEW turn in the SAME session
-    const bargeIn = voice.isSpeaking() || isLoading;
+  // Prompt 21: the shared ConversationalVoiceAgent — HTTP turn processor (same /api/chat pipeline as text)
+  const voiceProcess: TurnProcessor = useCallback(async (text, x) => {
     speechGenRef.current += 1;
-    voice.cancelSpeak();
-    if (bargeIn && sessionId) void interruptTurn(sessionId, 'BARGE_IN');
-    voice.startRecording((transcript) => {
-      send(transcript, 'VOICE', bargeIn ? { bargeIn: true } : {});
-    });
-  }, [voice, send, sessionId, isLoading]);
+    const resp = await send(text, 'VOICE', x.bargeIn ? { bargeIn: true } : {}, { onEvent: x.onEvent });
+    const none: VoiceTurnOutcome = { sessionId: sessionId || '', turnId: 'none', sequence: 0, presentable: false, assistantText: '', speechText: '', segments: [], shouldSpeak: false, interruptible: true, responsePriority: 'NORMAL' };
+    return (resp && resp.voice) || none;
+  }, [send, sessionId]);
+  const conv = useConversationalVoice({
+    sessionId, processTurn: voiceProcess,
+    interruptRemote: (reason) => { if (sessionId) void interruptTurn(sessionId, reason); }
+  });
 
-  const handleMicStop = useCallback(() => voice.stopRecording(), [voice]);
+  // Tap-to-talk (default): a tap while the agent speaks / thinks is the barge-in (handled by the agent).
+  const handleMicStart = useCallback(() => conv.listen(), [conv]);
+  const handleMicStop = useCallback(() => conv.stop(), [conv]);
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    // Prompt 21: a typed message supersedes whatever the voice agent is still saying (never resumes)
+    if (conv.snapshot.state === 'SPEAKING') conv.agent.interrupt('USER_STOP');
     send(inputText, 'TEXT');
   };
 
@@ -325,21 +335,22 @@ const App: React.FC = () => {
           </div>
         )}
 
-        {voice.isRecording && voice.transcript && (
-          <div style={{ margin: '8px 16px', padding: '10px 14px', background: '#e3f2fd', borderRadius: 12, fontSize: 14, color: '#1565c0' }}>🎙️ {voice.transcript}</div>
+        {conv.snapshot.listening && conv.snapshot.partialTranscript && (
+          <div style={{ margin: '8px 16px', padding: '10px 14px', background: '#e3f2fd', borderRadius: 12, fontSize: 14, color: '#1565c0' }}>🎙️ {conv.snapshot.partialTranscript}</div>
         )}
         <div ref={messagesEndRef} />
       </div>
 
       <div style={{ borderTop: '1px solid #e0e0e0', background: '#fff', paddingBottom: 8 }}>
-        <MicButton isRecording={voice.isRecording} isSupported={voice.isSupported} onStart={handleMicStart} onStop={handleMicStop} transcript={voice.transcript} />
+        <MicButton isRecording={conv.snapshot.listening} isSupported={conv.snapshot.sttAvailable} onStart={handleMicStart} onStop={handleMicStop} transcript={conv.snapshot.partialTranscript}
+          conversationMode={conv.snapshot.conversationMode} onToggleConversationMode={conv.setConversationMode} agentState={conv.snapshot.state} textFallback={conv.snapshot.textFallback} />
         <form onSubmit={handleFormSubmit} style={{ display: 'flex', gap: 8, padding: '0 16px' }}>
           <input
             type="text"
             value={inputText}
             onChange={e => setInputText(e.target.value)}
             placeholder="Type a message..."
-            disabled={isLoading || voice.isRecording}
+            disabled={isLoading || (conv.snapshot.listening && !conv.snapshot.conversationMode)}
             style={{ flex: 1, padding: '12px 16px', borderRadius: 24, border: '1px solid #e0e0e0', fontSize: 15, outline: 'none', background: '#fafafa' }}
           />
           <button

@@ -63,6 +63,8 @@ import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { syncPreparationState, recordDependencyOutcome, bookingPreparationSummary } from '../../booking/preparation/booking-preparation';
 import { classifyAgentTurn } from '../decisions/state-actions';
 import { preparationErrorTypeOf } from '@shared/booking-preparation';
+import { naturalResponseComposer, type NaturalComposeResult } from '../response/natural-response-composer';
+import { speechOf } from '../conversation/assistant-response';
 
 export interface ProcessTurnOptions {
   /** Prompt 17: client-generated id of ONE user message. A duplicate DELIVERY (retry, reconnect,
@@ -82,6 +84,10 @@ export interface ProcessTurnOptions {
   turnId?: string;
   /** Prompt 18: turn lifecycle / streaming observer (status + events only — never mutates the session). */
   observer?: TurnLoopObserver & { onStatus?: (status: 'GENERATING_RESPONSE') => void };
+  /** Prompt 21: a grounded natural-speech sentence is ready (VOICE; streamed before the turn completes). */
+  onSpeechSegment?: (index: number, text: string) => void;
+  /** Prompt 21: disable the LLM-worded natural speech for this turn (deterministic speech only). */
+  naturalSpeech?: boolean;
 }
 
 export interface OrchestratorOptions {
@@ -100,6 +106,8 @@ export interface OrchestratorOptions {
   bookingReconciliation?: { config?: Partial<ReconciliationConfig>; sleep?: (ms: number) => Promise<void> };
   /** Prompt 11: executor ADAPTER registry (production: disabled adapter only). */
   adapterRegistry?: BookingExecutorAdapterRegistry;
+  /** Prompt 21: timeout for the LLM-worded natural spoken reply (falls back to deterministic speech). */
+  naturalSpeechTimeoutMs?: number;
   /** Prompt 11: handoff session service override (tests). */
   handoffSessionService?: BookingHandoffSessionService;
   /** Prompt 14: post-booking history store (default: in-memory, session-scoped). */
@@ -125,6 +133,8 @@ export interface AgentTurnResult {
   /** Prompt 16: structured response (text + concise validated speechText) and derived context. */
   assistantResponse: AssistantResponse;
   conversationContext: ConversationContext;
+  /** Prompt 21: VOICE speech plan (LLM-worded + grounded, or deterministic fallback). */
+  speech?: { segments: string[]; source: 'LLM' | 'FALLBACK'; language: string; fallbackReason?: string };
 }
 
 /** Prompt 16: per-turn observability extras carried to finish(). */
@@ -136,6 +146,7 @@ interface TurnExtras {
   rejectedPatches?: RejectedPatch[];
   rejectedClaims?: string[];
   backendActions?: string[];
+  naturalSpeech?: NaturalComposeResult;
 }
 
 const SENSITIVE_REPLY = 'Main kabhi password, OTP, CAPTCHA, CVV, card, UPI PIN ya IRCTC credentials nahi maangta. Kripya aisi jaankari share na karein.';
@@ -173,6 +184,7 @@ export class ConversationAgentOrchestrator {
     options: OrchestratorOptions = {}
   ) {
     this.runtime = new LLMToolCallingRuntime(llm, tools);
+    this.naturalSpeechTimeoutMs = options.naturalSpeechTimeoutMs;
     this.gateway = options.executionGateway || new BookingExecutionGateway(state, { registry: options.executorRegistry, config: options.executionConfig, clock: options.clock, providerRegistry: options.bookingProviderRegistry, providerConfig: options.bookingProviderConfig, reconciliation: options.bookingReconciliation?.config, sleep: options.bookingReconciliation?.sleep });
     // Prompt 14: BookingRecords are derived ONLY from the P13 lifecycle (single writer of execution status)
     this.postBooking = new PostBookingService(state, { store: options.bookingHistoryStore, clock: options.clock });
@@ -187,6 +199,8 @@ export class ConversationAgentOrchestrator {
       handoffSessions: options.handoffSessionService || new BookingHandoffSessionService({ registry: options.adapterRegistry, config: this.gateway.config, clock: options.clock })
     });
   }
+
+  private readonly naturalSpeechTimeoutMs?: number;
 
   getTurnHistory(sessionId: string): TurnRecord[] { return [...(this.turns.get(sessionId) || [])]; }
   getConversationHistory(sessionId: string): HistoryMsg[] { return [...(this.history.get(sessionId) || [])]; }
@@ -213,6 +227,8 @@ export class ConversationAgentOrchestrator {
     // names present at turn start (a passenger removed this turn is still redacted in its log)
     this.turnStartNames.set(sessionId, (s0.passengers || []).map(p => p.name).filter((n): n is string => !!n));
     const stateBefore = s0.bookingState;
+    // Prompt 21: primitives captured before the turn (the session object itself is live)
+    const voiceBefore = { reviewVersion: s0.review?.valid ? s0.review.reviewVersion : null, train: (s0.selectedTrain as any)?.number ?? null, cls: s0.selectedClass ?? null, count: s0.passengersCount ?? null };
     const pendingBefore = s0.pendingInteraction?.type || 'NONE';
     // Prompt 16: Input Normalizer — barge-in prefix ("Ruko, …") + explicit new-booking phrase
     const utter = normalizeUtterance(normalizeInput(userText));
@@ -456,8 +472,28 @@ export class ConversationAgentOrchestrator {
     const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
+    const turnError = blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined);
+    // ---- Prompt 21: VOICE natural wording (LLM) — every sentence grounded; deterministic speech otherwise ----
+    if (mode === 'VOICE' && opts.naturalSpeech !== false && message) {
+      try {
+        extra.naturalSpeech = await naturalResponseComposer.compose({
+          llm: this.llm, session: sess, userText: normalizedInput, backendReply: message,
+          deterministicSpeech: speechOf(message, 'VOICE', questionFor(sess.pendingInteraction, sess, 'VOICE')),
+          stateBefore, reviewVersionBefore: voiceBefore.reviewVersion, selectedTrainBefore: voiceBefore.train,
+          selectedClassBefore: voiceBefore.cls, passengersCountBefore: voiceBefore.count,
+          steps: [...rt.steps, ...(prep?.steps || [])], appliedActions: extra.backendActions || [],
+          changes: (extra.patches || []).map(p => ({ field: String(p.field), corrected: p.kind === 'CORRECTION' })),
+          error: turnError ? { code: turnError.code, message: turnError.message } : null,
+          pendingQuestionCode: pendingQuestionCode(sess.pendingInteraction),
+          pendingQuestion: pendingQuestionCode(sess.pendingInteraction) ? questionFor(sess.pendingInteraction, sess, 'VOICE') || null : null,
+          history: (this.history.get(sessionId) || []).slice(-8) as any, records: this.postBooking.store.getBookingsForSession(sessionId) as any,
+          sensitive: sensitiveInput, timeoutMs: this.naturalSpeechTimeoutMs,
+          onSegment: opts.onSpeechSegment
+        });
+      } catch { /* composition never breaks a turn: deterministic speech is used */ }
+    }
     return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-      message, error: blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined), rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
+      message, error: turnError, rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
       execution: prep?.execution || dupExecution, extra });
   }
 
@@ -597,6 +633,8 @@ export class ConversationAgentOrchestrator {
       rejectedProposals: (x.rejectedPatches || []).map(r => ({ field: r.field, code: r.code })),
       rejectedClaims: x.rejectedClaims || [],
       backendActions: x.backendActions || [],
+      // Prompt 21: speech provenance (reasons only — never the rejected sentence text / names)
+      ...(x.naturalSpeech ? { naturalSpeech: { source: x.naturalSpeech.source, language: x.naturalSpeech.language, segments: x.naturalSpeech.segments.length, rejected: x.naturalSpeech.rejected.map(r => r.reason), fallbackReason: x.naturalSpeech.fallbackReason ?? null } } : {}),
       resultSetId: (s.searchResults as any)?.resultId ?? s.searchMeta?.resultId ?? null,
       activeJourneyId: this.context.activeJourneyId(a.sessionId),
       interruption: !!x.interruption,
@@ -652,12 +690,17 @@ export class ConversationAgentOrchestrator {
       error: a.error,
       events: a.events,
       turnLog,
-      assistantResponse: buildAssistantResponse({
-        text: a.stale ? '' : a.message, mode: a.mode, state: s.bookingState, pendingQuestion: conversationContext.pendingQuestion,
-        question: questionFor(s.pendingInteraction, s, a.mode), cards: a.cards, steps, error: a.error ? { code: a.error.code, message: a.error.message } : null,
-        rejectedClaims: x.rejectedClaims || []
-      }),
-      conversationContext
+      assistantResponse: (() => {
+        const ar = buildAssistantResponse({
+          text: a.stale ? '' : a.message, mode: a.mode, state: s.bookingState, pendingQuestion: conversationContext.pendingQuestion,
+          question: questionFor(s.pendingInteraction, s, a.mode), cards: a.cards, steps, error: a.error ? { code: a.error.code, message: a.error.message } : null,
+          rejectedClaims: x.rejectedClaims || []
+        });
+        // Prompt 21: VOICE speech = LLM-worded, grounded sentences (TEXT reply + facts unchanged)
+        return !a.stale && a.mode === 'VOICE' && x.naturalSpeech?.text ? { ...ar, speechText: x.naturalSpeech.text } : ar;
+      })(),
+      conversationContext,
+      ...(!a.stale && x.naturalSpeech ? { speech: { segments: x.naturalSpeech.segments, source: x.naturalSpeech.source, language: x.naturalSpeech.language, ...(x.naturalSpeech.fallbackReason ? { fallbackReason: x.naturalSpeech.fallbackReason } : {}) } } : {})
     };
   }
 

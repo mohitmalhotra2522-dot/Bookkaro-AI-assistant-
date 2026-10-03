@@ -150,6 +150,11 @@ export interface AgentDecision {
   /** Final assistant text (only present when the LLM is done calling tools). */
   finalMessage?: string;
   /**
+   * Prompt 21 (Part 3): short conversational acknowledgement spoken while the requested tool runs
+   * ("Haan, ek second, 12014 ki availability check karta hoon."). Validated: it may never contain a railway result.
+   */
+  acknowledgement?: string;
+  /**
    * Prompt 15: OPTIONAL lifecycle-action label (BookingLifecycleAction enum). Untrusted hint only —
    * parsed against the closed enum (unknown → UNSUPPORTED_ACTION) and never executed on its own.
    */
@@ -349,6 +354,8 @@ export interface TurnRecord {
   rejectedProposals?: Array<{ field: string; code: string }>;
   rejectedClaims?: string[];
   backendActions?: string[];
+  /** Prompt 21: VOICE speech provenance (no sentence text). */
+  naturalSpeech?: { source: 'LLM' | 'FALLBACK'; language: string; segments: number; rejected: string[]; fallbackReason: string | null };
   resultSetId?: string | null;
   activeJourneyId?: string;
   interruption?: boolean;

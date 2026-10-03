@@ -40,6 +40,44 @@ export interface LLMTurnInput {
   currentTurnToolResults?: TurnToolResultView[];
 }
 
+/**
+ * PROMPT 21 — natural spoken response (Parts 2, 16, 17). Called AFTER the turn's tools and state actions were applied,
+ * so the LLM words the reply from the authoritative post-turn BookingSession + this turn's verified tool results +
+ * the backend's own (deterministic, authoritative) reply. The output is never trusted: NaturalResponseComposer
+ * grounds every sentence and falls back to the backend reply.
+ */
+export interface SpokenResponseInput {
+  userText: string;
+  inputMode: 'TEXT' | 'VOICE';
+  /** Detected speaking style of the user (reply in the same style; no forced translation). */
+  language: 'HINGLISH' | 'HINDI' | 'ENGLISH';
+  /** Authoritative state AFTER this turn. */
+  session: Readonly<BookingSession>;
+  stateBefore: BookingState;
+  reviewVersionBefore: number | null;
+  selectedTrainBefore: string | null;
+  selectedClassBefore: string | null;
+  passengersCountBefore: number | null;
+  /** The backend's next question (authoritative), if any. */
+  pendingQuestion: string | null;
+  pendingQuestionCode: string | null;
+  /** The backend's deterministic reply for this turn — the facts that must be conveyed. */
+  backendReply: string;
+  /** This turn's railway tool results (authoritative provider data / validated errors). */
+  toolResults: TurnToolResultView[];
+  /** Backend actions applied this turn (e.g. TRAIN_SELECTED, PASSENGER_UPDATED). */
+  appliedActions: string[];
+  /** Journey fields changed this turn; corrected = it replaced an earlier value (e.g. "kal nahi parso"). */
+  changes: Array<{ field: string; corrected: boolean }>;
+  error: { code: string; message: string } | null;
+  history: Array<{ role: 'user' | 'assistant' | 'tool'; content: string }>;
+  /** Streaming: called with text deltas as they arrive (providers that support streaming). */
+  onDelta?: (chunk: string) => void;
+  signal?: AbortSignal;
+}
+
+export interface SpokenResponseResult { text: string }
+
 export interface LLMTurnResult {
   /** Either a list of tool calls to execute, OR a final assistant message. */
   decision: AgentDecision;
@@ -58,4 +96,6 @@ export interface LLMProvider {
   /** One LLM step: given the current turn input (+ any prior tool results
    *  appended to history), return the next AgentDecision (tool calls or final). */
   generateStructuredDecision(input: LLMTurnInput): Promise<LLMTurnResult>;
+  /** Prompt 21 (optional): word the final spoken reply; null → the backend reply is used. */
+  generateSpokenResponse?(input: SpokenResponseInput): Promise<SpokenResponseResult | null>;
 }
