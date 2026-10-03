@@ -71,6 +71,12 @@ export function parsePassengerCount(text: string, opts: { expectingCount?: boole
   const hum = t.match(new RegExp(`\\b(?:hum|ham|we are|we're)\\s+${NUM}(?:\\s*${UNIT})?\\s*(?:hain|hai|he|h)?\\b`));
   if (hum) return result(toNumber(hum[1]), hum[0].trim());
 
+  // Prompt 20 (Part 22): decrease / restatement — "actually 2 hi hain", "2 hi log hain", "sirf 2 passengers", "bas do log"
+  const onlyHi = t.match(new RegExp(`\\b${NUM}\\s+hi\\s+(?:${UNIT}\\s*)?(?:hain|hai|h|honge|hoge|ho)\\b`));
+  if (onlyHi) return result(toNumber(onlyHi[1]), onlyHi[0].trim());
+  const onlyPre = t.match(new RegExp(`\\b(?:sirf|bas|only|just)\\s+${NUM}\\s+(?:${UNIT}|hain|hai)\\b`));
+  if (onlyPre) return result(toNumber(onlyPre[1]), onlyPre[0].trim());
+
   // "<n> passengers" — a 4+ digit token directly before the unit is never a count we accept silently
   const abs = t.match(new RegExp(`(?:^|\\s)${NUM}\\s*${UNIT}(?=\\s|[.,;:]|$)`));
   if (abs) {

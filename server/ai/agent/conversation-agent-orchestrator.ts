@@ -61,6 +61,8 @@ import { pendingQuestionCode } from '../turn-engine/pending-question';
 import { detectBareDay, resolveMonthAnswer } from '../turn-engine/ambiguous-date-clarifier';
 import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { syncPreparationState, recordDependencyOutcome, bookingPreparationSummary } from '../../booking/preparation/booking-preparation';
+import { classifyAgentTurn } from '../decisions/state-actions';
+import { preparationErrorTypeOf } from '@shared/booking-preparation';
 
 export interface ProcessTurnOptions {
   /** Prompt 17: client-generated id of ONE user message. A duplicate DELIVERY (retry, reconnect,
@@ -607,7 +609,22 @@ export class ConversationAgentOrchestrator {
       toolPlans: (a.rt?.toolPlans || []).map(n => ({ ...n, arguments: maskPnrDeep(n.arguments) })),
       freshRequested: isExplicitFreshRequest(a.normalizedInput),
       // ---- Prompt 19 observability: counts / statuses only (no passenger names / ages) ----
-      bookingPreparation: { ...bookingPreparationSummary(s), preparationPath: prepTrace?.path || [] }
+      bookingPreparation: {
+        ...bookingPreparationSummary(s), preparationPath: prepTrace?.path || [],
+        // Prompt 20 (Part 45/50/51): tool vs state action, requested vs executed tools, typed error (no PII)
+        ...(() => {
+          const cls = classifyAgentTurn(a.decision as any, steps.map(st => st.toolCall.name));
+          const toolErrors = steps.filter(st => !st.result.success && st.result.error?.code)
+            .map(st => ({ tool: st.toolCall.name, code: st.result.error!.code, type: preparationErrorTypeOf(st.result.error!.code, st.toolCall.name) }));
+          return {
+            actionKind: cls.kind, stateAction: cls.stateAction,
+            toolRequested: steps.map(st => st.toolCall.name),
+            toolExecuted: steps.filter(st => !!st.execution && st.execution.status !== 'REJECTED').map(st => st.toolCall.name),
+            errorType: preparationErrorTypeOf(a.error?.code) ?? toolErrors.find(t => t.type)?.type ?? null,
+            toolErrors
+          };
+        })()
+      }
     };
     if (!a.stale) {
       // Prompt 18: BookingSession tracks the Part 19 pending-question code (derived, authoritative)

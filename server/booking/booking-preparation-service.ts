@@ -456,17 +456,26 @@ export class BookingPreparationService {
     if (s.review?.valid) { s.review.valid = false; s.review.invalidatedReason = 'SUPERSEDED'; }
     // Prompt 19 (Part 15–17): never build a review on a train / class that is not authoritative right now.
     // Runs AFTER superseding, so enterAwaiting() can never proceed on the previous (now stale) review.
-    const guard = bookingPreparationGuard.check(s);
+    // Prompt 20 (Part 23): journey + train + class + passenger count + complete passengers → READY_FOR_REVIEW
+    const guard = bookingPreparationGuard.checkReadyForReview(s);
     if (!guard.ready) {
-      out.error = { code: 'BOOKING_PREPARATION_NOT_READY', message: guard.question || 'Booking details abhi poori nahi hain.' };
-      this.emit(sessionId, ctx, 'BOOKING_PREPARATION_BLOCKED', { missing: guard.missing });
+      out.error = { code: guard.code || 'BOOKING_PREPARATION_NOT_READY', message: guard.question || 'Booking details abhi poori nahi hain.', details: { missing: guard.missing, passengerMissing: guard.passengerMissing } };
+      this.emit(sessionId, ctx, 'BOOKING_PREPARATION_BLOCKED', { missing: guard.missing, passengerMissingCount: guard.passengerMissing.length });
+      out.notes.push(out.error.message);
+      return;
+    }
+    let built: ReturnType<typeof reviewBuilder.build>;
+    try {
+      built = reviewBuilder.build(s, { reviewVersion: (s.reviewVersion || 0) + 1, availabilityFresh: r.availability === 'FRESH', fareFresh: r.fare === 'FRESH', now: this.clock() });
+    } catch {
+      // Part 51 — never converted into success: no review version is consumed, nothing is confirmable
+      out.error = { code: 'REVIEW_BUILD_FAILED', message: 'Review abhi tayyar nahi ho saka. Thodi der baad dobara koshish karein.' };
       out.notes.push(out.error.message);
       return;
     }
     s.reviewVersion = (s.reviewVersion || 0) + 1;
-    const built = reviewBuilder.build(s, { reviewVersion: s.reviewVersion, availabilityFresh: r.availability === 'FRESH', fareFresh: r.fare === 'FRESH', now: this.clock() });
     if (s.bookingState !== BookingState.REVIEW) this.state.transitionState(sessionId, BookingState.REVIEW);
-    s.review = { reviewVersion: s.reviewVersion, createdAt: built.data.createdAt, sessionVersion: s.sessionVersion, fingerprint: reviewFingerprint(s), valid: true, data: built.data };
+    s.review = { reviewVersion: s.reviewVersion, createdAt: built.data.createdAt, sessionVersion: s.sessionVersion, fingerprint: reviewFingerprint(s), valid: true, data: built.data, snapshot: built.snapshot };
     this.state.bump(sessionId);
     this.emit(sessionId, ctx, 'REVIEW_CREATED', {
       reviewVersion: s.reviewVersion, trainNumber: built.data.selectedTrain?.number, selectedClass: built.data.selectedClass,

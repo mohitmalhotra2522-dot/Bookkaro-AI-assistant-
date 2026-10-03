@@ -82,6 +82,12 @@ BOOKING PREPARATION (Prompt 19 — backend-owned; you only PROPOSE):
   (1-based index; fields ONLY name | age | gender | berthPreference). Put only the fields the user actually said.
   Never invent a passenger, a name, an age or a gender. Never ask for or store OTP, CAPTCHA, password, PIN, CVV,
   bank/card details, tokens or cookies.
+- STATE ACTIONS vs RAILWAY TOOLS (Prompt 20): passenger / review / confirmation operations are booking-session
+  STATE ACTIONS, never toolCalls — SET_PASSENGER_COUNT | UPDATE_PASSENGER | START_PASSENGER_COLLECTION | SHOW_REVIEW |
+  REQUEST_CONFIRMATION (set as "action"; the backend maps them onto its own contract and may refuse). Railway data
+  (CHECK_AVAILABILITY, GET_FARE, SEARCH_TRAINS …) is ONLY ever requested as a toolCall. Any other action name is
+  rejected as UNSUPPORTED_ACTION. "Confirm" / "haan" is a booking confirmation ONLY while a CURRENT review awaits it.
+  Fewer passengers ("Actually 2 hi hain") → passengersCountRaw "2". Never state a fare that no GET_FARE result gave.
 - Never compute fare, never claim seat/coach/berth numbers or a PNR, never say a ticket is booked. A confirmation
   request is NOT a booking: after it, say the ticket is not booked yet.
 `;

@@ -16,6 +16,8 @@
  * tool calls are validated, so "12014 ki CC availability" can select the train
  * + class and then run CHECK_AVAILABILITY in the same turn.
  */
+import { reviewBuilder, reviewFingerprint } from '../../booking/review-builder';
+import { normalizeStateAction } from '../decisions/state-actions';
 import { passengerChangeValidator } from '../../booking/preparation/passenger-change-validator';
 import { validatePassengerCount } from '../../booking/preparation/passenger-count';
 import { classifyConfirmation, AMBIGUOUS_CONFIRMATION_PROMPT } from '../../booking/handoff/confirmation-policy';
@@ -114,7 +116,9 @@ export class ContextualTurnApplier {
 
   constructor(private readonly state: ConversationStateManager, private readonly postBooking?: PostBookingService, private readonly lifecycleActions?: BookingLifecycleActionService) {}
 
-  apply(sessionId: string, d: AgentDecision, ctx: ApplyCtx): ApplyOutcome {
+  apply(sessionId: string, dIn: AgentDecision, ctx: ApplyCtx): ApplyOutcome {
+    // Prompt 20 (Part 44): Prompt-20 state-action names are validated aliases of the existing contract
+    const d = normalizeStateAction(dIn);
     const out: ApplyOutcome = { notes: [], blockTools: false, applied: [] };
     const S = () => this.state.getSession(sessionId);
     const e = d?.entities || {};
@@ -123,6 +127,11 @@ export class ContextualTurnApplier {
     const emit = (type: BookingEventType, data?: Record<string, any>) => { this.state.emit(sessionId, type, ctx.turnId, data); ctx.events.push(type); };
 
     // 0) Structural validation of untrusted LLM output
+    if (d && typeof d === 'object' && ALLOWED_INTENTS.has(d.intent) && !ALLOWED_ACTIONS.has(d.action)) {
+      // a well-formed decision with an action outside the closed enum is refused — never guessed / mapped
+      emit('STATE_ACTION_REJECTED', { code: 'UNSUPPORTED_ACTION' });
+      return fail('UNSUPPORTED_ACTION', 'Ye action supported nahi hai. Aap train, class, passengers ya review ke baare mein bata sakte hain.');
+    }
     if (!d || typeof d !== 'object' || !ALLOWED_INTENTS.has(d.intent) || !ALLOWED_ACTIONS.has(d.action)) {
       return fail('INVALID_CONTEXT', 'Maaf kijiye, request samajh nahi aayi. Thoda alag tareeke se batayein?');
     }
@@ -297,7 +306,7 @@ export class ContextualTurnApplier {
         return out;
       }
       if (s.bookingState !== BookingState.AWAITING_CONFIRMATION || s.pendingInteraction?.type !== 'CONFIRMATION_REQUIRED' || d.action === 'REQUEST_CONFIRMATION') {
-        return fail('CONFIRMATION_NOT_PENDING', this.contextualNudge(s, ctx.mode));
+        return fail('CONFIRMATION_NOT_PENDING', this.contextualNudge(s, ctx.mode, ctx.rawText));
       }
       // Backend ConfirmationPolicy: only the user's EXPLICIT words confirm a booking.
       // AMBIGUOUS ("theek hai", "okay", "haan?") / NEGATIVE / NONE → no confirmation, ask again.
@@ -327,7 +336,7 @@ export class ContextualTurnApplier {
     // 3) Bare affirmation outside a confirmation context → contextual clarification.
     if (e.affirmation && !this.hasSubstantiveEntities(e)) {
       if (S().bookingState === BookingState.PASSENGERS_READY) return { ...out, applied: ['RETRY_PREPARATION'] };
-      return fail('CONFIRMATION_NOT_PENDING', this.contextualNudge(S(), ctx.mode));
+      return fail('CONFIRMATION_NOT_PENDING', this.contextualNudge(S(), ctx.mode, ctx.rawText));
     }
 
     // 4) Change requested without a value ("date change karo")
@@ -486,7 +495,13 @@ export class ContextualTurnApplier {
     if (d.action === 'SHOW_REVIEW') {
       const s = S();
       if (s.review?.valid && [BookingState.REVIEW, BookingState.AWAITING_CONFIRMATION].includes(s.bookingState)) {
-        ctx.cards.push({ type: 'review', data: s.review.data });
+        // Prompt 20: "Review dikhao" re-presents the CURRENT review (same version — nothing changed, nothing rebuilt)
+        if (!ctx.cards.some(c => c.type === 'review')) ctx.cards.push({ type: 'review', data: s.review.data });
+        if (s.review.fingerprint === reviewFingerprint(s)) {
+          const again = reviewBuilder.build(s, { reviewVersion: s.review.reviewVersion, now: Date.parse(s.review.createdAt) || Date.now() });
+          out.notes.push(ctx.mode === 'VOICE' ? again.voiceText : again.text);
+          out.applied.push('REVIEW_PRESENTED');
+        }
       } else if (![BookingState.PASSENGERS_READY].includes(s.bookingState)) {
         return fail('BOOKING_NOT_READY', 'Review ke liye abhi details poori nahi hain.');
       }
@@ -503,12 +518,15 @@ export class ContextualTurnApplier {
   }
 
   /** Contextual clarification for a short reply that has no meaning in the current state. */
-  private contextualNudge(s: BookingSession, mode: 'TEXT' | 'VOICE'): string {
+  private contextualNudge(s: BookingSession, mode: 'TEXT' | 'VOICE', rawText?: string): string {
     const p = s.pendingInteraction && s.pendingInteraction.type !== 'NONE' ? s.pendingInteraction : derivePendingInteraction(s);
     const q = questionFor(p, s, mode);
     if (s.bookingState === BookingState.SHOWING_TRAINS) return `Abhi koi booking confirm karne ke liye pending nahi hai. ${q}`;
     if (s.bookingState === BookingState.IRCTC_HANDOFF_READY) return 'Booking confirmation request pehle hi record ho chuki hai. Aur kuch madad chahiye?';
-    return q ? `Kis baare mein "haan"? ${q}` : 'Aap kya karna chahte hain — train search, ya kisi train ki jaankari?';
+    // Prompt 20 (Part 38/39): "confirm" / "book it" without a CURRENT review is never a booking
+    const confirmWord = /\b(confirm|book\s+it|book\s+kar|book\s+karo|proceed)\b/i.test(rawText || '');
+    if (confirmWord) return `Abhi confirm karne ke liye koi current review nahi hai.${q ? ` ${q}` : ' Aap kis option ko continue karna chahte hain?'}`;
+    return q ? `Aap kis option ko continue karna chahte hain? ${q}` : 'Aap kis option ko continue karna chahte hain?';
   }
 
   private rewindTo(sessionId: string, target: BookingState) {

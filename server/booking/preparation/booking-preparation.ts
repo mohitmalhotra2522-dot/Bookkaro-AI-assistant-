@@ -17,6 +17,7 @@ import {
   type PassengerCollectionState, type ReviewStatus
 } from '@shared/booking-preparation';
 import { passengerValidator } from '../passenger-validator';
+import { passengerCollection } from '../passenger-collection';
 import { reviewFingerprint } from '../review-builder';
 import { bookingPreparationGuard, availabilityStatus, fareStatus, fareBasisKey, availabilityBasisKey } from './booking-preparation-guard';
 
@@ -97,8 +98,8 @@ export function derivePreparationState(s: BookingSession): BookingPreparationSta
   if (pc === 'COUNT_REQUIRED') return 'COLLECTING_PASSENGERS';
   if (pc === 'COLLECTING_PASSENGER_DETAILS') return 'COLLECTING_PASSENGER_DETAILS';
   if (pc === 'PASSENGERS_READY') return 'PASSENGERS_READY';
-  // details complete but no current review yet
-  return 'PASSENGERS_READY';
+  // Prompt 20 (Part 23/41): details complete + guard satisfied, review not built (or being rebuilt) yet
+  return bookingPreparationGuard.checkReadyForReview(s).ready ? 'READY_FOR_REVIEW' : 'COLLECTING_PASSENGER_DETAILS';
 }
 
 /** Shortest legal path from → to over PREPARATION_TRANSITIONS (BFS). */
@@ -136,12 +137,22 @@ export function syncPreparationState(s: BookingSession): { from: BookingPreparat
   if (path && from === 'NOT_STARTED' && to !== 'NOT_STARTED' && to !== 'CLASS_SELECTED' && !path.includes('BOOKING_PREPARE')) {
     path = ['CLASS_SELECTED', 'BOOKING_PREPARE', ...(preparationPath('BOOKING_PREPARE', to) || [to])];
   }
+  // Prompt 20 (Part 35): a correction / fresh recheck rebuilt the review in place — record the legal rebuild path
+  const rv = s.review?.reviewVersion ?? null;
+  const prevRv = (s as any).preparationTrace?.reviewVersion ?? null;
+  const REVIEWED: BookingPreparationState[] = ['REVIEW', 'AWAITING_CONFIRMATION', 'BOOKING_CONFIRMATION_REQUESTED'];
+  if (path && rv !== null && prevRv !== null && rv !== prevRv && REVIEWED.includes(from) && (to === 'REVIEW' || to === 'AWAITING_CONFIRMATION')) {
+    path = ['READY_FOR_REVIEW', 'REVIEW', ...(to === 'AWAITING_CONFIRMATION' ? ['AWAITING_CONFIRMATION' as const] : [])];
+  }
   if (!path) { to = from; path = []; }
   for (let i = 0, cur = from; i < path.length; cur = path[i], i++) {
     if (!canTransitionPreparation(cur, path[i])) { to = from; path = []; break; }
   }
   (s as any).bookingPreparationState = to;
-  if (path.length) (s as any).preparationTrace = { from, to, path, at: new Date().toISOString() };
+  const prevTrace = (s as any).preparationTrace;
+  if (path.length) (s as any).preparationTrace = { from, to, path, at: new Date().toISOString(), reviewVersion: rv };
+  else if (prevTrace) prevTrace.reviewVersion = rv;
+  else (s as any).preparationTrace = { from, to, path: [], at: new Date().toISOString(), reviewVersion: rv };
   return { from, to, path };
 }
 
@@ -178,7 +189,10 @@ export function buildBookingPreparation(s: BookingSession): BookingPreparationVi
     reviewStatus: reviewStatusOf(s),
     confirmationStatus: confirmationStatusOf(s),
     missingPrerequisites: guard.missing,
-    passengerCompleteness: pax
+    passengerCompleteness: pax,
+    passengerCollection: passengerCollection.view(s, passengerCollectionStateOf(s)),
+    journeyValidation: guard.journey || null,
+    reviewSnapshot: s.review?.snapshot ?? null
   };
 }
 
@@ -195,6 +209,14 @@ export function bookingPreparationSummary(s: BookingSession): BookingPreparation
     confirmationStatus: v.confirmationStatus,
     availabilityStatus: v.availabilityResult.status,
     fareStatus: v.fareResult.status,
-    missingPrerequisites: v.missingPrerequisites
+    missingPrerequisites: v.missingPrerequisites,
+    passengerCollection: {
+      expectedCount: v.passengerCollection.expectedCount,
+      currentPassengerIndex: v.passengerCollection.currentPassengerIndex,
+      missingFieldCount: v.passengerCollection.missingFields.length
+    },
+    reviewSnapshot: v.reviewSnapshot
+      ? { reviewVersion: v.reviewSnapshot.reviewVersion, createdAt: v.reviewSnapshot.createdAt, availabilityStatus: v.reviewSnapshot.availability.status, fareStatus: v.reviewSnapshot.fare.status }
+      : null
   };
 }

@@ -8,6 +8,7 @@
  *  - RAC / Waitlist is relayed verbatim and flagged — never upgraded to "confirmed".
  *  - No PNR, no booking status, no seat numbers, no invented fields.
  */
+import type { ReviewSnapshot } from '@shared/booking-preparation';
 import { availabilityStatus, fareStatus } from './preparation/booking-preparation-guard';
 import type { BookingSession } from '@shared/entities';
 import { humanDate, shortName } from '../ai/context/response-formatter';
@@ -57,18 +58,51 @@ export function reviewFingerprint(s: BookingSession): string {
   ]);
 }
 
+/**
+ * Prompt 20 — Part 29: ReviewSnapshot from AUTHORITATIVE data only (session journey + current-result train +
+ * validator-approved passengers + provider results matching the current basis). Frozen. No LLM text, no seat /
+ * coach / PNR; a missing fare / availability is an explicit status, never an estimate.
+ */
+export function buildReviewSnapshot(s: BookingSession, reviewVersion: number, now: number, fareOk: boolean, availOk: boolean): ReviewSnapshot {
+  const t: any = s.selectedTrain;
+  const deps: any = (s as any).preparationDependencies || {};
+  const fs = fareStatus(s), as = availabilityStatus(s);
+  const f: any = s.fare;
+  const a: any = s.selectedClass && s.availability ? (s.availability as any)[s.selectedClass] : undefined;
+  const snap: ReviewSnapshot = {
+    reviewVersion,
+    createdAt: new Date(now).toISOString(),
+    sessionVersion: s.sessionVersion,
+    fingerprint: reviewFingerprint(s),
+    journey: { origin: s.origin!, destination: s.destination!, date: s.date!, ...(s.originName ? { originName: s.originName } : {}), ...(s.destinationName ? { destinationName: s.destinationName } : {}) },
+    train: { number: tn(t)!, name: t?.name || t?.trainName, departure: t?.departure, arrival: t?.arrival, resultSetId: t?.searchResultId ?? (s.searchResults as any)?.resultId ?? null },
+    travelClass: s.selectedClass!,
+    passengers: (s.passengers || []).map((p, i) => ({ index: i + 1, name: p.name!, age: p.age!, gender: p.gender!, ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}) })),
+    availability: availOk
+      ? { status: 'VERIFIED', value: String(a.status), retrievedAt: a.retrievedAt || a.fetchedAt, toolExecutionId: a.toolExecutionId }
+      : as.status === 'UNAVAILABLE' ? { status: 'AVAILABILITY_UNAVAILABLE', errorCode: deps.availability?.errorCode ?? null } : { status: 'NOT_VERIFIED' },
+    fare: fareOk
+      ? { status: 'VERIFIED', total: f.total, perPassenger: f.perPassenger, currency: f.currency || 'INR', passengersCount: f.passengersCount ?? f.fareBasis?.passengersCount, retrievedAt: f.retrievedAt || f.fetchedAt, toolExecutionId: f.toolExecutionId }
+      : fs.status === 'UNAVAILABLE' ? { status: 'FARE_UNAVAILABLE', errorCode: deps.fare?.errorCode ?? null } : { status: 'NOT_VERIFIED' },
+    ...(s.dataSourceLabel ? { dataSource: s.dataSourceLabel } : {})
+  };
+  return deepFreeze(snap);
+}
+function deepFreeze<T>(o: T): T { if (o && typeof o === 'object') { Object.values(o as any).forEach(deepFreeze); Object.freeze(o); } return o; }
+
 export class ReviewBuilder {
-  build(s: BookingSession, opts: BuildOptions = {}): { data: BookingReview; text: string; voiceText: string } {
+  build(s: BookingSession, opts: BuildOptions = {}): { data: BookingReview; text: string; voiceText: string; snapshot: ReviewSnapshot } {
     const t: any = s.selectedTrain;
     const cls = s.selectedClass;
     const count = s.passengersCount || s.passengers.length || 1;
     const fare: any = s.fare;
     const fareMatch = !!fare && (!fare.trainNumber || fare.trainNumber === tn(t)) && (!fare.travelClass || fare.travelClass === cls)
       && (!fare.passengersCount || fare.passengersCount === count);
-    const fareOk = fareMatch && opts.fareFresh !== false;
+    // Prompt 20 (Part 30): only a provider fare whose basis EXACTLY matches journey / train / class / pax
+    const fareOk = fareMatch && opts.fareFresh !== false && fareStatus(s).status === 'AVAILABLE';
     const avail: any = cls && s.availability ? (s.availability as any)[cls] : undefined;
     const availMatch = !!avail && (!avail.trainNumber || avail.trainNumber === tn(t)) && (!avail.date || !s.date || avail.date === s.date);
-    const availOk = availMatch && opts.availabilityFresh !== false;
+    const availOk = availMatch && opts.availabilityFresh !== false && availabilityStatus(s).status === 'AVAILABLE';
 
     const warnings: string[] = [];
     if (!availOk) warnings.push('Availability abhi verify nahi hui hai.');
@@ -116,7 +150,7 @@ export class ReviewBuilder {
     const voiceText = `${route}, ${humanDate(s.date)}, ${train?.number || ''} ${cls || ''}, ${count} passenger${count > 1 ? 's' : ''}. `
       + `${data.fare.verified ? `Total fare ₹${data.fare.total}.` : 'Fare abhi verify nahi hua hai.'} `
       + `${data.availability.verified ? `Availability ${data.availability.status}.` : 'Availability abhi verify nahi hui hai.'}`;
-    return { data, text, voiceText: voiceText.replace(/\s+/g, ' ').trim() };
+    return { data, text, voiceText: voiceText.replace(/\s+/g, ' ').trim(), snapshot: buildReviewSnapshot(s, data.reviewVersion, opts.now ?? Date.now(), fareOk, availOk) };
   }
 }
 

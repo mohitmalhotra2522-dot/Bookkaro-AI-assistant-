@@ -14,6 +14,7 @@
  */
 import type { BookingSession, Passenger } from '@shared/entities';
 import { MAX_PASSENGERS } from '@shared/constants';
+import type { PassengerCollectionState, PassengerCollectionView } from '@shared/booking-preparation';
 import type { PassengerRef, PassengerUpdateRaw, OrchestratorErrorCode } from '../ai/decisions/agent-decision';
 import { canonicalName, passengerValidator, type PassengerFieldError } from './passenger-validator';
 
@@ -82,6 +83,25 @@ export class PassengerCollection {
     for (const p of s.passengers || []) p.missingFields = passengerValidator.missingRequired(p);
     const k = (s.passengers || []).findIndex(p => (p.missingFields || []).length > 0);
     s.currentPassengerIndex = k === -1 ? Math.max(0, (s.passengers || []).length - 1) : k;
+  }
+
+  /**
+   * Prompt 20 — Part 9: PassengerCollection view { expectedCount, passengers, currentPassengerIndex (1-based),
+   * missingFields, status } derived from the ONE authoritative store (BookingSession.passengers) — no copy.
+   */
+  view(s: BookingSession, status: PassengerCollectionState): PassengerCollectionView {
+    const v = passengerValidator.validateSet(s.passengers, s.passengersCount);
+    const next = this.nextMissing(s);
+    return {
+      expectedCount: s.passengersCount ?? null,
+      passengers: (s.passengers || []).map((p, i) => ({
+        index: i + 1, passengerId: p.id, name: p.name, age: p.age, gender: p.gender, berthPreference: p.berthPreference,
+        complete: passengerValidator.missingRequired(p).length === 0 && passengerValidator.validateRecord(p).valid
+      })),
+      currentPassengerIndex: next ? next.index + 1 : (s.passengersCount && (s.passengers || []).length < s.passengersCount ? (s.passengers || []).length + 1 : null),
+      missingFields: v.missingFields,
+      status
+    };
   }
 
   allComplete(s: BookingSession): boolean {
@@ -195,7 +215,11 @@ export class PassengerCollection {
       for (const [k, val] of Object.entries(v.valid)) {
         const cur = (p as any)[k];
         if (cur === undefined || cur === null || cur === '') { (p as any)[k] = val; wrote.push(k); continue; }
-        if (cur === val) continue;
+        if (cur === val) {
+          // Prompt 20 (Part 17): an explicit "correction" to the same value is acknowledged — never silent, nothing changes
+          if (u.explicit) out.notes.push(`${k === 'name' ? `Passenger ${target.index + 1}` : label} ${poss(k)} pehle se ${show(k, cur)} hai — kuch nahi badla.`);
+          continue;
+        }
         if (u.explicit) {
           (p as any)[k] = val; wrote.push(k); over.push(k);
           out.notes.push(`${k === 'name' ? `Passenger ${target.index + 1}` : label} ${poss(k)} ${show(k, cur)} se ${show(k, val)} kar ${k === 'age' ? 'di' : 'diya'}.`);

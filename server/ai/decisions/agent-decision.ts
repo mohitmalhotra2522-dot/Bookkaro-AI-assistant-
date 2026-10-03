@@ -44,6 +44,10 @@ export type AgentAction =
   | 'COLLECT_PASSENGER_DETAILS'
   // Prompt 19 (Part 35): proposal only — the backend decides whether the preparation transition is valid
   | 'COLLECT_PASSENGERS'
+  // Prompt 20 (Part 44): accepted aliases — normalized by normalizeStateAction() before validation
+  | 'SET_PASSENGER_COUNT'
+  | 'UPDATE_PASSENGER'
+  | 'START_PASSENGER_COLLECTION'
   | 'SHOW_REVIEW'
   | 'REQUEST_CONFIRMATION'
   | 'PREPARE_IRCTC_HANDOFF'
@@ -290,7 +294,12 @@ export interface TurnRecord {
   toolPlans?: import('@shared/turn-engine').ToolExecutionPlanNode[];
   /** Prompt 18: ConversationTurnEngine observability (attached by the engine). */
   /** Prompt 19 — booking preparation summary (no PII). */
-  bookingPreparation?: import('@shared/booking-preparation').BookingPreparationSummary & { preparationPath: string[] };
+  bookingPreparation?: import('@shared/booking-preparation').BookingPreparationSummary & {
+    preparationPath: string[];
+    actionKind?: import('@shared/booking-preparation').AgentActionKind; stateAction?: string | null;
+    toolRequested?: string[]; toolExecuted?: string[]; errorType?: string | null;
+    toolErrors?: Array<{ tool: string; code: string; type: string | null }>;
+  };
   turnEngine?: Record<string, any>;
   freshRequested?: boolean;
   /** Prompt 10 — PII-free execution-gateway log line (if the gateway ran this turn). */

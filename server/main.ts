@@ -1,4 +1,5 @@
 import { bookingPreparationSummary } from './booking/preparation/booking-preparation';
+import { preparationErrorTypeOf } from '@shared/booking-preparation';
 import { parseReconciliationConfig } from './booking/lifecycle/reconciliation-config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
@@ -105,7 +106,8 @@ server.post('/api/chat', async (request, reply) => {
     executorCapability: executorCapability(),
     bookingProvider: bookingProviderView(),
     bookingExecution: bookingExecutionView(ctx.bookingExecution) ?? null,
-    error: result.error ? { code: result.error.code, message: result.error.message } : null,
+    // Prompt 20 (Part 51): stable code + typed preparation error category
+    error: result.error ? { code: result.error.code, message: result.error.message, type: preparationErrorTypeOf(result.error.code) } : null,
     // Prompt 16: structured response (validated facts only; speechText for TTS) + derived context (PNR masked)
     assistantResponse: result.assistantResponse,
     conversationContext: result.conversationContext,

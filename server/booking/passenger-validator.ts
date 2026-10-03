@@ -107,6 +107,21 @@ export class PassengerValidator {
     return { complete: n > 0 && missing.length === 0 && invalid.length === 0, missing, invalid };
   }
 
+  /**
+   * Prompt 20 — Part 18: { valid, complete, missingFields, errors } over the active passenger set.
+   * `complete` = every required field present for every expected passenger; `valid` = every stored value valid.
+   * Errors carry passenger index + field name only (never the value — privacy).
+   */
+  validateSet(passengers: readonly Passenger[] | undefined, passengersCount?: number | null): {
+    valid: boolean; complete: boolean;
+    missingFields: Array<{ passengerIndex: number; field: 'name' | 'age' | 'gender' }>;
+    errors: Array<{ passengerIndex: number; field: string; code: 'INVALID_PASSENGER_VALUE' }>;
+  } {
+    const c = this.completeness(passengers, passengersCount);
+    const errors = c.invalid.map(e => ({ passengerIndex: e.passengerIndex, field: e.field, code: 'INVALID_PASSENGER_VALUE' as const }));
+    return { valid: errors.length === 0, complete: c.missing.length === 0 && Math.max(passengersCount || 0, (passengers || []).length) > 0, missingFields: c.missing, errors };
+  }
+
   /** Full validation of a stored passenger record (required + stored values valid). */
   validateRecord(p: Passenger): { complete: boolean; valid: boolean; missing: string[]; errors: PassengerFieldError[] } {
     const missing = this.missingRequired(p);

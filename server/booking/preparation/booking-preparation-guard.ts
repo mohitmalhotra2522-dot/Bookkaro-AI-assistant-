@@ -10,7 +10,10 @@
  */
 import type { BookingSession } from '@shared/entities';
 import type { DependencyStatus, PreparationPrerequisite } from '@shared/booking-preparation';
-import { displayedResultsOf } from '../../ai/conversation/conversation-context';
+import type { JourneyValidation } from '@shared/booking-preparation';
+import { bookingJourneyValidator, currentResultRecord, providerClassesOf } from './booking-journey-validator';
+import { validatePassengerCount } from './passenger-count';
+import { passengerValidator } from '../passenger-validator';
 
 const trainNo = (t: any): string | null => (t ? String(t.number || t.trainNumber || '') || null : null);
 
@@ -20,36 +23,53 @@ export interface PreparationGuardResult {
   missing: PreparationPrerequisite[];
   /** One deterministic question for the FIRST missing prerequisite (ask only what is missing). */
   question?: string;
+  /** Prompt 20 — the typed journey verdict the guard was derived from. */
+  journey?: JourneyValidation;
 }
 
 /** Part 16 — the selected train object from the CURRENT result set (null when not displayed there). */
-export function currentResultTrain(s: BookingSession): any | null {
-  const num = trainNo(s.selectedTrain);
-  if (!num) return null;
-  const shown = displayedResultsOf(s).items.some(i => i.trainNumber === num);
-  if (!shown) return null;
-  const trains: any[] = (s.searchResults as any)?.trains || [];
-  return trains.find(t => trainNo(t) === num) || null;
-}
+export function currentResultTrain(s: BookingSession): any | null { return currentResultRecord(s); }
 
 /** Part 17 — classes the provider reported for the selected train (never an LLM claim). */
-export function actualClassesOf(s: BookingSession): string[] {
-  const t = currentResultTrain(s);
-  return t ? (t.classes || []).map((c: any) => String(c.code || c).toUpperCase()) : [];
+export function actualClassesOf(s: BookingSession): string[] { return providerClassesOf(s); }
+
+const PREREQ_OF: Record<string, PreparationPrerequisite> = {
+  'origin:MISSING': 'ROUTE', 'destination:MISSING': 'ROUTE', 'destination:SAME_STATION': 'ROUTE',
+  'date:MISSING': 'DATE', 'date:INVALID_DATE': 'DATE',
+  'selectedTrain:MISSING': 'TRAIN', 'selectedTrain:INVALID_TRAIN_SELECTION': 'TRAIN_NOT_IN_CURRENT_RESULTS',
+  'selectedClass:MISSING': 'CLASS', 'selectedClass:INVALID_CLASS_SELECTION': 'CLASS_NOT_AVAILABLE'
+};
+
+export interface ReviewReadiness {
+  ready: boolean;
+  code?: 'BOOKING_PREPARATION_NOT_READY' | 'INVALID_PASSENGER_COUNT' | 'PASSENGER_DETAILS_INCOMPLETE';
+  missing: PreparationPrerequisite[];
+  passengerMissing: Array<{ passengerIndex: number; field: string }>;
+  question?: string;
 }
 
 export class BookingPreparationGuard {
+  /** Parts 3 / 15–17 — journey prerequisites (BookingJourneyValidator) before preparation may begin. */
   check(s: BookingSession): PreparationGuardResult {
+    const j = bookingJourneyValidator.validate(s);
     const missing: PreparationPrerequisite[] = [];
-    if (!s.origin || !s.destination) missing.push('ROUTE');
-    if (!s.date) missing.push('DATE');
-    const num = trainNo(s.selectedTrain);
-    if (!num) missing.push('TRAIN');
-    else if (!currentResultTrain(s)) missing.push('TRAIN_NOT_IN_CURRENT_RESULTS');
-    if (!s.selectedClass) missing.push('CLASS');
-    else if (num && currentResultTrain(s) && !actualClassesOf(s).includes(String(s.selectedClass).toUpperCase())) missing.push('CLASS_NOT_AVAILABLE');
-    if (!missing.length) return { ready: true, missing };
-    return { ready: false, code: 'BOOKING_PREPARATION_NOT_READY', missing, question: this.question(s, missing[0]) };
+    for (const i of j.issues) { const m = PREREQ_OF[`${i.field}:${i.code}`]; if (m && !missing.includes(m)) missing.push(m); }
+    if (!missing.length) return { ready: true, missing, journey: j };
+    return { ready: false, code: 'BOOKING_PREPARATION_NOT_READY', missing, question: this.question(s, missing[0]), journey: j };
+  }
+
+  /** Part 23 — journey valid + passenger count valid + every passenger complete → READY_FOR_REVIEW. */
+  checkReadyForReview(s: BookingSession): ReviewReadiness {
+    const g = this.check(s);
+    if (!g.ready) return { ready: false, code: 'BOOKING_PREPARATION_NOT_READY', missing: g.missing, passengerMissing: [], question: g.question };
+    const n = s.passengersCount;
+    const cv = typeof n === 'number' ? validatePassengerCount(n) : null;
+    if (!cv || !cv.ok) return { ready: false, code: 'INVALID_PASSENGER_COUNT', missing: [], passengerMissing: [], question: cv && !cv.ok ? cv.message : 'Kitne passengers hain?' };
+    const v = passengerValidator.validateSet(s.passengers, n);
+    if (!v.complete || !v.valid) {
+      return { ready: false, code: 'PASSENGER_DETAILS_INCOMPLETE', missing: [], passengerMissing: [...v.missingFields, ...v.errors.map(e => ({ passengerIndex: e.passengerIndex, field: e.field }))] };
+    }
+    return { ready: true, missing: [], passengerMissing: [] };
   }
 
   private question(s: BookingSession, m: PreparationPrerequisite): string {
@@ -84,7 +104,9 @@ export function availabilityStatus(s: BookingSession): { status: DependencyStatu
   if (!a) return unavailable?.basis === availabilityBasisKey(s) ? { status: 'UNAVAILABLE' } : { status: 'NOT_REQUESTED' };
   const tn = trainNo(s.selectedTrain);
   const matches = !!tn && a.trainNumber === tn && (a.travelClass ? a.travelClass === cls : true) && !!s.date && a.date === s.date
-    && (!a.origin || a.origin === s.origin) && (!a.destination || a.destination === s.destination);
+    && (!a.origin || a.origin === s.origin) && (!a.destination || a.destination === s.destination)
+    // Prompt 20 (Part 21/27): availability is passenger-dependent only when the provider result was for a count
+    && (a.passengersCount === undefined || a.passengersCount === null || Number(a.passengersCount) === Number(s.passengersCount || 1));
   if (!matches) return unavailable?.basis === availabilityBasisKey(s) ? { status: 'UNAVAILABLE' } : { status: 'STALE' };
   return { status: 'AVAILABLE', value: String(a.status), fetchedAt: a.fetchedAt || a.retrievedAt, toolExecutionId: a.toolExecutionId };
 }

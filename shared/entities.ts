@@ -216,7 +216,7 @@ export interface BookingSession {
   /** Legal-transition-only preparation state (never COMPLETE — no booking happens in this milestone). */
   bookingPreparationState?: import('./booking-preparation').BookingPreparationState;
   /** Last preparation path taken (observability; e.g. CLASS_SELECTED→BOOKING_PREPARE→PASSENGERS_READY). */
-  preparationTrace?: { from: string; to: string; path: string[]; at: string };
+  preparationTrace?: { from: string; to: string; path: string[]; at: string; reviewVersion?: number | null };
   /** Provider said fare / availability is unavailable for this exact basis (no amount is ever stored). */
   preparationDependencies?: { fare?: { status: 'UNAVAILABLE'; basis: string; errorCode: string | null; at: string }; availability?: { status: 'UNAVAILABLE'; basis: string; errorCode: string | null; at: string } };
   /** Selection to carry over after a DATE-only correction (same train/class re-verified on new date). */
@@ -284,6 +284,8 @@ export interface BookingReviewRecord {
   valid: boolean;
   invalidatedReason?: string;
   data: any;
+  /** Prompt 20 (Part 29): frozen authoritative ReviewSnapshot this review version was built from. */
+  snapshot?: import('./booking-preparation').ReviewSnapshot;
 }
 
 export type BookingBlocker =
@@ -335,7 +337,7 @@ export interface PendingInteraction {
 }
 
 export type BookingEventType =
-  | 'PASSENGER_CHANGE_REJECTED' | 'PASSENGER_COUNT_REJECTED' | 'BOOKING_PREPARATION_BLOCKED'
+  | 'PASSENGER_CHANGE_REJECTED' | 'PASSENGER_COUNT_REJECTED' | 'BOOKING_PREPARATION_BLOCKED' | 'STATE_ACTION_REJECTED'
   | 'JOURNEY_UPDATED'
   | 'DATE_UPDATED'
   | 'PASSENGERS_UPDATED'
