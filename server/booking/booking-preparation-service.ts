@@ -11,6 +11,8 @@
  * version reviews, guard confirmation. It NEVER books, logs in, submits,
  * pays, requests OTP/CAPTCHA or produces a PNR.
  */
+import { bookingPreparationGuard } from './preparation/booking-preparation-guard';
+import { confirmationGuard, recordDependencyOutcome } from './preparation/booking-preparation';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import type { BookingSession, BookingEventType, PendingInteraction } from '@shared/entities';
 import type { ConversationStateManager } from '../ai/state/conversation-state';
@@ -398,6 +400,21 @@ export class BookingPreparationService {
 
   /** PASSENGERS_READY → fresh railway data → REVIEW (new version) → AWAITING_CONFIRMATION. */
   private async refreshAndReview(sessionId: string, ctx: PrepCtx, runTools: RunRequiredTools, out: PrepOutcome): Promise<'ok' | 'blocked' | 'stale'> {
+    // Prompt 19 (Part 15–17): journey + date + train ∈ CURRENT results + class ∈ that train's classes — checked
+    // BEFORE any availability / fare call, so nothing is fetched or reviewed for a non-authoritative selection.
+    const guard = bookingPreparationGuard.check(this.state.getSession(sessionId));
+    if (!guard.ready) {
+      const m = guard.missing[0];
+      out.error = { code: 'BOOKING_PREPARATION_NOT_READY', message: guard.question || 'Booking details abhi poori nahi hain.', details: { missing: guard.missing } };
+      this.emit(sessionId, ctx, 'BOOKING_PREPARATION_BLOCKED', { missing: guard.missing });
+      // the pending question below asks the follow-up — only the reason goes into the notes (one question per turn)
+      const lead = m === 'TRAIN_NOT_IN_CURRENT_RESULTS' ? 'Selected train current search results mein nahi hai.'
+        : m === 'CLASS_NOT_AVAILABLE' ? `${this.state.getSession(sessionId).selectedClass} is train mein available nahi hai.` : '';
+      if (lead) out.notes.push(lead);
+      const type = m === 'ROUTE' ? 'ORIGIN_REQUIRED' : m === 'DATE' ? 'DATE_REQUIRED' : (m === 'CLASS' || m === 'CLASS_NOT_AVAILABLE') ? 'CLASS_SELECTION_REQUIRED' : 'TRAIN_SELECTION_REQUIRED';
+      out.pendingOverride = { type, hint: guard.question } as any;
+      return 'blocked';
+    }
     let r = this.evaluate(sessionId, ctx);
     if (r.refreshNeeded.length) {
       const res = await this.refresh(sessionId, ctx, runTools, r.refreshNeeded);
@@ -421,6 +438,12 @@ export class BookingPreparationService {
     const res = await runTools(calls);
     if (res.stale) return res;
     for (const st of res.steps) {
+      // Prompt 19 (Part 19): remember "provider could not verify" for this exact basis BEFORE the review is built
+      const tn = st.toolCall?.name;
+      if (tn === 'GET_FARE' || tn === 'CHECK_AVAILABILITY') {
+        if (st.result?.success) recordDependencyOutcome(this.state.getSession(sessionId), tn, true);
+        else if (st.execution && (st.execution.status === 'FAILED' || st.execution.status === 'TIMEOUT')) recordDependencyOutcome(this.state.getSession(sessionId), tn, false, st.result?.error?.code);
+      }
       if (st.status !== 'ok') continue;
       if (st.result.toolName === 'CHECK_AVAILABILITY') this.emit(sessionId, ctx, 'AVAILABILITY_REFRESHED', { trainNumber: st.result.data?.trainNumber, travelClass: st.result.data?.travelClass, status: st.result.data?.status, retrievedAt: st.result.timestamp });
       if (st.result.toolName === 'GET_FARE') this.emit(sessionId, ctx, 'FARE_REFRESHED', { trainNumber: st.result.data?.trainNumber, travelClass: st.result.data?.travelClass, total: st.result.data?.total, passengersCount: st.result.data?.passengersCount, retrievedAt: st.result.timestamp });
@@ -431,6 +454,15 @@ export class BookingPreparationService {
   private createReview(sessionId: string, ctx: PrepCtx, r: BookingReadinessResult, out: PrepOutcome) {
     const s = this.state.getSession(sessionId);
     if (s.review?.valid) { s.review.valid = false; s.review.invalidatedReason = 'SUPERSEDED'; }
+    // Prompt 19 (Part 15–17): never build a review on a train / class that is not authoritative right now.
+    // Runs AFTER superseding, so enterAwaiting() can never proceed on the previous (now stale) review.
+    const guard = bookingPreparationGuard.check(s);
+    if (!guard.ready) {
+      out.error = { code: 'BOOKING_PREPARATION_NOT_READY', message: guard.question || 'Booking details abhi poori nahi hain.' };
+      this.emit(sessionId, ctx, 'BOOKING_PREPARATION_BLOCKED', { missing: guard.missing });
+      out.notes.push(out.error.message);
+      return;
+    }
     s.reviewVersion = (s.reviewVersion || 0) + 1;
     const built = reviewBuilder.build(s, { reviewVersion: s.reviewVersion, availabilityFresh: r.availability === 'FRESH', fareFresh: r.fare === 'FRESH', now: this.clock() });
     if (s.bookingState !== BookingState.REVIEW) this.state.transitionState(sessionId, BookingState.REVIEW);
@@ -481,6 +513,13 @@ export class BookingPreparationService {
     if (reviewFingerprint(s) !== rv.fingerprint) {
       this.invalidateReviewIfChanged(sessionId, ctx);
       out.error = { code: 'REVIEW_INVALIDATED', message: 'Review ke baad details badal gayi hain — naya review confirm karna hoga.' };
+      out.notes.push(out.error.message);
+      return out;
+    }
+    // 2b) Prompt 19 (Part 27): only a CURRENT review (still preparable, details complete) can be confirmed
+    const cg = confirmationGuard(s, { reviewVersion: opts.reviewVersion });
+    if (!cg.ok) {
+      out.error = { code: cg.code, message: cg.message };
       out.notes.push(out.error.message);
       return out;
     }

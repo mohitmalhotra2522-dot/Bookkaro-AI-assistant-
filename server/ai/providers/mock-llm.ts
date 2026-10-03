@@ -1,3 +1,4 @@
+import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { classifyLifecycleIntent } from '../../booking/lifecycle-actions/lifecycle-action-intent';
 import type { LLMProvider, LLMTurnInput, LLMTurnResult, TurnToolResultView } from './llm-provider';
 import type { AgentDecision, TrainReference, InfoRequest, ResultRefinement, ExtractedEntities, PassengerRef, PassengerUpdateRaw } from '../decisions/agent-decision';
@@ -62,7 +63,8 @@ const PAX_FILLER = new Set(['hai', 'hain', 'he', 'h', 'ka', 'ki', 'ke', 'ko', 'n
 const NAME_CMD_WORDS = new Set(['hai', 'hain', 'he', 'h', 'kar', 'do', 'karo', 'kardo', 'karna', 'karni', 'rakho', 'rakh', 'hoga', 'tha', 'thi', 'change', 'badal', 'badlo', 'badalna', 'badalni', 'update', 'edit', 'galat', 'chahiye', 'please', 'plz', 'ji', 'hua', 'naya', 'nayi']);
 /** Strip leading/trailing command words; returns undefined if nothing name-like remains. */
 function cleanNameValue(v: string): string | undefined {
-  const w = v.trim().split(/\s+/);
+  // Prompt 19: punctuation first — "Mohit hai." must not leave "hai." behind as part of the name
+  const w = v.replace(/[.,!?;:]+/g, ' ').trim().split(/\s+/).filter(Boolean);
   while (w.length && NAME_CMD_WORDS.has(w[w.length - 1].toLowerCase())) w.pop();
   while (w.length && NAME_CMD_WORDS.has(w[0].toLowerCase())) w.shift();
   const out = w.join(' ').trim();
@@ -89,6 +91,13 @@ const SENSITIVE_RE = /(password|passwd|otp|captcha|cvv|upi pin|card number|irctc
 const NON_RAILWAY_RE = /\b(weather|mausam|movie|film|cricket|politics|news|stock|share market|joke)\b/i;
 
 const norm = (s: string) => ` ${s.toLowerCase().replace(/[,?!।;:]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+
+/** Prompt 19: shared deterministic count phrases ("hum 3 hain", "one adult and one child") — valid counts only;
+ *  invalid ones are rejected by the orchestrator before any LLM sees them. */
+function parsedCount(t: string, pending: string): string | undefined {
+  const r = parsePassengerCount(t, { expectingCount: pending === 'PASSENGERS_REQUIRED' });
+  return r?.kind === 'COUNT' ? String(r.count) : undefined;
+}
 
 export class MockLLMProvider implements LLMProvider {
   readonly providerId = 'mock-llm';
@@ -277,6 +286,7 @@ export class MockLLMProvider implements LLMProvider {
     if (delta && !/\b\d{5}\s+aur\b/.test(t)) u.passengersDelta = toN(delta[1]);
     else if (minus) u.passengersDelta = -toN(minus[1]);
     else if (abs) u.passengersCountRaw = String(toN(abs[1]));
+    else if (parsedCount(t, pending)) u.passengersCountRaw = parsedCount(t, pending);
     else if (pending === 'PASSENGERS_REQUIRED' && new RegExp(`^\\s${numRe}\\s$`).test(t)) u.passengersCountRaw = String(toN(t.trim()));
 
     // ---- refinement / comparison ----
@@ -404,7 +414,7 @@ export class MockLLMProvider implements LLMProvider {
     const numRe = '(\\d|ek|do|teen|char|chaar|paanch|panch|chhe|chheh)';
     const m = t.match(new RegExp(`\\b${numRe}\\s*(log|logon|passengers?|yatri|tickets?|bande|people|persons?)\\b`));
     if (m) return String(/^\d$/.test(m[1]) ? parseInt(m[1], 10) : NUM_WORD[m[1]]);
-    return undefined;
+    return parsedCount(t, pending);
   }
 
   /** Passenger reference inside a text fragment (proposal only; backend resolves). */
@@ -445,7 +455,7 @@ export class MockLLMProvider implements LLMProvider {
     const g = x.match(GENDER_RE);
     if (g) { out.gender = g[1]; x = x.replace(g[0], ' '); }
     if (!out.name) {
-      const words = x.replace(/[^\p{L}\s.'-]/gu, ' ').split(/\s+/).filter(w => w && !PAX_FILLER.has(w.toLowerCase()) && !ORDINAL_IDX[w.toLowerCase()]);
+      const words = x.replace(/[^\p{L}\s.'-]/gu, ' ').split(/\s+/).map(w => w.replace(/^[.'-]+|[.'-]+$/g, '')).filter(w => w && !PAX_FILLER.has(w.toLowerCase()) && !ORDINAL_IDX[w.toLowerCase()]);
       const rest = words.join(' ').replace(/^[.'-]+|[.'-]+$/g, '').trim();
       if (rest.length >= 2) out.name = rest;
     }

@@ -156,6 +156,8 @@ export interface TurnResumeSnapshot {
   latestAssistantResponse: AssistantTurnResponse | null;
   activeToolExecutions: Array<{ tool: string; toolExecutionId: string; status: string }>;
   lastEventSeq: number;
+  /** Prompt 19 — booking preparation summary (no PII). */
+  bookingPreparation?: import("./booking-preparation").BookingPreparationSummary;
 }
 
 // ------------------------------------------------------------------ client-side ordering (Part 57)

@@ -42,6 +42,8 @@ export type AgentAction =
   | 'UPDATE_DATE'
   | 'UPDATE_PASSENGERS'
   | 'COLLECT_PASSENGER_DETAILS'
+  // Prompt 19 (Part 35): proposal only — the backend decides whether the preparation transition is valid
+  | 'COLLECT_PASSENGERS'
   | 'SHOW_REVIEW'
   | 'REQUEST_CONFIRMATION'
   | 'PREPARE_IRCTC_HANDOFF'
@@ -120,6 +122,9 @@ export interface ExtractedEntities {
   compareTrainNumbers?: string[];
   // ---- Prompt 9: passenger collection ----
   passengerUpdates?: PassengerUpdateRaw[];
+  /** Prompt 19 (Part 13): structured proposal — { passengerIndex (1-based), changes: { name, age, gender, berthPreference } }.
+   *  UNTRUSTED: PassengerChangeValidator checks index / field / value before anything reaches BookingSession. */
+  passengerChanges?: Array<{ passengerIndex: number; changes: Record<string, unknown> }>;
   passengerRemove?: PassengerRef;
   /** "passenger 2 ka naam change karo" (no value yet) */
   passengerFieldChange?: { ref?: PassengerRef; field: string };
@@ -190,6 +195,8 @@ export type OrchestratorErrorCode =
   | 'PROVIDER_DATA_CONFLICT'
   // ---- Prompt 9 ----
   | 'BOOKING_NOT_READY'
+  // ---- Prompt 19: booking preparation ----
+  | import('@shared/booking-preparation').BookingPreparationErrorCode
   | 'MISSING_PASSENGER_COUNT'
   | 'MISSING_PASSENGER_DETAILS'
   | 'INVALID_PASSENGER_DETAILS'
@@ -282,6 +289,8 @@ export interface TurnRecord {
   /** Prompt 18: ToolExecutionPlan nodes (dependency graph; arguments safe/masked). */
   toolPlans?: import('@shared/turn-engine').ToolExecutionPlanNode[];
   /** Prompt 18: ConversationTurnEngine observability (attached by the engine). */
+  /** Prompt 19 — booking preparation summary (no PII). */
+  bookingPreparation?: import('@shared/booking-preparation').BookingPreparationSummary & { preparationPath: string[] };
   turnEngine?: Record<string, any>;
   freshRequested?: boolean;
   /** Prompt 10 — PII-free execution-gateway log line (if the gateway ran this turn). */

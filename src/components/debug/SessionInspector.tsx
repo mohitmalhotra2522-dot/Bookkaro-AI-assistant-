@@ -57,6 +57,9 @@ export const SessionInspector: React.FC<{ ctx: any; meta: InspectorMeta }> = ({ 
           <div style={{ gridColumn: '1 / -1' }}>{cell('passengers', (c.passengers || []).length ? c.passengers.map((p: any) => `${p.id}:${p.name ? 'name' : '·'}/${p.age ?? '·'}/${p.gender ? p.gender[0] : '·'}${p.missingFields && !p.missingFields.length ? '✓' : ''}`).join('  ') : undefined)}</div>
           {cell('review', c.review ? `v${c.review.reviewVersion} ${c.review.valid ? 'valid' : `invalid (${c.review.invalidatedReason || '?'})`}` : undefined, c.review && !c.review.valid)}
           {cell('confirmedV', c.confirmedReviewVersion)}
+          {/* Prompt 19 — derived booking-preparation sub-state (legal transitions only; never COMPLETE) */}
+          {cell('prep', c.bookingPreparationState)}
+          {cell('prepPath', c.preparationTrace?.path?.length ? c.preparationTrace.path.join('→') : undefined)}
           {cell('handoff', c.handoff ? `${c.handoff.snapshot?.handoffId} ${c.handoff.status}${c.handoff.statusReason ? ` (${String(c.handoff.statusReason).split(':')[0]})` : ''}` : undefined, !!c.handoff && c.handoff.status !== 'READY')}
           {cell('expires', c.handoff?.status === 'READY' && c.handoff.snapshot?.expiresAt ? new Date(c.handoff.snapshot.expiresAt).toLocaleTimeString() : undefined)}
           {cell('lifecycle', c.bookingLifecycle?.status)}

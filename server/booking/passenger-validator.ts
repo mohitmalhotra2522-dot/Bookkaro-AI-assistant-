@@ -25,7 +25,7 @@ const BERTHS: BerthPreference[] = ['WINDOW', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_L
 const GENDERS: Gender[] = ['MALE', 'FEMALE', 'OTHER'];
 
 /** Words that must never be accepted as a passenger name (railway / command / secret words). */
-const NOT_A_NAME = /\b(train|fare|ticket|class|availability|date|kal|parso|seat|pnr|station|book|booking|cancel|confirm|haan|nahi|passenger|passengers|naam|name|age|umar|gender|male|female|otp|password|captcha|pin|cvv|upi|card|token|cookie|delhi|amritsar|ludhiana|chandigarh|jalandhar|change|remove|hata|add)\b/i;
+const NOT_A_NAME = /\b(hai|hain|galat|sahi|theek|karo|kardo|train|fare|ticket|class|availability|date|kal|parso|seat|pnr|station|book|booking|cancel|confirm|haan|nahi|passenger|passengers|naam|name|age|umar|gender|male|female|otp|password|captcha|pin|cvv|upi|card|token|cookie|delhi|amritsar|ludhiana|chandigarh|jalandhar|change|remove|hata|add)\b/i;
 
 export interface PassengerFieldError {
   field: string;
@@ -88,6 +88,25 @@ export class PassengerValidator {
     return m;
   }
 
+  /**
+   * Prompt 19 — Part 10: deterministic completeness of the WHOLE passenger set (the LLM never decides this).
+   * Required fields come from PASSENGER_REQUIRED_FIELDS; missing slots (count > records) are reported per index.
+   */
+  completeness(passengers: readonly Passenger[] | undefined, passengersCount?: number | null): {
+    complete: boolean; missing: Array<{ passengerIndex: number; field: 'name' | 'age' | 'gender' }>; invalid: Array<{ passengerIndex: number; field: string }>;
+  } {
+    const ps = passengers || [];
+    const n = Math.max(passengersCount || 0, ps.length);
+    const missing: Array<{ passengerIndex: number; field: 'name' | 'age' | 'gender' }> = [];
+    const invalid: Array<{ passengerIndex: number; field: string }> = [];
+    for (let i = 0; i < n; i++) {
+      const p = ps[i];
+      for (const f of this.missingRequired(p)) missing.push({ passengerIndex: i + 1, field: f });
+      if (p) for (const e of this.validateRecord(p).errors) invalid.push({ passengerIndex: i + 1, field: e.field });
+    }
+    return { complete: n > 0 && missing.length === 0 && invalid.length === 0, missing, invalid };
+  }
+
   /** Full validation of a stored passenger record (required + stored values valid). */
   validateRecord(p: Passenger): { complete: boolean; valid: boolean; missing: string[]; errors: PassengerFieldError[] } {
     const missing = this.missingRequired(p);
@@ -105,7 +124,8 @@ function strictAge(raw: string): number | null {
 
 export function canonicalName(v: any): string | null {
   if (typeof v !== 'string') return null;
-  let n = v.trim()
+  // Prompt 19: trailing punctuation is removed BEFORE the "hai" strip ("Mohit hai." → "Mohit", never "Mohit Hai")
+  let n = v.trim().replace(/[.,!?;:]+$/g, '').trim()
     .replace(/^(actually|nahi|no|sorry)\s*,?\s*/i, '')
     .replace(/^(mera naam|my name is|uska naam|unka naam|naam|name|passenger ka naam)\s*(hai|is|:)?\s*/i, '')
     .replace(/\s+(hai|he|h)$/i, '')

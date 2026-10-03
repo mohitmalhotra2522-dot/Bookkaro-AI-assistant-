@@ -8,6 +8,7 @@
  *  - RAC / Waitlist is relayed verbatim and flagged — never upgraded to "confirmed".
  *  - No PNR, no booking status, no seat numbers, no invented fields.
  */
+import { availabilityStatus, fareStatus } from './preparation/booking-preparation-guard';
 import type { BookingSession } from '@shared/entities';
 import { humanDate, shortName } from '../ai/context/response-formatter';
 
@@ -24,8 +25,8 @@ export interface BookingReview {
   /** @deprecated alias of selectedTrain (Prompt 8 UI) */
   train: { number: string; name: string; departure?: string; arrival?: string } | null;
   selectedClass?: string;
-  availability: { verified: boolean; status?: string; retrievedAt?: string };
-  fare: { verified: boolean; perPassenger?: number; total?: number; currency?: string; passengersCount?: number; retrievedAt?: string };
+  availability: { verified: boolean; status?: string; retrievedAt?: string; dependencyStatus?: string };
+  fare: { verified: boolean; perPassenger?: number; total?: number; currency?: string; passengersCount?: number; retrievedAt?: string; fareStatus?: string };
   warnings: string[];
   dataSource: string;
   confirmationRequired: true;
@@ -89,8 +90,8 @@ export class ReviewBuilder {
       })),
       selectedTrain: train, train,
       selectedClass: cls,
-      availability: availOk ? { verified: true, status: avail.status, retrievedAt: avail.retrievedAt } : { verified: false },
-      fare: fareOk ? { verified: true, perPassenger: fare.perPassenger, total: fare.total, currency: fare.currency || 'INR', passengersCount: fare.passengersCount, retrievedAt: fare.retrievedAt } : { verified: false },
+      availability: availOk ? { verified: true, status: avail.status, retrievedAt: avail.retrievedAt } : { verified: false, dependencyStatus: availabilityStatus(s).status },
+      fare: fareOk ? { verified: true, perPassenger: fare.perPassenger, total: fare.total, currency: fare.currency || 'INR', passengersCount: fare.passengersCount, retrievedAt: fare.retrievedAt } : { verified: false, fareStatus: fareStatus(s).status },
       warnings,
       dataSource: s.dataSourceLabel,
       confirmationRequired: true,

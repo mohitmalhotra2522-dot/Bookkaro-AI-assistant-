@@ -23,6 +23,8 @@ export interface ChatResponse {
   reviewVersion?: number | null;
   confirmedReviewVersion?: number | null;
   readiness?: any;
+  /** Prompt 19 — booking preparation summary (statuses / counts only; no passenger PII). */
+  bookingPreparation?: { bookingPreparationState: string; passengerCollectionState: string; passengerCount: number | null; passengersComplete: number; reviewVersion: number | null; reviewStatus: string; confirmationStatus: string; availabilityStatus: string; fareStatus: string; missingPrerequisites: string[] };
   /** Prompt 10 — execution boundary (real booking disabled). */
   executionCapability?: { realBookingEnabled: boolean; configuredExecutor: string; effectiveExecutor: string; reason: string; executionPossible: false; configErrors: string[] };
   /** Prompt 16 — structured AssistantResponse + derived conversation context (no secrets, PNR masked). */

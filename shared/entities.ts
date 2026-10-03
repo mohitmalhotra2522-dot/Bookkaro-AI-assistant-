@@ -212,6 +212,13 @@ export interface BookingSession {
   confirmedReviewVersion?: number;
   /** Last deterministic readiness evaluation (observability / UI). */
   readiness?: BookingReadinessSnapshot;
+  // ---- Prompt 19: booking preparation sub-state (derived pipeline position; authoritative data stays above) ----
+  /** Legal-transition-only preparation state (never COMPLETE — no booking happens in this milestone). */
+  bookingPreparationState?: import('./booking-preparation').BookingPreparationState;
+  /** Last preparation path taken (observability; e.g. CLASS_SELECTED→BOOKING_PREPARE→PASSENGERS_READY). */
+  preparationTrace?: { from: string; to: string; path: string[]; at: string };
+  /** Provider said fare / availability is unavailable for this exact basis (no amount is ever stored). */
+  preparationDependencies?: { fare?: { status: 'UNAVAILABLE'; basis: string; errorCode: string | null; at: string }; availability?: { status: 'UNAVAILABLE'; basis: string; errorCode: string | null; at: string } };
   /** Selection to carry over after a DATE-only correction (same train/class re-verified on new date). */
   carryOverSelection?: { trainNumber: string; classCode?: string };
 
@@ -328,6 +335,7 @@ export interface PendingInteraction {
 }
 
 export type BookingEventType =
+  | 'PASSENGER_CHANGE_REJECTED' | 'PASSENGER_COUNT_REJECTED' | 'BOOKING_PREPARATION_BLOCKED'
   | 'JOURNEY_UPDATED'
   | 'DATE_UPDATED'
   | 'PASSENGERS_UPDATED'

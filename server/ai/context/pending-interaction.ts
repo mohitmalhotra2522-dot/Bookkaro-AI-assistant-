@@ -87,7 +87,12 @@ export function questionFor(p: PendingInteraction | undefined, s: BookingSession
       }
       if (field === 'name') {
         const nobodyStarted = !(s.passengers || []).some(x => x.name || x.age || x.gender);
-        if (i === 0 && nobodyStarted) return mode === 'VOICE' ? 'Pehle passenger ka naam?' : 'Passenger details ke liye pehle passenger ka naam bataiye.';
+        if (i === 0 && nobodyStarted) {
+          // Prompt 19 (Part 36): "2 passengers ke details chahiye" — one question at a time (voice stays short)
+          const n = s.passengersCount || 0;
+          if (mode === 'VOICE') return 'Pehle passenger ka naam?';
+          return n > 1 ? `${n} passengers ke details chahiye. Pehle passenger ka naam bataiye.` : 'Passenger details ke liye pehle passenger ka naam bataiye.';
+        }
         return `${ordinalLabel(i)} ka naam bataiye.`;
       }
       if (field === 'age') return mode === 'VOICE' ? `${who} ki umar?` : `${who} ki umar kitni hai?`;

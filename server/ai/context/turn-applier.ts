@@ -16,6 +16,8 @@
  * tool calls are validated, so "12014 ki CC availability" can select the train
  * + class and then run CHECK_AVAILABILITY in the same turn.
  */
+import { passengerChangeValidator } from '../../booking/preparation/passenger-change-validator';
+import { validatePassengerCount } from '../../booking/preparation/passenger-count';
 import { classifyConfirmation, AMBIGUOUS_CONFIRMATION_PROMPT } from '../../booking/handoff/confirmation-policy';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import { messageForRecord, SUBMITTING_MESSAGE, UNSAFE_RETRY_MESSAGE, ALREADY_CONFIRMED_MESSAGE, ALREADY_ACTIVE_MESSAGE, VOICE_INTERRUPTION_MESSAGE } from '../../booking/provider/booking-provider-execution-service';
@@ -94,7 +96,7 @@ export interface ApplyOutcome {
 }
 
 const ALLOWED_INTENTS = new Set(['GENERAL_RAILWAY_QUERY', 'BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'CANCEL_BOOKING', 'MODIFY_BOOKING', 'CHECK_REFUND_STATUS', 'UNKNOWN']);
-const ALLOWED_ACTIONS = new Set(['ASK_CLARIFICATION', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'REQUEST_CONFIRMATION', 'PREPARE_IRCTC_HANDOFF', 'REFINE_RESULTS', 'COMPARE_TRAINS', 'NO_ACTION']);
+const ALLOWED_ACTIONS = new Set(['ASK_CLARIFICATION', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'COLLECT_PASSENGERS', 'SHOW_REVIEW', 'REQUEST_CONFIRMATION', 'PREPARE_IRCTC_HANDOFF', 'REFINE_RESULTS', 'COMPARE_TRAINS', 'NO_ACTION']);
 
 const idx = (s: BookingState) => STATE_ORDER.indexOf(s);
 
@@ -414,6 +416,20 @@ export class ContextualTurnApplier {
       out.applied.push(...r.applied);
     }
 
+    // 10-pre) Prompt 19 (Part 13/14): structured LLM proposal { passengerIndex, changes } — validated by
+    //     PassengerChangeValidator (index exists / field in contract / value valid / never a credential) and
+    //     only then converted to an explicit update of that STABLE passenger id.
+    if (e.passengerChanges?.length && S().selectedTrain && S().selectedClass) {
+      const conv: NonNullable<typeof e.passengerUpdates> = [];
+      for (const pc of e.passengerChanges) {
+        const v = passengerChangeValidator.validate(S(), pc);
+        if (!v.ok) { emit('PASSENGER_CHANGE_REJECTED', { code: v.code, passengerIndex: v.passengerIndex, fields: v.fields }); return fail(v.code, v.message); }
+        conv.push({ ref: { kind: 'ID', value: v.passengerId }, fields: pc.changes as any, explicit: true });
+      }
+      e.passengerUpdates = [...(e.passengerUpdates || []), ...conv];
+    }
+    delete (e as any).passengerChanges;
+
     // 10) Passenger collection (remove / field-change / updates) — resolved to stable ids.
     //     Never before train + class are selected (backend guard, independent of the LLM).
     if ((e.passengerUpdates?.length || e.passengerRemove || e.passengerFieldChange) && (!S().selectedTrain || !S().selectedClass)) {
@@ -437,7 +453,11 @@ export class ContextualTurnApplier {
         return i >= 0 ? { ok: true as const, passenger: s.passengers[i], index: i } : null;
       })();
       if (!resolved) return fail('INVALID_PASSENGER_INDEX', 'Kis passenger ki detail badalni hai? Passenger number batayein.');
-      const field = ['name', 'age', 'gender'].includes(e.passengerFieldChange.field) ? e.passengerFieldChange.field : 'name';
+      // Prompt 19 (Part 14): a field outside the Passenger contract is rejected — never silently mapped to "name"
+      if (!['name', 'age', 'gender', 'berthPreference'].includes(e.passengerFieldChange.field)) {
+        return fail('INVALID_PASSENGER_FIELD', 'Passenger ke liye sirf naam, umar, gender aur berth preference liye ja sakte hain.');
+      }
+      const field = e.passengerFieldChange.field;
       s.lastPassengerRefId = resolved.passenger.id;
       out.pendingOverride = { type: 'PASSENGER_DETAILS_REQUIRED', data: { passengerId: resolved.passenger.id, index: resolved.index, field, correction: true } };
       out.applied.push('PASSENGER_FIELD_CHANGE_REQUESTED');
@@ -572,7 +592,9 @@ export class ContextualTurnApplier {
     if (typeof e.passengersDelta === 'number') n = (s.passengersCount ? base : 1) + e.passengersDelta;
     else n = parseInt(String(e.passengersCountRaw), 10);
     if (!passengerCollection.validCount(n)) {
-      return { error: { code: 'INVALID_CONTEXT', message: 'Ek booking mein 1 se 6 passengers tak ho sakte hain. Kitne passengers hain?' }, notes: [], applied: [] };
+      // Prompt 19 (Part 3/47): typed, deterministic — an invalid count is never corrected or applied
+      const v = validatePassengerCount(n);
+      return { error: { code: 'INVALID_PASSENGER_COUNT', message: v.ok ? 'Ek booking mein 1 se 6 passengers tak ho sakte hain. Kitne passengers hain?' : v.message }, notes: [], applied: [] };
     }
     if (n === s.passengersCount) return { notes: [], applied: [] };
     const prev = s.passengersCount;

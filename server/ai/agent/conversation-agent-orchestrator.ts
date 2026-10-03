@@ -59,6 +59,8 @@ import type { TurnLoopObserver } from '../runtime/llm-tool-runtime';
 import { ConversationContextBuilder, ToolResultContextStore } from '../turn-engine/conversation-context-builder';
 import { pendingQuestionCode } from '../turn-engine/pending-question';
 import { detectBareDay, resolveMonthAnswer } from '../turn-engine/ambiguous-date-clarifier';
+import { parsePassengerCount } from '../../booking/preparation/passenger-count';
+import { syncPreparationState, recordDependencyOutcome, bookingPreparationSummary } from '../../booking/preparation/booking-preparation';
 
 export interface ProcessTurnOptions {
   /** Prompt 17: client-generated id of ONE user message. A duplicate DELIVERY (retry, reconnect,
@@ -138,6 +140,9 @@ const SENSITIVE_REPLY = 'Main kabhi password, OTP, CAPTCHA, CVV, card, UPI PIN y
 const NON_RAILWAY_REPLY = 'Main railway booking aur train information mein help kar sakta hoon.';
 const MAX_INPUT_CHARS = 500;
 const MAX_TURN_HISTORY = 100;
+
+/** Prompt 19: the bare-day month answer rewrote the input ("October" → "22 October") — not a count statement. */
+function llmInputChanged(llmInput: string, normalized: string): boolean { return llmInput !== normalized; }
 
 export class ConversationAgentOrchestrator {
   private history: Map<string, HistoryMsg[]> = new Map();
@@ -273,6 +278,22 @@ export class ConversationAgentOrchestrator {
         (sA as any).pendingQuestion = pendingQuestionCode(sA.pendingInteraction);
         return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
           message: amb.message, error: { code: 'AMBIGUOUS_DATE', message: amb.message }, rt: null, decision: null, changes: [], extra });
+      }
+    }
+
+    // ---- Prompt 19 (Part 3): invalid passenger count ("zero" / "minus two" / "100 passengers") → deterministic
+    //      INVALID_PASSENGER_COUNT from the user's OWN words; an LLM can never silently "correct" it ----
+    if (!utter.newBooking && !llmInputChanged(llmInput, normalizedInput)) {
+      const pc = parsePassengerCount(normalizedInput, { expectingCount: s0.pendingInteraction?.type === 'PASSENGERS_REQUIRED' });
+      if (pc?.kind === 'INVALID') {
+        const sP = this.state.getSession(sessionId);
+        if (!sP.pendingInteraction || sP.pendingInteraction.type !== 'PASSENGERS_REQUIRED') {
+          sP.pendingInteraction = { type: 'PASSENGERS_REQUIRED', setAtTurnId: turnId } as any;
+        }
+        (sP as any).pendingQuestion = pendingQuestionCode(sP.pendingInteraction);
+        events.push('PASSENGER_COUNT_REJECTED');
+        return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
+          message: pc.message, error: { code: 'INVALID_PASSENGER_COUNT', message: pc.message, details: { reason: pc.reason } }, rt: null, decision: null, changes: [], extra });
       }
     }
 
@@ -529,6 +550,18 @@ export class ConversationAgentOrchestrator {
       resultStatus: st.status, errorCode: st.result.error?.code, provider: st.result.provider, latencyMs: st.result.latencyMs,
       toolExecutionId: st.execution?.toolExecutionId, executionStatus: st.execution?.status, fresh: st.execution?.fresh
     }));
+    // ---- Prompt 19: provider outcome of fare / availability for the CURRENT basis (UNAVAILABLE ≠ an amount),
+    //      then move the preparation sub-state along legal transitions only (never COMPLETE) ----
+    let prepTrace: { from: string; to: string; path: string[] } | null = null;
+    if (!a.stale) {
+      for (const st of steps) {
+        const nm = st.toolCall.name;
+        if (nm !== 'GET_FARE' && nm !== 'CHECK_AVAILABILITY') continue;
+        if (st.result.success) recordDependencyOutcome(s, nm, true);
+        else if (st.execution && (st.execution.status === 'FAILED' || st.execution.status === 'TIMEOUT')) recordDependencyOutcome(s, nm, false, st.result.error?.code);
+      }
+      prepTrace = syncPreparationState(s);
+    }
     const turnLog: TurnRecord = {
       sessionId: a.sessionId, turnId: a.turnId, requestId: a.requestId, sessionVersion: s.sessionVersion,
       timestamp: new Date().toISOString(), stateBefore: a.stateBefore, stateAfter: s.bookingState,
@@ -572,7 +605,9 @@ export class ConversationAgentOrchestrator {
       toolExecutions: (a.rt?.toolExecutions || []).map(r => ({ ...r, argumentsSummary: maskPnrDeep(r.argumentsSummary) })),
       toolRounds: a.rt?.toolRounds ?? 0,
       toolPlans: (a.rt?.toolPlans || []).map(n => ({ ...n, arguments: maskPnrDeep(n.arguments) })),
-      freshRequested: isExplicitFreshRequest(a.normalizedInput)
+      freshRequested: isExplicitFreshRequest(a.normalizedInput),
+      // ---- Prompt 19 observability: counts / statuses only (no passenger names / ages) ----
+      bookingPreparation: { ...bookingPreparationSummary(s), preparationPath: prepTrace?.path || [] }
     };
     if (!a.stale) {
       // Prompt 18: BookingSession tracks the Part 19 pending-question code (derived, authoritative)

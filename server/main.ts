@@ -1,3 +1,4 @@
+import { bookingPreparationSummary } from './booking/preparation/booking-preparation';
 import { parseReconciliationConfig } from './booking/lifecycle/reconciliation-config';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
@@ -93,6 +94,8 @@ server.post('/api/chat', async (request, reply) => {
     reviewVersion: ctx.review?.valid ? ctx.review.reviewVersion : null,
     confirmedReviewVersion: ctx.confirmedReviewVersion ?? null,
     readiness: ctx.readiness ?? null,
+    // Prompt 19: derived booking-preparation status (counts / statuses only)
+    bookingPreparation: bookingPreparationSummary(ctx as any),
     executionCapability: executionCapability(),
     handoff: ctx.handoff ? { handoffId: ctx.handoff.snapshot.handoffId, status: ctx.handoff.status, statusReason: ctx.handoff.statusReason ?? null, reviewVersion: ctx.handoff.snapshot.reviewVersion, expiresAt: ctx.handoff.snapshot.expiresAt } : null,
     bookingLifecycle: ctx.bookingLifecycle?.status ?? null,

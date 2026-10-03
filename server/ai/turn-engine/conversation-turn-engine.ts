@@ -15,6 +15,7 @@
  * It never mutates BookingSession, never cancels a provider request (no safe cancellation exists), and
  * never repeats a booking action on reconnect.
  */
+import { bookingPreparationSummary } from '../../booking/preparation/booking-preparation';
 import type { ConversationAgentOrchestrator, AgentTurnResult, ProcessTurnOptions } from '../agent/conversation-agent-orchestrator';
 import { normalizeInput } from '../agent/conversation-agent-orchestrator';
 import type { ConversationStateManager } from '../state/conversation-state';
@@ -126,7 +127,9 @@ export class ConversationTurnEngine {
       currentTurn: cur ? { turnId: cur.turnId, sequence: cur.sequence, status: cur.status, presentation: cur.presentation } : null,
       latestAssistantResponse: latest?.assistantResponse ?? null,
       activeToolExecutions: active,
-      lastEventSeq: this.events.lastSeq(sessionId)
+      lastEventSeq: this.events.lastSeq(sessionId),
+      // Prompt 19 (Part 54): preparation / collection / reviewVersion / confirmation survive reload (no PII)
+      bookingPreparation: bookingPreparationSummary(s)
     };
   }
 

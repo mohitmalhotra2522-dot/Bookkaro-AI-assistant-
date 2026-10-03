@@ -8,6 +8,7 @@
  *    DateResolver turns it into a canonical date; the LLM never does date arithmetic.
  *  - countMentioned(): passenger counts named in the user's words.
  */
+import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
@@ -80,5 +81,8 @@ export function countMentioned(text: string): Set<number> {
     if (/^\d$/.test(w)) out.add(Number(w));
     else if (NUM_WORDS[w]) out.add(NUM_WORDS[w]);
   }
+  // Prompt 19: counts the deterministic parser derives from the user's words ("one adult and one child" → 2)
+  const pc = parsePassengerCount(text, { expectingCount: false });
+  if (pc?.kind === 'COUNT') out.add(pc.count);
   return out;
 }
