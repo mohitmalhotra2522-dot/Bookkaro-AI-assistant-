@@ -59,6 +59,8 @@ const App: React.FC = () => {
           sessionVersion: resp.sessionVersion, searchResultsVersion: resp.searchResultsVersion,
           toolActivity: resp.toolActivity, events: resp.events, error: resp.error,
           executionCapability: resp.executionCapability,
+          tools: (resp.turnLog?.toolExecutions || []).map((t: any) => ({ tool: t.tool, status: t.status, fresh: !!t.fresh, latencyMs: t.latencyMs ?? null, parallelGroup: t.parallelGroup ?? null, rejectionReason: t.rejectionReason ?? null })),
+          journeyVersion: resp.turnLog?.journeyVersion,
           conversation: resp.conversationContext ? {
             activeJourneyId: resp.conversationContext.activeJourneyId, pendingQuestion: resp.conversationContext.pendingQuestion,
             missingFields: resp.conversationContext.missingFields || [], activeBookingId: resp.conversationContext.activeBookingId,

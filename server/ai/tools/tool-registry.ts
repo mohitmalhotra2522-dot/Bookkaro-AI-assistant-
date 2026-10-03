@@ -66,7 +66,8 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
       date: { type: 'string', description: 'Canonical date YYYY-MM-DD (after DateResolver)', required: true },
       preferredClass: { type: 'string', description: 'AC | NON_AC | ANY', enum: ['AC','NON_AC','ANY'] },
       preferredTime: { type: 'string', description: 'MORNING | AFTERNOON | EVENING | NIGHT | ANY', enum: ['MORNING','AFTERNOON','EVENING','NIGHT','ANY'] },
-      passengersCount: { type: 'number', description: 'Number of passengers 1-6' }
+      passengersCount: { type: 'number', description: 'Number of passengers 1-6' },
+      dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
     },
     requiresState: ['origin','destination','date']
   },
@@ -75,7 +76,8 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
     description: 'Get detailed info about a specific train. If trainNumber is omitted, the backend uses the train currently in focus (selected / last discussed); it never guesses.',
     parameters: {
       trainNumber: { type: 'string', description: 'Train number e.g. 12014 (optional: defaults to focus train)' },
-      date: { type: 'string', description: 'YYYY-MM-DD (optional)' }
+      date: { type: 'string', description: 'YYYY-MM-DD (optional)' },
+      dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
     }
   },
   {
@@ -89,7 +91,11 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
     parameters: {
       trainNumber: { type: 'string', description: 'Train number (optional: defaults to selected train)' },
       travelClass: { type: 'string', description: 'Class code e.g. CC, 2S, 3A (optional: defaults to selected class)' },
-      date: { type: 'string', description: 'YYYY-MM-DD (optional: defaults to journey date)' }
+      date: { type: 'string', description: 'YYYY-MM-DD (optional: defaults to journey date)' },
+      origin: { type: 'string', description: 'Journey origin code (optional: must match the session journey)' },
+      destination: { type: 'string', description: 'Journey destination code (optional: must match the session journey)' },
+      passengersCount: { type: 'number', description: 'Passenger count (optional: must match the session count)' },
+      dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
     },
     requiresState: ['selectedTrain','selectedClass']
   },
@@ -100,7 +106,10 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
       trainNumber: { type: 'string', description: 'Train number (optional: defaults to selected train)' },
       travelClass: { type: 'string', description: 'Class code (optional: defaults to selected class)' },
       passengersCount: { type: 'number', description: 'Number of passengers (optional: defaults to session count)' },
-      date: { type: 'string', description: 'YYYY-MM-DD' }
+      date: { type: 'string', description: 'YYYY-MM-DD' },
+      origin: { type: 'string', description: 'Journey origin code (optional: must match the session journey)' },
+      destination: { type: 'string', description: 'Journey destination code (optional: must match the session journey)' },
+      dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
     },
     requiresState: ['selectedTrain','selectedClass']
   },
@@ -109,7 +118,9 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
     name: 'TRACK_TRAIN',
     description: 'Fresh LIVE running status of a train (read-only, always a new provider call). trainNumber must come from the user, the current results or the backend booking record; if omitted the backend uses the booking / train in focus. Never guess a train number. Live train status is separate from booking status and PNR status.',
     parameters: {
-      trainNumber: { type: 'string', description: 'Train number e.g. 12014 (optional: defaults to the booking / train in focus)' }
+      trainNumber: { type: 'string', description: 'Train number e.g. 12014 (optional: defaults to the booking / train in focus)' },
+      date: { type: 'string', description: 'Run date YYYY-MM-DD (optional; live data only, never the timetable)' },
+      dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
     }
   },
   {

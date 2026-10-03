@@ -34,11 +34,13 @@ import { RequestGuard } from '../context/request-guard';
 import { buildLLMContext, type HistoryMsg } from '../context/context-builder';
 import { ConversationContextManager, pendingQuestionOf, summarizeContext } from '../conversation/conversation-context';
 import { normalizeUtterance } from '../conversation/input-normalizer';
-import { guardResponseFacts } from '../conversation/response-fact-guard';
+import { railwayResponseGrounding, UNVERIFIED_FALLBACK } from '../tool-runtime/railway-response-grounding';
+import { isExplicitFreshRequest } from '../tool-runtime/freshness';
+import { syncJourneyVersion } from '../tool-runtime/journey-version';
 import { buildAssistantResponse } from '../conversation/assistant-response';
 import type { AssistantResponse, ConversationContext, ContextPatch, RejectedPatch } from '@shared/conversation-context';
 import { derivePendingInteraction, questionFor } from '../context/pending-interaction';
-import { searchSummary, factFromTool, liveToolMessage, LIVE_TOOLS } from '../context/response-formatter';
+import { searchSummary, factFromTool, liveToolMessage, LIVE_TOOLS, humanDate, shortName } from '../context/response-formatter';
 import { PostBookingService } from '../../booking/post-booking/post-booking-service';
 import type { BookingHistoryStore } from '../../booking/post-booking/booking-history-store';
 import { BookingLifecycleActionService, type LifecycleActionServiceOptions } from '../../booking/lifecycle-actions/booking-lifecycle-action-service';
@@ -55,6 +57,10 @@ import type { BookingExecutorRegistry } from '../../booking/execution/booking-ex
 import type { ExecutionConfig } from '../../booking/execution/execution-config';
 
 export interface ProcessTurnOptions {
+  /** Prompt 17: client-generated id of ONE user message. A duplicate DELIVERY (retry, reconnect,
+   *  double submit, duplicate STT/TTS event) replays the original turn instead of re-executing tools.
+   *  A NEW message (new id) — including "abhi dobara check karo" — always runs fresh. */
+  clientMessageId?: string;
   /** Optimistic concurrency: if supplied and different from the current
    *  sessionVersion, the turn is rejected with SESSION_VERSION_CONFLICT. */
   expectedSessionVersion?: number;
@@ -91,6 +97,8 @@ export interface OrchestratorOptions {
 }
 
 export interface AgentTurnResult {
+  /** Prompt 17: true when this is a replay of an already-processed client message (no tool re-execution). */
+  duplicateDelivery?: boolean;
   responseMessage: string;
   newState: BookingState;
   context: BookingSession;
@@ -165,7 +173,21 @@ export class ConversationAgentOrchestrator {
   getTurnHistory(sessionId: string): TurnRecord[] { return [...(this.turns.get(sessionId) || [])]; }
   getConversationHistory(sessionId: string): HistoryMsg[] { return [...(this.history.get(sessionId) || [])]; }
 
+  /** Prompt 17: per-session duplicate-delivery map (bounded; NOT a railway data cache). */
+  private deliveries = new Map<string, Map<string, Promise<AgentTurnResult>>>();
+
   async processTurn(sessionId: string, userText: string, mode: 'TEXT' | 'VOICE', opts: ProcessTurnOptions = {}): Promise<AgentTurnResult> {
+    if (opts.clientMessageId) {
+      const id = String(opts.clientMessageId).slice(0, 100);
+      const m = this.deliveries.get(sessionId) || new Map<string, Promise<AgentTurnResult>>();
+      this.deliveries.set(sessionId, m);
+      const prior = m.get(id);
+      if (prior) { const r = await prior; return { ...r, duplicateDelivery: true }; }
+      const p = this.processTurn(sessionId, userText, mode, { ...opts, clientMessageId: undefined });
+      m.set(id, p);
+      while (m.size > 50) m.delete(m.keys().next().value as string);
+      return p;
+    }
     const startedAt = Date.now();
     const turnId = uuid();
     const requestId = uuid();
@@ -252,6 +274,8 @@ export class ConversationAgentOrchestrator {
     let pendingOverride: PendingInteraction | undefined;
     const bound = this.runtime.bind(guard.getSession, guard.commit, {
       requestId,
+      // Prompt 17: correlation ids for tool execution records + explicit fresh request (never cached anyway)
+      sessionId, turnId, forceFresh: isExplicitFreshRequest(llmInput),
       isStale: () => guard.isStale(),
       buildContext: () => {
         // Prompt 16: structured context package — authoritative session view + structured conversation
@@ -358,6 +382,14 @@ export class ConversationAgentOrchestrator {
       }
       if (!prep) this.preparation.evaluate(sessionId);
     }
+    // Prompt 17 (Part 39): the LLM asked about a different train than the selected one and the user did
+    // not name it → no provider call; ask "12014 selected hai. 14542 check karna hai?" (haan → select + check)
+    const trainConflict = rt.steps.find(st => st.status === 'rejected' && st.result.error?.code === 'CONTEXT_CONFLICT' && (st.result.error as any)?.details?.field === 'selectedTrain');
+    if (trainConflict && !pendingOverride) {
+      const d = (trainConflict.result.error as any).details;
+      pendingOverride = { type: 'CLARIFICATION_REQUIRED', hint: trainConflict.result.error!.message,
+        data: { kind: 'CONTEXT_CONFLICT', field: 'selectedTrain', proposedCode: d.proposed, current: d.current, tool: trainConflict.toolCall.name } } as any;
+    }
     const sess = this.state.getSession(sessionId);
     const override = pendingOverride ?? prep?.pendingOverride;
     // A pending override from a turn that then moved the flow elsewhere must not stick.
@@ -378,7 +410,8 @@ export class ConversationAgentOrchestrator {
   private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = []): string {
     // Prompt 16: LLM wording may phrase authoritative facts only (invented train / fare / PNR / availability removed)
     const factCheck = (text: string): string => {
-      const g = guardResponseFacts(text, { session: s, steps: rt.steps, records: this.postBooking.store.getBookingsForSession(s.sessionId) as any });
+      // Prompt 17: RailwayResponseGroundingValidator — every fact needs RAILWAY_PROVIDER / BOOKING_RECORD / BOOKING_SESSION
+      const g = railwayResponseGrounding.validate(text, { session: s, steps: rt.steps, records: this.postBooking.store.getBookingsForSession(s.sessionId) as any });
       rejectedClaims.push(...g.rejected);
       return g.text;
     };
@@ -395,7 +428,13 @@ export class ConversationAgentOrchestrator {
     for (const o of rt.applyOutcomes) if (o.directAnswer) parts.push(o.directAnswer);
 
     const searchOk = rt.steps.some(st => st.result.toolName === 'SEARCH_TRAINS' && st.status === 'ok');
-    if (searchOk) {
+    // Prompt 17 (Part 46): SUCCESS with zero trains → honest empty result (not a failure, no card)
+    const searchEmpty = searchOk && rt.steps.filter(st => st.result.toolName === 'SEARCH_TRAINS' && st.status === 'ok').slice(-1)[0]?.result.empty === true;
+    if (searchEmpty) {
+      const sx = rt.steps.filter(st => st.result.toolName === 'SEARCH_TRAINS' && st.status === 'ok').slice(-1)[0].validatedArguments || {};
+      const o = sx.origin || s.origin, d = sx.destination || s.destination;
+      parts.push(`${shortName(o === s.origin ? s.originName : undefined, o)} → ${shortName(d === s.destination ? s.destinationName : undefined, d)}, ${humanDate(sx.date || s.date)}: provider ne koi train nahi di (koi train nahi mili). Koi aur date ya route try karna hai?`);
+    } else if (searchOk) {
       parts.push(searchSummary(s, mode));
       cards.push({ type: 'trains', data: { trains: currentResults(s), searchResultsVersion: s.searchResultsVersion, source: s.providerSource || 'mock', retrievedAt: s.searchMeta?.retrievedAt } });
     }
@@ -410,7 +449,7 @@ export class ConversationAgentOrchestrator {
     else if (llmFinalUseful) {
       const guarded = factCheck(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode)));
       if (guarded) parts.push(guarded);
-      else if (rejectedClaims.length) parts.push('Ye jaankari abhi provider se verify nahi hui hai, isliye main ise confirm nahi kar sakta.');
+      else if (rejectedClaims.length) parts.push(UNVERIFIED_FALLBACK);
     }
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
@@ -422,7 +461,12 @@ export class ConversationAgentOrchestrator {
       if (st.result.toolName === 'TRACK_TRAIN') cards.push({ type: 'live_status', data: st.result.data });
     }
     parts.push(...progress);
-    if (rt.stopReason === 'tool_limit' && rt.error) parts.push(rt.error.message);
+    if (rt.stopReason === 'tool_limit' && rt.error) {
+      // Prompt 17: limit / loop stop keeps the VERIFIED results of this turn (deterministic phrasing) + one notice
+      const facts = [...new Set(nonSearch.filter(st => st.status === 'ok' && !LIVE_TOOLS.has(st.result.toolName)).map(st => factFromTool(st.result.toolName, st.result.data, mode)).filter(Boolean))];
+      for (const f of facts) if (!parts.join(' ').includes(f)) parts.push(f);
+      if (!parts.join(' ').includes(rt.error.message)) parts.push(rt.error.message);
+    }
     const joined = parts.join(' ');
     if (q && !joined.includes(q)) parts.push(q);
     if (!parts.length) parts.push((rt.finalDecision.clarification && factCheck(rt.finalDecision.clarification)) || 'Main train search, selection, availability aur fare mein madad kar sakta hoon.');
@@ -449,7 +493,8 @@ export class ConversationAgentOrchestrator {
     const toolResults: TurnToolRecord[] = steps.map(st => ({
       toolCallId: st.toolCall.callId, toolName: st.toolCall.name,
       validatedArguments: st.validatedArguments ? maskPnrDeep(redact(st.validatedArguments)) : undefined,
-      resultStatus: st.status, errorCode: st.result.error?.code, provider: st.result.provider, latencyMs: st.result.latencyMs
+      resultStatus: st.status, errorCode: st.result.error?.code, provider: st.result.provider, latencyMs: st.result.latencyMs,
+      toolExecutionId: st.execution?.toolExecutionId, executionStatus: st.execution?.status, fresh: st.execution?.fresh
     }));
     const turnLog: TurnRecord = {
       sessionId: a.sessionId, turnId: a.turnId, requestId: a.requestId, sessionVersion: s.sessionVersion,
@@ -488,7 +533,12 @@ export class ConversationAgentOrchestrator {
       activeJourneyId: this.context.activeJourneyId(a.sessionId),
       interruption: !!x.interruption,
       contextBefore: x.contextBefore,
-      contextAfter: undefined
+      contextAfter: undefined,
+      // ---- Prompt 17 observability: tool execution records (arguments hashed, PNR masked) ----
+      journeyVersion: syncJourneyVersion(s),
+      toolExecutions: (a.rt?.toolExecutions || []).map(r => ({ ...r, argumentsSummary: maskPnrDeep(r.argumentsSummary) })),
+      toolRounds: a.rt?.toolRounds ?? 0,
+      freshRequested: isExplicitFreshRequest(a.normalizedInput)
     };
     if (!a.stale) {
       this.context.noteTools(a.sessionId, steps, s);

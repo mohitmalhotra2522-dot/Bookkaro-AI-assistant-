@@ -42,7 +42,10 @@ export class RailwaySearchOrchestrator {
    */
   async trySearch(
     text: string,
-    detectedUpdates: { origin?: string; originName?: string; destination?: string; destinationName?: string; date?: string; passengerCount?: number; preferredClass?: any; preferredTime?: any }
+    detectedUpdates: { origin?: string; originName?: string; destination?: string; destinationName?: string; date?: string; passengerCount?: number; preferredClass?: any; preferredTime?: any },
+    /** Prompt 17: result guard evaluated AFTER the provider returns and BEFORE anything is committed.
+     *  false → the late result belongs to a superseded journey / turn / timed-out call and is NOT applied. */
+    opts?: { canApply?: () => boolean }
   ): Promise<SearchOrchestratorResult> {
     const session = this.getSession();
 
@@ -141,6 +144,15 @@ export class RailwaySearchOrchestrator {
     };
 
     const resp = await this.getProvider().searchTrains(req);
+
+    if (opts?.canApply && !opts.canApply()) {
+      return {
+        ok: false,
+        error: { code: 'STALE_TOOL_RESULT' as any, message: 'Search result belongs to a superseded journey/request and was not applied.' },
+        targetState: this.getSession().bookingState,
+        meta: resp.meta
+      };
+    }
 
     if (!resp.ok || !resp.data) {
       // Error → conversation will surface structured error, never fake trains

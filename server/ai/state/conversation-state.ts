@@ -7,6 +7,7 @@ export type InvalidationScope = 'ROUTE' | 'DATE' | 'TRAIN' | 'CLASS' | 'PASSENGE
 import { MOCK_DATA_LABEL } from '@shared/constants';
 import { uuid, sessionId as newSessionId } from '../orchestrator/utils';
 import { passengerCollection } from '../../booking/passenger-collection';
+import { syncJourneyVersion } from '../tool-runtime/journey-version';
 
 /**
  * Conversation/Booking state manager.
@@ -148,6 +149,7 @@ export class ConversationStateManager {
   bump(sessionId: string): number {
     const s = this.getSession(sessionId);
     s.sessionVersion = (s.sessionVersion || 0) + 1;
+    syncJourneyVersion(s);            // Prompt 17: material journey change → journeyVersion++
     return s.sessionVersion;
   }
 

@@ -163,6 +163,10 @@ export interface BookingSession {
    *  result rejection (late tool results from older versions must not overwrite
    *  newer state). */
   sessionVersion: number;
+  /** Prompt 17: increments on every MATERIAL journey change (origin | destination | date). */
+  journeyVersion?: number;
+  /** Prompt 17: fingerprint the journeyVersion was computed for (internal). */
+  journeyKey?: string;
   /** Per-search version. Bumped on every SEARCH_TRAINS execution; train
    *  references by displayIndex must match current version. */
   searchResultsVersion: number;

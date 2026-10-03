@@ -110,6 +110,10 @@ export class MockLLMProvider implements LLMProvider {
 
     if (SENSITIVE_RE.test(t)) return this.final('UNKNOWN', 'Main kabhi password, OTP, CAPTCHA, card ya UPI PIN nahi maangta. Kripya aisi jaankari share na karein.');
     if (NON_RAILWAY_RE.test(t) && !/\b(train|railway|ticket|fare|kiraya)\b/.test(t)) return this.final('UNKNOWN', 'Main railway booking aur train jaankari mein hi madad kar sakta hoon.');
+    // Prompt 17: "cancelled trains" is a LIVE provider fact → request the approved tool (never answer from memory)
+    if (!turn.length && /\b(cancel(led)?|radd?) (hui |huyi |hue )?trains?\b|\btrains? (jo )?(cancel(led)?|radd?) (hui|huyi|hai|hain)\b/.test(t)) {
+      return this.d('GENERAL_RAILWAY_QUERY', 'NO_ACTION', {}, [{ callId: uuid(), name: 'GET_CANCELLED_TRAINS' as any, arguments: {} }]);
+    }
     // Prompt 14: post-booking lookups — the LLM only PROPOSES read-only tool calls; the backend
     // grounds the PNR / train number (user's words or the booking record) and answers deterministically.
     // Prompt 15: lifecycle actions — the (mock) LLM only IDENTIFIES the intent; no tool exists for
@@ -300,6 +304,11 @@ export class MockLLMProvider implements LLMProvider {
       if (/\b(doosri|dusri|dosri|another|other|koi aur)\b/.test(t) && (hasNeg || /\b(koi aur|another|other)\b/.test(t)) && /\b(train|wali|wala|one)\b/.test(t)) u.trainRef = withVer({ kind: 'ALTERNATIVE', value: 'OTHER' });
       else if (/(jo pehle batayi|jo pehle wali|pehle wali train|previous|pichli wali|pichhli wali)/.test(t)) u.trainRef = withVer({ kind: 'PREVIOUS', value: 'PREVIOUS' });
       else if (nums.length === 1 && !this.isInfoOnly(t, cls)) u.trainRef = withVer({ kind: 'TRAIN_NUMBER', value: nums[0] });
+      else if (nums.length === 2 && hasNeg && !this.isInfoOnly(t, cls)) {
+        // Prompt 17: "12014 nahi 14542 wali" — the user explicitly switches to the post-negation train
+        const after = t.split(NEG_RE).slice(-1)[0].match(/\b(\d{5})\b/);
+        if (after) u.trainRef = withVer({ kind: 'TRAIN_NUMBER', value: after[1] });
+      }
       else if (!ordinalClassClash && /\b(pehli|pehla|pahli|first|1st)\b/.test(t)) u.trainRef = withVer({ kind: 'DISPLAY_INDEX', value: 1 });
       else if (!ordinalClassClash && /\b(doosri|dusri|dosri|second|2nd)\b/.test(t)) u.trainRef = withVer({ kind: 'DISPLAY_INDEX', value: 2 });
       else if (!ordinalClassClash && /\b(teesri|tisri|third|3rd)\b/.test(t)) u.trainRef = withVer({ kind: 'DISPLAY_INDEX', value: 3 });
@@ -342,6 +351,9 @@ export class MockLLMProvider implements LLMProvider {
     if (this.isInfoOnly(t, cls)) { delete u.dateRaw; delete u.originRaw; delete u.destinationRaw; delete u.stationOnlyRaw; delete u.trainRef; }
     if (!u.infoRequests.length && /\b(iske baare|iski jaankari|iski details)\b/.test(t)) u.infoRequests.push('TRAIN_INFO');
     if (u.infoRequests.includes('TIMETABLE') && nums.length === 1) u.infoTrainNumber = nums[0];
+    // Prompt 17: "abhi dobara check karo" — explicit FRESH repeat of the current quote (always a new provider call)
+    if (!u.infoRequests.length && /\b(dobara|dubara|phir se|fir se|again|refresh|latest)\b/.test(t) && /\b(check|dekho|dekh|batao)\b/.test(t)
+        && s.selectedTrain && s.selectedClass && !u.trainRef && !u.classRaw) u.infoRequests.push('AVAILABILITY');
     // order matters for multi-step chains
     const order: InfoRequest[] = ['TRAIN_INFO', 'TIMETABLE', 'AVAILABILITY', 'FARE'];
     u.infoRequests.sort((a, b) => order.indexOf(a) - order.indexOf(b));
@@ -511,6 +523,13 @@ export class MockLLMProvider implements LLMProvider {
       if (u.negate) return this.final('UPDATE_JOURNEY', 'Theek hai, jo pehle tha wahi rakhte hain.');
       // the user CONFIRMED the backend's question → propose exactly that value (backend re-validates)
       const f = String(pi.data.field), v = String(pi.data.proposedCode);
+      if (f === 'selectedTrain') {
+        // Prompt 17: "12014 selected hai. 14542 check karna hai?" → haan → select 14542 (backend re-validates) + same lookup
+        const ref = { kind: 'TRAIN_NUMBER', value: v, searchResultsVersion: s.searchResultsVersion } as TrainReference;
+        const tool = String(pi.data.tool || '');
+        const follow: ToolCall[] = tool === 'CHECK_AVAILABILITY' || tool === 'GET_FARE' ? [this.call(tool as RegisteredToolName, {})] : [];
+        return this.d('SELECT_TRAIN', 'SELECT_TRAIN', { trainRef: ref }, follow);
+      }
       const ce: ExtractedEntities = f === 'origin' ? { originRaw: v } : f === 'destination' ? { destinationRaw: v } : f === 'date' ? { dateRaw: v } : { passengersCountRaw: v };
       const o = f === 'origin' ? v : s.origin, dd = f === 'destination' ? v : s.destination, dt = f === 'date' ? v : s.date;
       const calls: ToolCall[] = [];
@@ -592,7 +611,8 @@ export class MockLLMProvider implements LLMProvider {
     }
 
     // Information requests (first tool now; the rest chained after its result)
-    if (u.infoRequests.length && !toolCalls.length) toolCalls.push(this.infoCall(u.infoRequests[0], u, s));
+    // Prompt 17: independent read-only lookups are requested together — the runtime runs them in parallel
+    if (u.infoRequests.length && !toolCalls.length) toolCalls.push(...u.infoRequests.map(r => this.infoCall(r, u, s)));
 
     if (journeyGiven) {
       const isCorrection = !!((u.originRaw && s.origin) || (u.destinationRaw && s.destination) || (u.dateRaw && s.date));
@@ -645,8 +665,19 @@ export class MockLLMProvider implements LLMProvider {
     const failed = turn.filter(r => !r.ok);
     if (failed.length) {
       const f = failed[failed.length - 1];
+      // Prompt 17: partial failure keeps the verified results — "Timetable mil gaya, lekin availability abhi verify nahi ho paayi."
+      const providerFail = failed.filter(r => r.status === 'FAILED' || r.status === 'TIMEOUT');
+      if (facts.length && providerFail.length === failed.length) {
+        const okL = [...new Set(ok.filter(r => r.toolName !== 'SEARCH_TRAINS').map(r => this.labelOf(r.toolName)))];
+        const badL = [...new Set(providerFail.map(r => this.labelOf(r.toolName).toLowerCase()))];
+        const head = `${cap(okL.join(' aur '))} mil gaya, lekin ${badL.join(' aur ')} abhi verify nahi ho paayi.`;
+        return this.final('GENERAL_RAILWAY_QUERY', [head, ...facts].join(' '));
+      }
       return this.final('GENERAL_RAILWAY_QUERY', [...facts, this.failureMessage(f, s)].join(' '));
     }
+    // Prompt 17: SUCCESS with zero trains is an empty RESULT, never "search failed"
+    const emptySearch = ok.find(r => r.toolName === 'SEARCH_TRAINS' && (r.empty || (Array.isArray(r.data?.trains) && r.data.trains.length === 0)));
+    if (emptySearch && !facts.length) return this.final('SEARCH_TRAINS', 'Provider ne is route aur date ke liye koi train nahi di. Koi aur date ya route try karein?');
     // Multi-step chain: issue the next still-needed tool.
     const doneNames = new Set(turn.map(r => r.toolName));
     const toolFor: Record<InfoRequest, RegisteredToolName> = { TRAIN_INFO: 'GET_TRAIN_INFO', TIMETABLE: 'GET_TIMETABLE', AVAILABILITY: 'CHECK_AVAILABILITY', FARE: 'GET_FARE' };
@@ -659,6 +690,10 @@ export class MockLLMProvider implements LLMProvider {
     return this.final('GENERAL_RAILWAY_QUERY', facts.join(' ') || 'Jaankari mil gayi.');
   }
 
+  private labelOf(tool: string): string {
+    return tool === 'GET_FARE' ? 'Fare' : tool === 'CHECK_AVAILABILITY' ? 'Availability' : tool === 'GET_TIMETABLE' ? 'Timetable' : tool === 'GET_TRAIN_INFO' ? 'Train info' : (TOOL_LABEL[tool] || tool);
+  }
+
   private failureMessage(f: TurnToolResultView, s: BookingSession): string {
     const code = f.error?.code;
     const label = f.toolName === 'GET_FARE' ? 'fare' : f.toolName === 'CHECK_AVAILABILITY' ? 'availability' : (TOOL_LABEL[f.toolName] || f.toolName).toLowerCase();
@@ -666,6 +701,11 @@ export class MockLLMProvider implements LLMProvider {
       return !s.selectedTrain ? `Pehle train select kar lete hain, phir ${label} check kar deta hoon.` : `Pehle class select kar lete hain, phir ${label} check kar deta hoon.`;
     }
     if (code === 'TOOL_UNAVAILABLE' || code === 'UNKNOWN_TOOL') return 'Ye suvidha abhi uplabdh nahi hai.';
+    if (code === 'TOOL_NOT_IMPLEMENTED') return f.toolName === 'GET_CANCELLED_TRAINS'
+      ? 'Cancelled trains ki verified list abhi provider se uplabdh nahi hai, isliye main koi list nahi bata sakta.'
+      : 'Ye jaankari abhi verified source se uplabdh nahi hai.';
+    if (code === 'CONTEXT_CONFLICT' || code === 'FORBIDDEN_ARGUMENT' || code === 'FORBIDDEN_ACTION' || code === 'AMBIGUOUS_DATE' || code === 'AMBIGUOUS_STATION') return f.error?.message || 'Thodi aur jaankari chahiye.';
+    if (f.status === 'TIMEOUT') return `${TOOL_LABEL[f.toolName] || 'Jaankari'} abhi verify nahi ho paayi — provider ne time par jawab nahi diya.`;
     if (f.toolName === 'SEARCH_TRAINS') return `Train search abhi complete nahi ho paayi. ${f.error?.message || ''}`.trim();
     if (code === 'MISSING_REQUIRED_FIELD' || code === 'INVALID_TRAIN_REFERENCE' || code === 'INVALID_CLASS_SELECTION') return f.error?.message || 'Thodi aur jaankari chahiye.';
     return `${TOOL_LABEL[f.toolName] || 'Jaankari'} abhi verify nahi ho paaya. Thodi der baad try karein.`;
@@ -685,3 +725,5 @@ export class MockLLMProvider implements LLMProvider {
     return { intent, action: 'NO_ACTION', entities: {}, missingFields: [], clarification: null, confidence: 0.9, toolCalls: [], finalMessage: message };
   }
 }
+
+function cap(x: string): string { return x ? x.charAt(0).toUpperCase() + x.slice(1) : x; }

@@ -10,7 +10,11 @@ export interface TurnToolResultView {
   callId: string;
   ok: boolean;
   data?: any;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; details?: any };
+  /** Prompt 17: SUCCEEDED with zero items (e.g. no trains on the route) — NOT a failure. */
+  empty?: boolean;
+  /** Prompt 17: tool execution status (SUCCEEDED / FAILED / TIMEOUT / REJECTED …). */
+  status?: string;
 }
 
 export interface LLMProviderConfig {

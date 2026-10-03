@@ -181,6 +181,13 @@ export type OrchestratorErrorCode =
   | 'INVALID_CONTEXT'
   | 'INVALID_STATE_TRANSITION'
   | 'SESSION_VERSION_CONFLICT'
+  // ---- Prompt 17: RailwayToolRuntime ----
+  | 'TOOL_LOOP_DETECTED'
+  | 'TOOL_NOT_IMPLEMENTED'
+  | 'FORBIDDEN_ACTION'
+  | 'FORBIDDEN_ARGUMENT'
+  | 'TOOL_TIMEOUT'
+  | 'PROVIDER_DATA_CONFLICT'
   // ---- Prompt 9 ----
   | 'BOOKING_NOT_READY'
   | 'MISSING_PASSENGER_COUNT'
@@ -261,9 +268,18 @@ export interface TurnToolRecord {
   errorCode?: string;
   provider?: string;
   latencyMs: number;
+  /** Prompt 17 */
+  toolExecutionId?: string;
+  executionStatus?: string;
+  fresh?: boolean;
 }
 
 export interface TurnRecord {
+  /** Prompt 17 — RailwayToolRuntime observability. */
+  journeyVersion?: number;
+  toolExecutions?: import('@shared/railway-tool-runtime').ToolExecutionRecord[];
+  toolRounds?: number;
+  freshRequested?: boolean;
   /** Prompt 10 — PII-free execution-gateway log line (if the gateway ran this turn). */
   execution?: import('@shared/booking-execution').ExecutionLogRecord;
   handoffId?: string;

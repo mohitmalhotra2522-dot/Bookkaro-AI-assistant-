@@ -103,13 +103,25 @@ export async function sendMessage(
   sessionId: string,
   text: string,
   mode: 'TEXT' | 'VOICE' = 'TEXT',
-  extra: { searchResultsVersion?: number; expectedSessionVersion?: number; reviewVersion?: number } = {}
+  extra: { searchResultsVersion?: number; expectedSessionVersion?: number; reviewVersion?: number; clientMessageId?: string } = {}
 ): Promise<ChatResponse> {
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ sessionId, text, mode, ...extra })
-  });
+  // Prompt 17: one id per user message — a network retry of the SAME message is replayed server-side,
+  // a new message (even an identical "abhi dobara check karo") gets a new id and fresh provider calls.
+  const clientMessageId = extra.clientMessageId || newClientMessageId();
+  const body = JSON.stringify({ sessionId, text, mode, ...extra, clientMessageId });
+  let res: Response;
+  try {
+    res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  } catch {
+    // one transparent retry on a dropped connection — same clientMessageId, so no duplicate tool execution
+    res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  }
   if (!res.ok && res.status !== 409) throw new Error('Failed to send message');
   return res.json();
+}
+
+/** Prompt 17: client message id (duplicate-delivery protection; not a cache key for railway data). */
+export function newClientMessageId(): string {
+  const r = (globalThis.crypto && 'randomUUID' in globalThis.crypto) ? globalThis.crypto.randomUUID() : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  return `cm_${r.replace(/[^A-Za-z0-9_-]/g, '')}`.slice(0, 100);
 }

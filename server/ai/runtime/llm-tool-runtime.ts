@@ -35,6 +35,8 @@ import { v4 as uuidv4 } from '../orchestrator/utils';
 import type { ToolGrounding } from '../../booking/post-booking/post-booking-service';
 import { PnrStatusService, LiveTrainStatusService } from '../../booking/post-booking/pnr-status-service';
 import { maskPnr } from '../../booking/post-booking/pnr-validator';
+import { RailwayToolRuntime, ToolTurn, type ExecutedCall, type PreparedCall, type RailwayToolExecutor } from '../tool-runtime/railway-tool-runtime';
+import type { ToolExecutionRecord, LLMToolResult, ToolExecutionStatus } from '@shared/railway-tool-runtime';
 
 export const MAX_TOOL_CALL_ITERATIONS = 8; // deterministic hard cap (configurable via constructor)
 
@@ -43,12 +45,18 @@ export interface NormalizedToolResult {
   callId: string;
   success: boolean;
   data?: any;
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; details?: any };
   provider?: string;
   timestamp: string;
   latencyMs: number;
   /** sessionId / requestId / sessionVersion (at call time) / retrievedAt. */
-  provenance?: { sessionId: string; requestId?: string; sessionVersion: number; retrievedAt: string };
+  provenance?: { sessionId: string; requestId?: string; sessionVersion: number; retrievedAt: string; journeyVersion?: number; toolExecutionId?: string };
+  /** Prompt 17: execution id / lifecycle status / freshness / SUCCESS-with-zero-items. */
+  toolExecutionId?: string;
+  status?: ToolExecutionStatus;
+  fresh?: boolean;
+  empty?: boolean;
+  normalizedErrorCode?: string;
 }
 
 export interface ToolCallStep {
@@ -61,6 +69,9 @@ export interface ToolCallStep {
   status: 'ok' | 'error' | 'rejected' | 'stale';
   /** Correlation ids for interruption safety. */
   requestId?: string;
+  /** Prompt 17: execution record (observability) + the exact LLMToolResult returned to the LLM. */
+  execution?: ToolExecutionRecord;
+  llmResult?: LLMToolResult;
 }
 
 /**
@@ -81,6 +92,11 @@ export interface RuntimeHooks {
   grounding?: (userText: string) => ToolGrounding;
   /** Prompt 14: audit callback for the read-only live tools (no session / booking mutation). */
   onLiveTool?: (phase: 'REQUESTED' | 'RESULT', name: string, args: Record<string, any>, result?: { success: boolean; error?: { code: string } }) => void;
+  /** Prompt 17: correlation ids for execution records. */
+  sessionId?: string;
+  turnId?: string;
+  /** Prompt 17: the user explicitly asked for fresh / re-checked data this turn (recorded; never cached anyway). */
+  forceFresh?: boolean;
 }
 
 function stableJson(v: any): string {
@@ -108,6 +124,10 @@ export interface ToolRuntimeResult {
   deduplicated?: number;
   /** Total loop latency (ms). */
   latencyMs: number;
+  /** Prompt 17: every tool execution record of this turn (LLM + deterministic prep). */
+  toolExecutions?: ToolExecutionRecord[];
+  /** Prompt 17: LLM rounds that requested tools. */
+  toolRounds?: number;
 }
 
 export interface RuntimeInput {
@@ -135,7 +155,9 @@ export class LLMToolCallingRuntime {
     private readonly tools: RailwayToolService,
     private readonly maxIterations: number = MAX_TOOL_CALL_ITERATIONS,
     sessionGetter?: () => BookingSession,
-    sessionCommitter?: (p: Partial<BookingSession>) => void
+    sessionCommitter?: (p: Partial<BookingSession>) => void,
+    /** Prompt 17: the RailwayToolRuntime every LLM tool call goes through (configurable for tests). */
+    public toolRuntime: RailwayToolRuntime = new RailwayToolRuntime()
   ) {
     const getter = sessionGetter || (() => { throw new Error('No session getter bound'); });
     const committer = sessionCommitter || (() => {});
@@ -147,7 +169,7 @@ export class LLMToolCallingRuntime {
    * duration of a turn. Returns a bound runner you can call .run() on.
    */
   bind(getSession: () => BookingSession, commitSession: (p: Partial<BookingSession>) => void, hooks: RuntimeHooks = {}): BoundToolRuntime {
-    return new BoundToolRuntime(this.llm, this.tools, this.validator, this.searchOrch, this.maxIterations, getSession, commitSession, hooks);
+    return new BoundToolRuntime(this.llm, this.tools, this.validator, this.searchOrch, this.maxIterations, getSession, commitSession, hooks, this.toolRuntime);
   }
 }
 
@@ -159,6 +181,10 @@ export class BoundToolRuntime {
   private userText = '';
   /** Prompt 14: tools permitted by the latest applied decision (undefined = no restriction). */
   private allowedTools?: readonly string[];
+  /** Prompt 17: per-turn RailwayToolRuntime state (budget, loop detector, execution records). */
+  readonly turn: ToolTurn;
+  private readonly turnCtx: { userText: string };
+  private readonly executor: RailwayToolExecutor;
   constructor(
     private readonly llm: LLMProvider,
     private readonly tools: RailwayToolService,
@@ -167,13 +193,29 @@ export class BoundToolRuntime {
     private readonly maxIterations: number,
     private readonly getSession: () => BookingSession,
     private readonly commitSession: (p: Partial<BookingSession>) => void,
-    private readonly hooks: RuntimeHooks = {}
+    private readonly hooks: RuntimeHooks = {},
+    toolRuntime: RailwayToolRuntime = new RailwayToolRuntime()
   ) {
     // Reuse the same class but bound to this turn's getter/committer so
     // RailwaySearchOrchestrator.invalidateDependentResults() & commits work.
     this.searchOrch = new RailwaySearchOrchestrator(getSession, commitSession);
     this.pnr = new PnrStatusService(tools);
     this.live = new LiveTrainStatusService(tools);
+    const self = this;
+    this.turnCtx = { userText: '' };
+    const ctx = this.turnCtx;
+    this.turn = toolRuntime.beginTurn({
+      get sessionId() { return hooks.sessionId || self.getSession().sessionId; },
+      turnId: hooks.turnId || 'turn',
+      requestId: hooks.requestId,
+      get userText() { return ctx.userText; },
+      getSession: () => self.getSession(),
+      validate: (tc: ToolCall, s: BookingSession) => self.validator.validate(tc, s, self.hooks.grounding?.(ctx.userText)) as any,
+      allowedTools: () => self.allowedTools,
+      isStale: () => !!self.hooks.isStale?.(),
+      forceFresh: !!hooks.forceFresh
+    } as any);
+    this.executor = { providerLabel: tools.providerLabel, execute: (vt, guard) => this.executeTool(vt, guard) };
   }
 
   async run(userText: string, mode: 'TEXT'|'VOICE', history: HistoryMsg[]): Promise<ToolRuntimeResult> {
@@ -187,19 +229,24 @@ export class BoundToolRuntime {
     let llmLatencyMs = 0;
     const H = this.hooks;
     this.userText = userText;
+    this.turnCtx.userText = userText;
     // Prompt 16: in-turn dedup — an identical call (same tool + args + session context) whose valid
     // result is already attached to THIS turn is not sent again. Each new turn always calls the provider
     // fresh (no cross-turn cache), so explicit live requests ("abhi availability", "latest PNR") stay fresh.
     const doneCalls = new Map<string, TurnToolResultView>();
     let deduplicated = 0;
     const sigOf = (tc: ToolCall) => {
+      // Prompt 17: a search is fully determined by its arguments (and SEARCH_TRAINS is a parallel barrier,
+      // so the session changes between the original and its duplicate) → args-only signature
+      if (tc?.name === 'SEARCH_TRAINS') return `SEARCH_TRAINS|${stableJson(tc?.arguments || {})}`;
       const sx: any = this.getSession();
       const t: any = sx.selectedTrain;
       return `${tc?.name}|${stableJson(tc?.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
     };
     const done = (finalMessage: string, stopReason: ToolRuntimeResult['stopReason'], error?: OrchestratorError): ToolRuntimeResult => ({
       finalMessage, finalDecision: lastDecision || dummyDecision(), steps, stopReason, error,
-      latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs, deduplicated
+      latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs, deduplicated,
+      toolExecutions: this.turn.records, toolRounds: this.turn.roundsUsed
     });
 
     for (let iter = 0; iter < this.maxIterations; iter++) {
@@ -239,23 +286,53 @@ export class BoundToolRuntime {
         return done(msg, 'final');
       }
 
-      // Execute each tool call sequentially (later tools may depend on earlier results).
-      for (const tc of toolCalls) {
-        const sig = sigOf(tc);
-        const prior = doneCalls.get(sig);
-        if (prior) {
+      // Prompt 17: MAX_TOOL_ROUNDS_PER_TURN — a round that would exceed it runs no calls.
+      if (!this.turn.startRound()) {
+        const lim: OrchestratorError = { code: 'TOOL_CALL_LIMIT_EXCEEDED', message: 'Request bahut lambi ho gayi — thoda simple karke poochiye.' };
+        H.emit?.('TOOL_FAILED', { code: 'TOOL_CALL_LIMIT_EXCEEDED', stage: 'rounds', rounds: this.turn.roundsUsed - 1 });
+        return done('', 'tool_limit', lim);
+      }
+      // Prompt 17: independent calls run in PARALLEL; SEARCH_TRAINS is a barrier (dependent calls are
+      // validated only after its results are synced). Results are recorded in the original order.
+      const sigs = new Map<string, string>();
+      let staleHit = false;
+      let stopErr: OrchestratorError | undefined;
+      await this.turn.runRound(toolCalls, this.executor, {
+        fromLLM: true,
+        skip: (tc) => {
+          const sig = sigOf(tc);
+          sigs.set(tc.callId, sig);
+          const prior = doneCalls.get(sig);
+          if (!prior) return false;
+          // accidental duplicate inside ONE turn (LLM repeat) — the fresh result is already attached
           deduplicated++;
           turnResults.push({ ...prior, callId: tc.callId });
           localHistory.push({ role: 'tool', content: JSON.stringify({ ok: true, deduplicated: true, sameAs: prior.callId }), toolCallId: tc.callId, toolName: tc.name });
           H.emit?.('TOOL_CALL_DEDUPLICATED', { toolName: tc.name });
-          continue;
+          return true;
+        },
+        onRejected: (p) => {
+          this.recordRejected(p, iter, turnResults, localHistory, steps);
+          lastError = { code: p.error.code as any, message: p.error.message };
+          if (p.stop) stopErr = { code: (p.error.code === 'TOOL_LOOP_DETECTED' ? 'TOOL_LOOP_DETECTED' : 'TOOL_CALL_LIMIT_EXCEEDED') as any, message: p.error.message };
+        },
+        onDuplicate: (tc, orig) => {
+          deduplicated++;
+          const prior = turnResults.find(r => r.callId === orig.prepared.tc.callId);
+          if (prior) turnResults.push({ ...prior, callId: tc.callId });
+          localHistory.push({ role: 'tool', content: JSON.stringify({ ok: orig.success, deduplicated: true, sameAs: orig.prepared.tc.callId }), toolCallId: tc.callId, toolName: tc.name });
+          H.emit?.('TOOL_CALL_DEDUPLICATED', { toolName: tc.name });
+        },
+        onExecuted: (x) => {
+          const r = this.recordExecuted(x, iter, turnResults, localHistory, steps);
+          if (r.stale) { staleHit = true; return false; }
+          if (r.error) lastError = r.error;
+          if (x.success) doneCalls.set(sigs.get(x.prepared.tc.callId) || sigOf(x.prepared.tc), turnResults[turnResults.length - 1]);
+          return true;
         }
-        const before = turnResults.length;
-        const r = await this.executeCall(tc, iter, turnResults, localHistory, steps);
-        if (turnResults.length > before && turnResults[turnResults.length - 1].ok) doneCalls.set(sig, turnResults[turnResults.length - 1]);
-        if (r.stale) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Late result from an obsolete request was ignored.' });
-        if (r.error) lastError = r.error;
-      }
+      });
+      if (staleHit) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Late result from an obsolete request was ignored.' });
+      if (stopErr) return done('', 'tool_limit', stopErr);   // composer adds verified facts + the limit message once
     }
 
     const limError: OrchestratorError = { code: 'TOOL_CALL_LIMIT_EXCEEDED', message: 'Request bahut lambi ho gayi — thoda simple karke poochiye.' };
@@ -270,67 +347,70 @@ export class BoundToolRuntime {
    */
   async runTools(calls: ToolCall[]): Promise<{ steps: ToolCallStep[]; stale: boolean }> {
     const steps: ToolCallStep[] = [];
-    for (const tc of calls) {
-      if (this.hooks.isStale?.()) return { steps, stale: true };
-      const r = await this.executeCall(tc, -1, [], [], steps);
-      if (r.stale) return { steps, stale: true };
-    }
-    return { steps, stale: false };
+    if (this.hooks.isStale?.()) return { steps, stale: true };
+    let stale = false;
+    await this.turn.runRound(calls, this.executor, {
+      fromLLM: false,
+      onRejected: (p) => { this.recordRejected(p, -1, [], [], steps); },
+      onExecuted: (x) => { const r = this.recordExecuted(x, -1, [], [], steps); if (r.stale) { stale = true; return false; } return true; }
+    });
+    return { steps, stale };
   }
 
-  /** Validate → execute → normalize → (stale check) → sync one tool call. */
-  private async executeCall(tc: ToolCall, iter: number, turnResults: TurnToolResultView[], localHistory: HistoryMsg[], steps: ToolCallStep[])
-    : Promise<{ stale: boolean; error?: OrchestratorError }> {
+  /** Prompt 17: a call the runtime rejected BEFORE any provider call (validation / security / limits). */
+  private recordRejected(p: Extract<PreparedCall, { ok: false }>, iter: number, turnResults: TurnToolResultView[], localHistory: HistoryMsg[], steps: ToolCallStep[]): void {
     const H = this.hooks;
-    const sess0 = this.getSession();
-    const ts = Date.now();
-    const notAllowed = !!this.allowedTools && !this.allowedTools.includes(String(tc?.name));
-    const val = notAllowed
-      ? { ok: false as const, error: { code: 'INVALID_ACTION_FOR_STATE' as const, message: 'Is step par sirf read-only railway jaankari (PNR / live status / timetable) available hai.' } }
-      : this.validator.validate(tc, sess0, H.grounding?.(this.userText));
-    if (!val.ok) {
-      const errRes: NormalizedToolResult = {
-        toolName: tc.name, callId: tc.callId, success: false,
-        error: { code: val.error.code, message: val.error.message },
-        timestamp: new Date().toISOString(), latencyMs: Date.now() - ts
-      };
-      steps.push({ toolCall: tc, result: errRes, iteration: iter, status: 'rejected', requestId: H.requestId });
-      turnResults.push({ toolName: tc.name, callId: tc.callId, ok: false, error: errRes.error });
-      localHistory.push({ role: 'tool', content: JSON.stringify({ ok: false, error: errRes.error }), toolCallId: tc.callId, toolName: tc.name });
-      H.emit?.('TOOL_FAILED', { toolName: tc.name, code: val.error.code, stage: 'validation' });
-      return { stale: false, error: val.error }; // LLM reacts to the rejection on the next iteration
-    }
-    const vt = val.v;
-    if (vt.name === 'SEARCH_TRAINS') H.emit?.('SEARCH_STARTED', { origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date });
-    if (vt.name === 'TRACK_TRAIN' || vt.name === 'CHECK_PNR') H.onLiveTool?.('REQUESTED', vt.name, vt.arguments);
-    // Provenance captured at call time (sessionId / requestId / sessionVersion).
-    const versionAtCall = this.getSession().sessionVersion;
-    const execRes = await this.executeTool(vt);
-    const norm = this.normalizeResult(vt, execRes, Date.now() - ts);
-    norm.provenance = { sessionId: this.getSession().sessionId, requestId: H.requestId, sessionVersion: versionAtCall, retrievedAt: norm.timestamp };
+    const tc = p.tc;
+    const error = { code: p.error.code, message: p.error.message };
+    const errRes: NormalizedToolResult = {
+      toolName: String(tc?.name), callId: tc?.callId, success: false, error: { ...error, ...(p.error.details ? { details: p.error.details } : {}) }, timestamp: new Date().toISOString(), latencyMs: 0,
+      toolExecutionId: p.record.toolExecutionId, status: 'REJECTED', fresh: false, normalizedErrorCode: p.error.normalized
+    };
+    steps.push({ toolCall: tc, result: errRes, iteration: iter, status: 'rejected', requestId: H.requestId, execution: p.record, llmResult: p.result });
+    turnResults.push({ toolName: tc?.name as any, callId: tc?.callId, ok: false, error: { ...error, details: p.error.details } as any });
+    localHistory.push({ role: 'tool', content: JSON.stringify({ ...p.result, ok: false, error, toolName: tc?.name }), toolCallId: tc?.callId, toolName: tc?.name });
+    H.emit?.('TOOL_FAILED', { toolName: tc?.name, code: p.error.code, stage: 'validation', toolExecutionId: p.record.toolExecutionId });
+  }
 
-    // Interruption safety: a newer turn started while we awaited the provider, OR
-    // the session changed underneath a read-only railway lookup (sessionVersion
-    // mismatch) → the late result must not overwrite current state.
-    const versionMoved = vt.name !== 'SEARCH_TRAINS' && this.getSession().sessionVersion !== versionAtCall;
-    if (H.isStale?.() || versionMoved) {
-      steps.push({ toolCall: tc, result: { ...norm, success: false, error: { code: 'STALE_TOOL_RESULT', message: 'Result belongs to an obsolete request/session version.' } }, iteration: iter, status: 'stale', validatedArguments: vt.arguments, requestId: H.requestId });
-      H.emit?.('STALE_RESULT_REJECTED', { toolName: vt.name, requestId: H.requestId, sessionVersionAtCall: versionAtCall, sessionVersionNow: this.getSession().sessionVersion });
+  /** Prompt 17: result guard → record → sync for one executed call. */
+  private recordExecuted(x: ExecutedCall, iter: number, turnResults: TurnToolResultView[], localHistory: HistoryMsg[], steps: ToolCallStep[])
+    : { stale: boolean; error?: OrchestratorError } {
+    const H = this.hooks;
+    const vt = x.prepared.vt;
+    const tc = x.prepared.tc;
+    const s = this.getSession();
+    const at = x.record.completedAt || new Date().toISOString();
+    const norm: NormalizedToolResult = {
+      toolName: vt.name, callId: tc.callId, success: x.success, data: x.success ? x.data : undefined,
+      error: x.error ? { code: x.error.code, message: x.error.message } : undefined,
+      provider: x.provider || undefined, timestamp: at, latencyMs: x.latencyMs,
+      provenance: { sessionId: s.sessionId, requestId: H.requestId, sessionVersion: s.sessionVersion, retrievedAt: at, journeyVersion: x.prepared.journeyVersion, toolExecutionId: x.record.toolExecutionId },
+      toolExecutionId: x.record.toolExecutionId, status: x.record.status, fresh: x.record.fresh, empty: x.empty, normalizedErrorCode: x.error?.normalized
+    };
+    // Part 53/55 result guard: newer turn, superseded journeyVersion / selection, or a search whose
+    // commit was refused inside the orchestrator → STALE_TOOL_RESULT, nothing applied.
+    const stale = x.stale || !!H.isStale?.() || (vt.name !== 'SEARCH_TRAINS' && !this.turn.isCurrent(x.prepared));
+    if (stale) {
+      x.record.status = 'CANCELLED'; x.record.fresh = false; x.record.rejectionReason = 'STALE_TOOL_RESULT';
+      steps.push({ toolCall: tc, result: { ...norm, success: false, status: 'CANCELLED', error: { code: 'STALE_TOOL_RESULT', message: 'Result belongs to an obsolete request/journey version.' } }, iteration: iter, status: 'stale', validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
+      H.emit?.('STALE_RESULT_REJECTED', { toolName: vt.name, requestId: H.requestId, toolExecutionId: x.record.toolExecutionId, journeyVersionAtCall: x.prepared.journeyVersion, journeyVersionNow: s.journeyVersion });
       return { stale: true };
     }
-
-    steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', validatedArguments: vt.arguments, requestId: H.requestId });
-    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error });
-    localHistory.push({ role: 'tool', content: JSON.stringify(this.serializeForLLM(norm)), toolCallId: tc.callId, toolName: tc.name });
+    steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
+    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status });
+    localHistory.push({ role: 'tool', content: JSON.stringify(this.serializeForLLM(norm, x.result)), toolCallId: tc.callId, toolName: tc.name });
     this.syncToSession(vt, norm);
     if (!norm.success) {
-      H.emit?.('TOOL_FAILED', { toolName: vt.name, code: norm.error?.code, stage: 'provider' });
+      H.emit?.('TOOL_FAILED', { toolName: vt.name, code: norm.error?.code, stage: 'provider', status: x.record.status, toolExecutionId: x.record.toolExecutionId });
       return { stale: false, error: { code: 'TOOL_FAILED', message: norm.error?.message || 'Tool failed.' } };
     }
     return { stale: false };
   }
 
-  private async executeTool(vt: ValidatedToolCall): Promise<any> {
+  private async executeTool(vt: ValidatedToolCall, guard?: { canApply: () => boolean }): Promise<any> {
+    const H = this.hooks;
+    if (vt.name === 'SEARCH_TRAINS') H.emit?.('SEARCH_STARTED', { origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date });
+    if (vt.name === 'TRACK_TRAIN' || vt.name === 'CHECK_PNR') H.onLiveTool?.('REQUESTED', vt.name, vt.arguments);
     switch (vt.name) {
       case 'SEARCH_TRAINS': {
         // Always run a FRESH search (no cache, no stale-reuse). RailwaySearchOrchestrator
@@ -339,7 +419,7 @@ export class BoundToolRuntime {
           origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date,
           passengerCount: vt.arguments.passengersCount,
           preferredClass: vt.arguments.preferredClass, preferredTime: vt.arguments.preferredTime
-        });
+        }, { canApply: guard?.canApply });
       }
       case 'GET_TRAIN_INFO':
         return this.tools.GET_TRAIN_INFO(vt.arguments.trainNumber);
@@ -402,11 +482,13 @@ export class BoundToolRuntime {
    * We deliberately do NOT forward internal metadata (source timestamps,
    * raw provider fields) — only facts + success/error.
    */
-  private serializeForLLM(r: NormalizedToolResult): any {
+  private serializeForLLM(r: NormalizedToolResult, llm?: LLMToolResult): any {
+    // Prompt 17: freshness / provenance metadata (no credentials, no raw provider payload)
+    const meta = llm ? { toolExecutionId: llm.toolExecutionId, status: llm.status, fresh: llm.fresh, meta: llm.meta, ...(llm.empty ? { empty: true } : {}) } : {};
     // Prompt 14: the full PNR never goes back into LLM context
-    if (r.success && r.toolName === 'CHECK_PNR') return { ok: true, data: { ...r.data, pnr: maskPnr(r.data?.pnr) }, toolName: r.toolName };
-    if (r.success) return { ok: true, data: r.data, toolName: r.toolName };
-    return { ok: false, error: r.error, toolName: r.toolName };
+    if (r.success && r.toolName === 'CHECK_PNR') return { ok: true, data: { ...r.data, pnr: maskPnr(r.data?.pnr) }, toolName: r.toolName, ...meta };
+    if (r.success) return { ok: true, data: r.data, toolName: r.toolName, ...meta };
+    return { ok: false, error: { ...r.error, normalizedCode: r.normalizedErrorCode }, toolName: r.toolName, ...meta };
   }
 
   /**
@@ -423,6 +505,16 @@ export class BoundToolRuntime {
       if (vt.name === 'SEARCH_TRAINS' && this.getSession().bookingState === BookingState.SEARCHING_TRAINS) {
         this.commitSession({ bookingState: BookingState.COLLECTING_JOURNEY } as any);
       }
+      return;
+    }
+    // Part 46: SUCCESS with zero trains — the fresh truth is "no trains"; old results/selection are dropped
+    if (vt.name === 'SEARCH_TRAINS' && r.empty) {
+      this.commitSession({
+        availableTrains: [], lastSearch: undefined, searchResults: undefined, selectedTrain: undefined, selectedClass: undefined,
+        fare: undefined, availability: undefined, bookingState: BookingState.COLLECTING_JOURNEY,
+        searchMeta: { resultId: r.toolExecutionId, retrievedAt: r.timestamp, totalCount: 0 }
+      } as any);
+      H.emit?.('SEARCH_COMPLETED', { origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date, count: 0, empty: true });
       return;
     }
     const source = this.tools.providerLabel && /mock/i.test(String(r.provider || this.tools.providerLabel)) ? 'MOCK' : 'LIVE';

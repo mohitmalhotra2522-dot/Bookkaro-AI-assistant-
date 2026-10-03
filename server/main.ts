@@ -59,7 +59,7 @@ await server.register(cors, { origin: true });
  */
 server.post('/api/chat', async (request, reply) => {
   const body = request.body as any;
-  const { text, mode, expectedSessionVersion, searchResultsVersion, reviewVersion } = body || {};
+  const { text, mode, expectedSessionVersion, searchResultsVersion, reviewVersion, clientMessageId } = body || {};
   let { sessionId } = body || {};
   if (!text || typeof text !== 'string') return reply.status(400).send({ error: 'text required' });
   if (text.length > 2000) return reply.status(413).send({ error: 'text too long' });
@@ -69,7 +69,9 @@ server.post('/api/chat', async (request, reply) => {
   const result = await orchestrator.processTurn(sessionId, text, mode === 'VOICE' ? 'VOICE' : 'TEXT', {
     expectedSessionVersion: typeof expectedSessionVersion === 'number' ? expectedSessionVersion : undefined,
     searchResultsVersion: typeof searchResultsVersion === 'number' ? searchResultsVersion : undefined,
-    reviewVersion: typeof reviewVersion === 'number' ? reviewVersion : undefined
+    reviewVersion: typeof reviewVersion === 'number' ? reviewVersion : undefined,
+    // Prompt 17: duplicate delivery (retry / reconnect / double submit) replays the turn — never a cache of railway data
+    clientMessageId: typeof clientMessageId === 'string' && /^[A-Za-z0-9_-]{6,100}$/.test(clientMessageId) ? clientMessageId : undefined
   });
   const ctx = result.context;
   if (result.error?.code === 'SESSION_VERSION_CONFLICT') reply.status(409);
@@ -77,6 +79,7 @@ server.post('/api/chat', async (request, reply) => {
     sessionId,
     message: result.responseMessage,
     stale: !!result.stale,
+    duplicateDelivery: !!result.duplicateDelivery,
     state: result.newState,
     pendingInteraction: result.pendingInteraction,
     pendingQuestion: questionFor(result.pendingInteraction, ctx, ctx.mode),
