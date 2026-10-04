@@ -154,3 +154,33 @@ export function newClientMessageId(): string {
   const r = (globalThis.crypto && 'randomUUID' in globalThis.crypto) ? globalThis.crypto.randomUUID() : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
   return `cm_${r.replace(/[^A-Za-z0-9_-]/g, '')}`.slice(0, 100);
 }
+
+/** P36-C: safe server STT capability (no key — the key never leaves the server). */
+export interface VoiceConfig { stt: { enabled: boolean; provider: 'elevenlabs'; model: string; mode: 'batch'; keytermsEnabled: boolean } }
+export async function fetchVoiceConfig(): Promise<VoiceConfig | null> {
+  const res = await fetch('/api/voice/config').catch(() => null);
+  if (!res || !res.ok) return null;
+  return res.json().catch(() => null);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)));
+  return btoa(s);
+}
+
+/**
+ * P36-C: ONE tap-to-talk recording (16 kHz mono PCM16) → server → ElevenLabs Scribe v2 batch → FINAL transcript.
+ * Transcript only — this does NOT start an agent turn (the voice agent does that through /api/chat).
+ */
+export async function transcribeSpeech(req: { sessionId: string; voiceTurnId: string; audio: Uint8Array; durationMs: number }, signal: AbortSignal):
+  Promise<{ ok: true; transcript: string; language?: string | null } | { ok: false; code: string; message?: string }> {
+  const res = await fetch('/api/voice/transcribe', {
+    method: 'POST', signal, headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId: req.sessionId, voiceTurnId: req.voiceTurnId, mimeType: 'audio/pcm', sampleRate: 16000, durationMs: Math.round(req.durationMs), audioBase64: bytesToBase64(req.audio) })
+  });
+  let body: any = null;
+  try { body = await res.json(); } catch { /* handled below */ }
+  if (res.ok && body && typeof body.transcript === 'string' && body.voiceTurnId === req.voiceTurnId) return { ok: true, transcript: body.transcript, language: body.language ?? null };
+  return { ok: false, code: typeof body?.error === 'string' && /^STT_[A-Z_]+$/.test(body.error) ? body.error : (res.ok ? 'STT_PROVIDER_BAD_RESPONSE' : 'STT_PROVIDER_UNAVAILABLE'), message: typeof body?.message === 'string' ? body.message : undefined };
+}

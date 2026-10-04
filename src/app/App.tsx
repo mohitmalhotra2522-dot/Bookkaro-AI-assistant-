@@ -174,7 +174,8 @@ const App: React.FC = () => {
 
   // Tap-to-talk (default): a tap while the agent speaks / thinks is the barge-in (handled by the agent).
   const handleMicStart = useCallback(() => conv.listen(), [conv]);
-  const handleMicStop = useCallback(() => conv.stop(), [conv]);
+  // P36-C: in batch tap-to-talk the stop tap is the release (submit the recording once); otherwise the one-tap stop
+  const handleMicStop = useCallback(() => conv.release(), [conv]);
 
   const handleFormSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -346,7 +347,8 @@ const App: React.FC = () => {
 
       <div style={{ borderTop: '1px solid #e0e0e0', background: '#fff', paddingBottom: 8 }}>
         <MicButton isRecording={conv.snapshot.listening} isSupported={conv.snapshot.sttAvailable} onStart={handleMicStart} onStop={handleMicStop} transcript={conv.snapshot.partialTranscript}
-          conversationMode={conv.snapshot.conversationMode} onToggleConversationMode={conv.setConversationMode} agentState={conv.snapshot.state} textFallback={conv.snapshot.textFallback} />
+          conversationMode={conv.snapshot.conversationMode} onToggleConversationMode={conv.setConversationMode} agentState={conv.snapshot.state} textFallback={conv.snapshot.textFallback}
+          sttPhase={conv.sttPhase} inputError={conv.inputErrorMessage} />
         <form onSubmit={handleFormSubmit} style={{ display: 'flex', gap: 8, padding: '0 16px' }}>
           <input
             type="text"

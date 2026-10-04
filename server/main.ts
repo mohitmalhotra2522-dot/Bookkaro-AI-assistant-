@@ -26,6 +26,7 @@ import { liveProviderStatus } from './railway/providers/live/live-config';
 import { webResearchStatus } from './research/web-research-service';
 import { createServerSTT, createServerTTS, voiceProviderStatus } from './voice/live/openai-compatible-voice';
 import { registerVoiceRoutes } from './voice/live/voice-routes';
+import { createElevenLabsBatchSTT } from './voice/stt/elevenlabs-batch-stt';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -283,8 +284,11 @@ server.post('/api/session', async (_, reply) => {
 });
 
 // Prompt 35: optional server STT/TTS transport → the same /api/chat pipeline (no second voice brain)
+// P36-C: ElevenLabs Scribe v2 batch STT (ELEVENLABS_API_KEY server env only; missing → browser speech fallback)
+const batchStt = createElevenLabsBatchSTT(process.env);
 registerVoiceRoutes(server, {
   stt: createServerSTT(), tts: createServerTTS(),
+  batchStt, sessionExists: (sid) => stateManager.hasSession(sid),
   latestSpeech: (sid) => {
     const snap = turnEngine.resume(sid);
     const r: any = snap?.latestAssistantResponse;
@@ -310,7 +314,7 @@ server.get('/api/health', async (_, reply) => {
     // Prompt 35: provider chain + per-provider configured flag (NEVER key values) and WEB_EXTERNAL gate
     railwayProviders: liveProviderStatus(),
     webResearch: webResearchStatus(),
-    voice: voiceProviderStatus()
+    voice: voiceProviderStatus(process.env, batchStt)
   });
 });
 
@@ -321,4 +325,5 @@ console.log(`Active railway provider: ${railwayRegistry.getActiveId()} (${railwa
 console.log(`Active LLM provider: ${llmSelection.info.providerId}${llmSelection.info.model ? ` (${llmSelection.info.model})` : ''} — ${llmSelection.info.reason}`);
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Railway provider chain (RAILWAY_PROVIDER=live): ${liveProviderStatus().filter(p => p.priority).sort((a, b) => a.priority! - b.priority!).map(p => `${p.provider}${p.configured ? '' : '(no key)'}`).join(' → ')}`);
+console.log(`Voice STT (batch): elevenlabs/${batchStt.model} — ${batchStt.configured() ? 'configured' : 'not configured (browser speech fallback)'}`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

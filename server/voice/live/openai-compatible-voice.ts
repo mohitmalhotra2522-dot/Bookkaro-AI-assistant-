@@ -16,6 +16,7 @@
  */
 import type { STTProvider, STTResult } from '../stt/stt-provider';
 import type { TTSProvider } from '../tts/tts-provider';
+import { batchSttConfigView, type ElevenLabsBatchSTT } from '../stt/elevenlabs-batch-stt';
 
 type Env = NodeJS.ProcessEnv;
 export const MAX_AUDIO_BYTES = 4 * 1024 * 1024;
@@ -94,10 +95,12 @@ export function createServerTTS(env: Env = process.env, fetchImpl?: typeof fetch
 }
 
 /** Health view — provider / model / configured only (never keys, never base URLs with credentials). */
-export function voiceProviderStatus(env: Env = process.env) {
+export function voiceProviderStatus(env: Env = process.env, batchStt?: ElevenLabsBatchSTT | null) {
   const stt = createServerSTT(env), tts = createServerTTS(env);
   return {
     transport: 'browser-web-speech (default) + optional server STT/TTS',
+    // P36-C: tap-to-talk batch STT — config presence only (no provider call, never the key)
+    batchStt: (({ enabled, provider, model, mode, keytermsEnabled }) => ({ configured: enabled, provider, model, mode, keytermsEnabled }))(batchSttConfigView(batchStt)),
     stt: { provider: stt ? 'OPENAI_COMPATIBLE' : 'BROWSER', model: stt ? env.VOICE_STT_MODEL || null : null, configured: !!stt?.configured() },
     tts: { provider: tts ? 'OPENAI_COMPATIBLE' : 'BROWSER', model: tts ? env.VOICE_TTS_MODEL || null : null, voice: tts ? env.VOICE_TTS_VOICE || 'alloy' : null, configured: !!tts?.configured() }
   };

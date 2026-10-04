@@ -5,9 +5,17 @@
  *  - POST /api/voice/speak: { sessionId } → TTS of that session's LATEST VALIDATED assistant response (server-side
  *    lookup; the client cannot supply text, so TTS can never speak unchecked words).
  * Failure is graceful and honest (503 / 422 / 504 with a short Hinglish message); the text path keeps working.
+ *
+ * P36-C (additive):
+ *  - POST /api/voice/transcribe: ONE tap-to-talk recording → ElevenLabs Scribe v2 BATCH → { transcript } ONLY.
+ *    It does NOT call /api/chat: the browser hands the FINAL transcript to its existing ConversationalVoiceAgent →
+ *    VoiceTurnDetector → /api/chat, exactly like a Web Speech final. Stale recordings (a newer voiceTurnId for the
+ *    session, or the client went away) return STT_STALE_TURN and no transcript.
+ *  - GET /api/voice/config: safe STT capability fields only (no key, no paid call).
  */
 import type { FastifyInstance } from 'fastify';
 import { VoiceProviderError, decodeAudioBase64, type OpenAICompatibleSTT, type OpenAICompatibleTTS } from './openai-compatible-voice';
+import { SttError, STT_HTTP_STATUS, batchSttConfigView, validateSttAudio, type ElevenLabsBatchSTT } from '../stt/elevenlabs-batch-stt';
 
 export interface VoiceRouteDeps {
   stt: OpenAICompatibleSTT | null;
@@ -15,12 +23,64 @@ export interface VoiceRouteDeps {
   /** Latest validated assistant response for the session (speechText preferred) — null when none / unknown session. */
   latestSpeech(sessionId: string): { text: string; turnId?: string | null } | null;
   log?: (e: Record<string, unknown>) => void;
+  /** P36-C: ElevenLabs Scribe v2 batch STT (absent / unconfigured → STT_CONFIG_MISSING, browser fallback). */
+  batchStt?: ElevenLabsBatchSTT | null;
+  /** P36-C: the recording must belong to a session this server created (no session is created by STT). */
+  sessionExists?: (sessionId: string) => boolean;
 }
+
+const VOICE_TURN_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
 const STATUS: Record<VoiceProviderError['code'], number> = { VOICE_NOT_CONFIGURED: 503, VOICE_TIMEOUT: 504, VOICE_PROVIDER_FAILURE: 502, VOICE_BAD_AUDIO: 400, VOICE_EMPTY_TRANSCRIPT: 422 };
 const MIME_RE = /^audio\/[a-z0-9.+-]+(;\s*codecs=[a-z0-9.,-]+)?$/i;
 
 export function registerVoiceRoutes(server: FastifyInstance, deps: VoiceRouteDeps): void {
+  // P36-C — latest recording per session (in memory, ids only). A newer recording supersedes an in-flight one.
+  const latestVoiceTurn = new Map<string, string>();
+  // logs: session / turn id, provider, model, latency, success, transcript length, error category — never audio / text
+  const sttFail = (reply: any, code: SttError['code'], meta: Record<string, unknown>) => {
+    deps.log?.({ event: 'voice_stt_batch', ...meta, success: false, errorCategory: code });
+    return reply.status(STT_HTTP_STATUS[code]).send({ error: code, message: new SttError(code).message, fallback: 'TEXT' });
+  };
+
+  server.get('/api/voice/config', async (_request, reply) => reply.header('Cache-Control', 'no-store').send({ stt: batchSttConfigView(deps.batchStt), browserFallback: true }));
+
+  server.post('/api/voice/transcribe', { bodyLimit: 3 * 1024 * 1024 }, async (request, reply) => {
+    const b = (request.body as any) || {};
+    const stt = deps.batchStt;
+    const sessionId = typeof b.sessionId === 'string' ? b.sessionId : '';
+    const voiceTurnId = typeof b.voiceTurnId === 'string' && VOICE_TURN_RE.test(b.voiceTurnId) ? b.voiceTurnId : '';
+    const meta: Record<string, unknown> = { sessionId: sessionId.slice(0, 64) || null, voiceTurnId: voiceTurnId || null, provider: 'elevenlabs', model: stt?.model ?? 'scribe_v2' };
+    if (!stt?.configured()) return sttFail(reply, 'STT_CONFIG_MISSING', meta);
+    if (!sessionId || !deps.sessionExists || !deps.sessionExists(sessionId)) return sttFail(reply, 'STT_SESSION_INVALID', meta);
+    if (!voiceTurnId) return sttFail(reply, 'STT_AUDIO_INVALID', meta);
+    let audio;
+    try { audio = validateSttAudio({ audioBase64: b.audioBase64, mimeType: b.mimeType, durationMs: b.durationMs, sampleRate: b.sampleRate }); }
+    catch (e) { return sttFail(reply, e instanceof SttError ? e.code : 'STT_AUDIO_INVALID', meta); }
+    latestVoiceTurn.set(sessionId, voiceTurnId);
+    // the client cancelled / went away → abort the provider call (no retry, no transcript)
+    const ctl = new AbortController();
+    const onClose = () => { if (!reply.raw.writableEnded) ctl.abort(); };
+    reply.raw.on('close', onClose);
+    const t0 = Date.now();
+    try {
+      const r = await stt.transcribe(audio, undefined, { signal: ctl.signal });
+      if (latestVoiceTurn.get(sessionId) !== voiceTurnId || ctl.signal.aborted) return sttFail(reply, 'STT_STALE_TURN', { ...meta, latencyMs: Date.now() - t0 });
+      deps.log?.({ event: 'voice_stt_batch', ...meta, latencyMs: r.latencyMs, success: true, transcriptChars: r.transcript.length });
+      return reply.header('Cache-Control', 'no-store').send({
+        sessionId, voiceTurnId, status: 'FINAL', transcript: r.transcript, language: r.language ?? 'hin',
+        stt: { provider: 'elevenlabs', model: stt.model, mode: stt.mode, latencyMs: r.latencyMs }
+      });
+    } catch (e) {
+      const err = e instanceof SttError ? e : new SttError('STT_PROVIDER_UNAVAILABLE');
+      const code = latestVoiceTurn.get(sessionId) !== voiceTurnId ? 'STT_STALE_TURN' : err.code;
+      return sttFail(reply, code, { ...meta, latencyMs: Date.now() - t0 });
+    } finally {
+      reply.raw.off('close', onClose);
+      if (latestVoiceTurn.get(sessionId) === voiceTurnId) latestVoiceTurn.delete(sessionId);
+    }
+  });
+
   const fail = (reply: any, e: unknown, stage: 'STT' | 'TTS') => {
     const err = e instanceof VoiceProviderError ? e : new VoiceProviderError('VOICE_PROVIDER_FAILURE', stage === 'STT' ? 'Speech recognition abhi uplabdh nahi hai.' : 'Voice playback abhi uplabdh nahi hai.');
     deps.log?.({ event: 'voice_provider_error', stage, code: err.code, httpStatus: err.httpStatus ?? null });

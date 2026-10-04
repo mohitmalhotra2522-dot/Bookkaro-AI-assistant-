@@ -35,6 +35,7 @@ Env:
 - No `LLM_PROVIDER` → MockLLM (offline stand-in; tests always use it or the FakeOpenAI helper).
 - Real LLM: `LLM_PROVIDER=openai-compatible`, `LLM_BASE_URL=https://integrate.api.nvidia.com/v1`, `LLM_MODEL=meta/muse-glimmer-30b`, `LLM_API_KEY=…` (in `.env` only).
 - `RAILWAY_PROVIDER` defaults to `mock`. P35: `RAILWAY_PROVIDER=live` + `RAILWAY_PRIMARY_PROVIDER=railcore` + `RAILWAY_FALLBACK_PROVIDERS=railkit,railradar` + `RAILCORE_API_KEY` / `RAILKIT_API_KEY` / `RAILRADAR_API_KEY` (`.env` only). Other registered ids: `railcore`, `railkit`, `railradar` (single provider). `REAL_IRCTC_ENABLED` must stay off.
+- P36-C optional: `ELEVENLABS_API_KEY` (server env only) enables batch STT for tap-to-talk; `ELEVENLABS_STT_TIMEOUT_MS` (default 8000, clamped 1000–20000), `ELEVENLABS_STT_ENABLED=false` kill switch.
 - P35 optional: web research (`WEB_RESEARCH_ENABLED=true`, `WEB_RESEARCH_PROVIDER=tavily`, `WEB_RESEARCH_API_KEY`); server voice (`VOICE_STT_*`, `VOICE_TTS_*`). All placeholders are in `.env.example`.
 - Live scripts (spend real credits; never part of the gates): `vite-node scripts/p35-live-providers.ts` (adapters) and `vite-node scripts/p35-live-llm.ts` (real LLM + real providers).
 
@@ -62,6 +63,7 @@ Env:
 | Voice coordinator (turn detection, barge-in, stale, TTS queue, retrySpeech, voiceMetrics) (P21/P34) | `shared/voice/conversational-voice-agent.ts` |
 | Structured STT transcript boundary (P34) | `shared/voice/transcript.ts` (`checkTranscriptForTurn`, `sanitizeTranscriptInfo`, `VoiceTranscriptRejectedError`) |
 | End-of-turn detection (final + silence; INCOMPLETE, never submits interim) | `shared/voice/voice-turn-detector.ts` |
+| P36-C batch STT (ElevenLabs Scribe v2) | server `server/voice/stt/elevenlabs-batch-stt.ts` + routes in `server/voice/live/voice-routes.ts` (`/api/voice/transcribe`, `/api/voice/config`); browser `src/voice/batch-speech-input.ts`, `src/voice/pcm-recorder.ts` |
 | STT / TTS interfaces + deterministic mocks | `server/voice/stt/stt-provider.ts`, `server/voice/tts/tts-provider.ts`; browser adapters `src/voice/browser-voice-adapters.ts` |
 | Voice → engine wiring (same agent) | `server/voice/server-voice-agent.ts` (`createEngineVoiceAgent`, `engineTurnProcessor`) |
 
@@ -95,6 +97,7 @@ Env:
 | 33 | `6f71466`, `74063e1` | AI-driven booking preparation + review + secure handoff readiness — see `docs/AGENT_AUTHORITY.md` §7 |
 | 34 | `caa2ac4`, `8032d5c` (fare follow-up) | voice production hardening: structured STT boundary, no interim turns, TTS = final validated text only, barge-in/stale, TTS retry, voice observability — see `docs/AGENT_AUTHORITY.md` §8 |
 | 35 | see `git log` | real railway data (RailCore/RailKit/RailRadar adapters + failover), provenance, capability matrix, LLM-chosen web research, server STT/TTS routes, IRCTC handoff boundary wording — see `docs/P35-REAL-INTEGRATION.md` |
+| 36-C | **uncommitted** (working tree on `b535345`) | ElevenLabs Scribe v2 BATCH STT for tap-to-talk — see §6c |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -191,6 +194,54 @@ Status as of 2026-10-04:
   2. Run one end-to-end test: audio → `/api/voice/turn` → `processTurn(VOICE)` → Muse → RailCore → validated text → `/api/voice/speak` → TTS.
   3. Run focused parity and barge-in checks only (p34-voice-e2e, p34-voice-hardening, p21-voice-infrastructure).
   4. Do NOT run the full suite. Do NOT start P36 without the user's prompt.
+
+## 6c. P36-C — ElevenLabs Scribe v2 batch STT (tap-to-talk)
+
+**What changed: STT only.** Everything downstream is unchanged and authoritative: ConversationalVoiceAgent, VoiceTurnDetector, `normalizeTranscript`, `/api/chat`, the LLM agent, tools, validation, TTS, booking safety.
+
+**Pipeline**
+1. The user taps the mic and the browser records 16 kHz mono PCM16 (`src/voice/pcm-recorder.ts`).
+2. Tapping again (release) submits the recording ONCE to `POST /api/voice/transcribe`.
+3. The server calls ElevenLabs Scribe v2 batch and returns `{ transcript }` only. The route never calls `/api/chat`.
+4. `BatchSttSpeechInput` hands the transcript to the EXISTING agent with `onFinal`: agent → turn detector → normalizer → `/api/chat` (mode VOICE, transcript status FINAL).
+
+**Provider and request lock** (server constants in `elevenlabs-batch-stt.ts`; the client can change none of them)
+- Provider ElevenLabs, model `scribe_v2`, mode **batch**. No realtime, WebSocket, v1 or fallback model, and no SDK (plain `fetch` + `FormData`).
+- `POST https://api.elevenlabs.io/v1/speech-to-text` with header `xi-api-key` = `ELEVENLABS_API_KEY` (server env only).
+- `language_code=hin`, with no translation.
+- Keyterms `AC, 3A, CC, SL, RAC, WL`, sent as repeated multipart fields.
+- `tag_audio_events=false`, `timestamps_granularity=word`, `diarize=false`.
+- `file_format=pcm_s16le_16` for PCM. Encoded containers (webm/ogg/wav/mp4/mpeg) are accepted as a fallback; they are auto-detected and no `file_format` is sent.
+
+**Why this set:** in P36-B.6 (one run per condition, synthetic corpus plus 20 real-human clips), the railway keyterm set scored:
+- keywords 171/171 (baseline 160/171);
+- AC 6/6, 3A 6/6, WL 3/3;
+- 0 dangerous errors (baseline 3);
+- a median latency cost of about +20 ms.
+
+It is still not called production-ready. Pending: repeat runs, human sentence recordings, and a P34 check on Latin/digit output.
+
+**Cost:** keyterms add a **+20% surcharge** on Scribe v2 batch (list price $0.22/h; using more than 100 keyterms would also raise the minimum billable duration to 20 s).
+
+**Safety**
+- *Turn IDs:* each recording has a unique `voiceTurnId`. A cancelled or superseded recording is discarded on the client and never reaches the agent or `/api/chat`; the server also returns 409 `STT_STALE_TURN` for a superseded id.
+- *Retries:* at most ONE retry, on timeout / network / 429 / 5xx only. The per-attempt timeout is bounded.
+- *Audio validation:* type, size (≤ 2 MB), duration (250 ms–60 s), PCM framing, digital silence, and session ownership. All checks run before any paid call.
+- *No persistence:* audio is kept in memory only, with no temp files, and is never logged.
+- *Logs* contain only session/turn id, provider, model, latency, success, transcript length and error category. They never contain audio or transcript text.
+- *Errors:* `STT_CONFIG_MISSING`, `STT_AUDIO_INVALID`, `STT_AUDIO_TOO_LARGE`, `STT_PROVIDER_TIMEOUT`, `STT_PROVIDER_AUTH_ERROR`, `STT_PROVIDER_RATE_LIMIT`, `STT_PROVIDER_UNAVAILABLE`, `STT_PROVIDER_BAD_RESPONSE`, `STT_STALE_TURN`, plus two additive codes, `STT_NO_SPEECH` and `STT_SESSION_INVALID`. Each has a short Hinglish message and never includes a raw provider body. A failure starts no agent turn and no tool, and typing stays available.
+- *No interpretation:* confidence/logprob is ignored (never authorization). There is no AC→एसी conversion, and STT output is never railway truth.
+
+**Config, health and fallback**
+- `GET /api/voice/config` returns `{ stt: { enabled, provider:'elevenlabs', model:'scribe_v2', mode:'batch', keytermsEnabled, audio:{…} }, browserFallback:true }`.
+- `/api/health` `voice.batchStt` reports config presence only and makes no provider call.
+- If the key is missing, `enabled` is false and tap-to-talk falls back to the existing browser recogniser (or typing).
+- The opt-in hands-free conversation mode (voice barge-in needs streaming speech activity) keeps using the browser recogniser. Tap barge-in works with batch.
+- UI states: Recording → Transcribing → Thinking (`PROCESSING`) → Speaking.
+
+**Tests:** `tests/unit/p36c-elevenlabs-stt.test.ts` (G2) and `tests/integration/p36c-voice-stt-e2e.test.ts` (G3). Both use a fake fetch only, with no real ElevenLabs call.
+
+**Live status:** a live ElevenLabs STT call through BookKaro has NOT been run (no credits spent). The key is not in BookKaro's `.env`; set `ELEVENLABS_API_KEY` in the server environment to enable it.
 
 ## 7. Practical gotchas
 

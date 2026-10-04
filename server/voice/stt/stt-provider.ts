@@ -3,6 +3,7 @@
  * Phase 1: the browser Web Speech API produces the transcript (tap-to-talk / opt-in conversation mode, explicit
  * user activation only). Server-side streaming STT (Whisper / Google / Azure …) plugs in behind StreamingSTTProvider
  * with server-side keys only — none is enabled in this build.
+ * P36-C: ElevenLabs Scribe v2 BATCH (tap-to-talk, server key) implements STTProvider in ./elevenlabs-batch-stt.ts.
  */
 import type { SpeechInput, SpeechInputHandlers } from '@shared/voice/conversational-voice-agent';
 
