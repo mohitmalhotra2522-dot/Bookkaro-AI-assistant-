@@ -6,12 +6,21 @@ import { useConversationalVoice } from '../voice/useConversationalVoice';
 import { turnEventToVoiceEvent } from '@shared/voice/voice-events';
 import type { TurnProcessor, VoiceTurnEvent, VoiceTurnOutcome } from '@shared/voice/conversational-voice-agent';
 import { MessageBubble } from '../components/chat/MessageBubble';
-import { MicButton } from '../components/voice/MicButton';
-import { TrainCard, SearchStatus, ProviderErrorCard } from '../components/trains/TrainCard';
-import { PassengerCard } from '../components/passengers/PassengerCard';
+import { MicButton, voiceVisual } from '../components/voice/MicButton';
+import { TrainResults } from '../components/trains/TrainCard';
+import { PassengerList } from '../components/passengers/PassengerCard';
 import { BookingReviewCard } from '../components/review/BookingReviewCard';
 import { SessionInspector, type InspectorMeta } from '../components/debug/SessionInspector';
 import type { VoiceTranscriptInfo } from '@shared/voice/transcript';
+import { HandoffCard } from '../components/review/HandoffCard';
+import * as Info from '../components/trains/InfoCards';
+import { Composer } from '../components/chat/Composer';
+import { EmptyChat, ErrorBanner, ThinkingIndicator, QUICK_PROMPTS } from '../components/chat/ChatStates';
+import { TopBar, Sheet, MobileMenu, SettingsPanel, type StatusTone } from '../components/shell/Shell';
+import { HomeView } from '../components/home/HomeView';
+import { TripPanel, TripSummary, tripHasContent } from '../components/context/TripPanel';
+import { useAppStatus } from '../hooks/useAppStatus';
+import { toolProgressLabel } from '../lib/format';
 
 const App: React.FC = () => {
   const {
@@ -20,14 +29,24 @@ const App: React.FC = () => {
     isLoading,
     toolActivity,
     context,
+    error,
     setSessionId,
     addMessage,
     setContext,
     setLoading,
     addCard,
     setToolActivity,
-    setError
+    setError,
+    reset
   } = useChatStore();
+
+  // UI-only state (presentation; no booking/voice logic lives here)
+  const [view, setView] = useState<'home' | 'chat'>('home');
+  const [activeTools, setActiveTools] = useState<string[]>([]);
+  const [sheet, setSheet] = useState<null | 'menu' | 'settings' | 'trip' | 'suggest'>(null);
+  const [showInspector, setShowInspector] = useState(false);
+  const lastUserTextRef = useRef<string>('');
+  const appStatus = useAppStatus();
 
   const [inputText, setInputText] = useState('');
   const [lastInputMode, setLastInputMode] = useState<'TEXT' | 'VOICE'>('TEXT');
@@ -67,6 +86,9 @@ const App: React.FC = () => {
       // Prompt 21: a voice barge-in may start a new turn while the previous request is still in flight
       if (!text.trim() || !sessionId || (isLoading && !extra.bargeIn)) return;
       addMessage({ id: `u-${Date.now()}`, role: 'user', content: text.trim(), timestamp: Date.now(), inputMode: mode });
+      lastUserTextRef.current = text.trim();
+      setView('chat');
+      setError(null);
       setInputText('');
       setLoading(true);
       setToolActivity(null);
@@ -89,6 +111,7 @@ const App: React.FC = () => {
             }
           }
           if (polling && turnViewRef.current.progressText) setToolActivity(turnViewRef.current.progressText);
+          if (polling) setActiveTools(turnViewRef.current.activeTools || []);
           await new Promise((res) => setTimeout(res, 350));
         }
       };
@@ -130,6 +153,7 @@ const App: React.FC = () => {
         polling = false;
         setLoading(false);
         setToolActivity(null);
+        setActiveTools([]);
       }
     },
     [sessionId, isLoading, addMessage, setLoading, setToolActivity, setContext, addCard, setError, setSessionId]
@@ -177,8 +201,7 @@ const App: React.FC = () => {
   // P36-C: in batch tap-to-talk the stop tap is the release (submit the recording once); otherwise the one-tap stop
   const handleMicStop = useCallback(() => conv.release(), [conv]);
 
-  const handleFormSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleFormSubmit = () => {
     // Prompt 21: a typed message supersedes whatever the voice agent is still saying (never resumes)
     if (conv.snapshot.state === 'SPEAKING') conv.agent.interrupt('USER_STOP');
     send(inputText, 'TEXT');
@@ -194,177 +217,239 @@ const App: React.FC = () => {
     send(`${trainNumber} ${classCode}`, 'TEXT', { searchResultsVersion: version });
   };
 
-  const chip = (bg: string, fg: string, content: React.ReactNode, key: string) => (
-    <div key={key} style={{ margin: '4px 16px', padding: '8px 12px', background: bg, color: fg, borderRadius: 10, fontSize: 13 }}>{content}</div>
+  // ───────────────────────── presentation ─────────────────────────
+  const snap = conv.snapshot;
+  const visual = voiceVisual({ isRecording: snap.listening, agentState: snap.state, sttPhase: conv.sttPhase });
+  const voiceActive = visual !== 'idle' || snap.conversationMode || !!conv.inputErrorMessage;
+  const progressLabel = toolProgressLabel(activeTools, toolActivity);
+  const conversation = messages.filter(m => m.id !== 'welcome');
+  const hasConversation = conversation.length > 0;
+  const showTrip = tripHasContent(context);
+
+  const status: { tone: StatusTone; label: string } =
+    visual === 'listening' ? { tone: 'busy', label: 'Listening' } :
+    visual === 'transcribing' ? { tone: 'busy', label: 'Understanding' } :
+    visual === 'speaking' ? { tone: 'busy', label: 'Speaking' } :
+    isLoading || visual === 'thinking' ? { tone: 'busy', label: 'Thinking' } :
+    appStatus.state === 'unavailable' ? { tone: 'bad', label: 'Offline' } :
+    !sessionId ? { tone: 'idle', label: 'Connecting' } :
+    appStatus.railwayKind === 'MOCK' ? { tone: 'warn', label: 'Dev data' } :
+    { tone: 'good', label: 'Ready' };
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (view === 'chat') messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [isLoading, view]);
+
+  const focusComposer = () => setTimeout(() => document.getElementById('bk-input')?.focus(), 30);
+  const prefill = (text: string) => { setInputText(text); setSheet(null); focusComposer(); };
+  const pickPrompt = (text: string) => { setSheet(null); if (conv.snapshot.state === 'SPEAKING') conv.agent.interrupt('USER_STOP'); void send(text, 'TEXT'); };
+
+  /** New chat = a fresh backend session via the existing endpoint; the old one is simply left. */
+  const startNewChat = async () => {
+    if (isLoading) return;
+    setSheet(null);
+    if (conv.snapshot.listening || conv.snapshot.state === 'SPEAKING') conv.stop();
+    const id = await createSession().catch(() => null);
+    if (!id) { setError('session'); return; }
+    reset();
+    setError(null);
+    setInputText('');
+    setActiveTools([]);
+    turnViewRef.current = EMPTY_TURN_VIEW;
+    setMeta({});
+    setSessionId(id);
+    setView('chat');
+    focusComposer();
+  };
+
+  const retry = lastUserTextRef.current ? () => { setError(null); void send(lastUserTextRef.current, 'TEXT'); } : undefined;
+
+  const micLabel =
+    conv.sttPhase === 'RECORDING' ? 'Send recording' :
+    conv.sttPhase === 'TRANSCRIBING' ? 'Cancel transcription' :
+    snap.listening ? 'Stop listening' :
+    snap.state === 'SPEAKING' || snap.state === 'PROCESSING' ? 'Interrupt and speak' : 'Speak to BookKaro';
+
+  const composerEl = (variant: 'hero' | 'dock') => (
+    <Composer
+      variant={variant}
+      inputId={variant === 'dock' ? 'bk-input' : 'bk-hero-input'}
+      value={inputText}
+      onChange={setInputText}
+      onSubmit={handleFormSubmit}
+      inputDisabled={isLoading || (snap.listening && !snap.conversationMode)}
+      sendDisabled={!inputText.trim() || isLoading}
+      placeholder={variant === 'hero' ? 'Try: Amritsar se Delhi kal jaana hai…' : 'Type your journey…'}
+      micSupported={snap.sttAvailable}
+      micLive={snap.listening}
+      onMic={snap.listening ? handleMicStop : handleMicStart}
+      micLabel={micLabel}
+      onPlus={variant === 'dock' ? () => setSheet('suggest') : undefined}
+    />
+  );
+
+  const voicePanelEl = voiceActive ? (
+    <MicButton isRecording={snap.listening} isSupported={snap.sttAvailable} onStart={handleMicStart} onStop={handleMicStop} transcript={snap.partialTranscript}
+      conversationMode={snap.conversationMode} onToggleConversationMode={conv.setConversationMode} agentState={snap.state} textFallback={snap.textFallback}
+      sttPhase={conv.sttPhase} inputError={conv.inputErrorMessage} progressLabel={progressLabel} />
+  ) : null;
+
+  const placeLabel = (code: string) => {
+    const c: any = context;
+    if (c?.origin === code && c?.originName) return c.originName;
+    if (c?.destination === code && c?.destinationName) return c.destinationName;
+    return code;
+  };
+
+  const renderCard = (msg: any, key: string) => {
+    const d: any = msg.cardData;
+    switch (msg.cardType as string) {
+      case 'trains': {
+        const trains = (d.trains || []).map((t: any) => ({
+          trainNumber: t.trainNumber || t.number,
+          trainName: t.trainName || t.name,
+          origin: t.origin, destination: t.destination, departure: t.departure, arrival: t.arrival, duration: t.duration,
+          runsOn: t.runsOn, retrievedAt: t.retrievedAt,
+          classes: t.classes || (t.availableClasses || []).map((code: string) => ({ code, availability: null, availabilityStatus: 'UNKNOWN' as const, fare: null, fareCurrency: null }))
+        }));
+        const first = trains[0];
+        const ctx: any = context;
+        return (
+          <TrainResults key={key} trains={trains} source={d.source} retrievedAt={d.retrievedAt || first?.retrievedAt}
+            routeLabel={first ? `${placeLabel(first.origin)} → ${placeLabel(first.destination)}` : undefined}
+            selectedTrainNumber={ctx?.selectedTrain?.number} selectedClass={ctx?.selectedClass}
+            originLabel={placeLabel} disabled={isLoading}
+            onSelectTrain={(n: string) => handleSelectTrain(n, d.searchResultsVersion)}
+            onSelectClass={(n: string, c: string) => handleSelectClass(n, c, d.searchResultsVersion)} />
+        );
+      }
+      case 'passengers':
+        return (
+          <PassengerList key={key} passengers={d.passengers || []}
+            onEdit={(p, i) => prefill(`Passenger ${i + 1}${p.name ? ` (${p.name})` : ''} ki details badalni hain: `)}
+            onAdd={() => prefill('Ek aur passenger add karna hai: ')} />
+        );
+      case 'review':
+        return (
+          <BookingReviewCard key={key}
+            data={d}
+            confirmable={context?.bookingState === 'AWAITING_CONFIRMATION' && !!context?.review?.valid && context?.confirmedReviewVersion === d.reviewVersion}
+            onChange={() => send('change details', 'TEXT')}
+            onConfirm={(v?: number) => send('haan', 'TEXT', { reviewVersion: v })}
+            realBookingEnabled={appStatus.realBookingEnabled}
+          />
+        );
+      case 'handoff': return <HandoffCard key={key} d={d} onProviderStatus={() => runExecute()} />;
+      case 'booking_execution': return <Info.BookingExecutionNote key={key} d={d} onReconcile={runReconcile} />;
+      case 'handoff_consume': return <Info.HandoffConsumeNote key={key} d={d} />;
+      case 'handoff_status': return <Info.HandoffStatusNote key={key} d={d} />;
+      case 'selected_train': return <Info.SelectedTrainNote key={key} d={d} />;
+      case 'selected_class': return <Info.SelectedClassNote key={key} d={d} />;
+      case 'availability': return <Info.AvailabilityNote key={key} d={d} />;
+      case 'fare': return <Info.FareNote key={key} d={d} />;
+      case 'train_info': return <Info.TrainInfoNote key={key} d={d} />;
+      case 'timetable': return <Info.TimetableNote key={key} d={d} />;
+      // Prompt 14: post-booking cards — backend BookingDetailsResponse / normalized lookups only (no raw provider data)
+      case 'booking_details': return <Info.BookingDetailsNote key={key} d={d} />;
+      case 'booking_action': return <Info.BookingActionNote key={key} d={d} />;
+      case 'booking_history': return <Info.BookingHistoryNote key={key} d={d} />;
+      case 'pnr_status': return <Info.PnrNote key={key} d={d} />;
+      case 'live_status': return <Info.LiveStatusNote key={key} d={d} />;
+      default: return null;
+    }
+  };
+
+  const sheets = sheet && (
+    <Sheet
+      title={sheet === 'menu' ? 'Menu' : sheet === 'settings' ? 'Settings' : sheet === 'trip' ? 'Your trip' : 'Try asking'}
+      onClose={() => setSheet(null)}
+    >
+      {sheet === 'menu' && (
+        <MobileMenu onHome={() => { setSheet(null); setView('home'); }} onNewChat={startNewChat} newChatDisabled={isLoading}
+          onTrip={showTrip ? () => setSheet('trip') : undefined} onSettings={() => setSheet('settings')} />
+      )}
+      {sheet === 'settings' && (
+        <SettingsPanel
+          conversationMode={snap.conversationMode} onConversationMode={conv.setConversationMode} voiceSupported={snap.sttAvailable}
+          sttLabel={snap.sttAvailable ? 'available' : 'unavailable in this browser — typing works'} ttsAvailable={snap.ttsAvailable && !snap.textFallback}
+          dataLabel={appStatus.railwayKind === 'REAL' ? 'Live railway data' : appStatus.railwayKind === 'MOCK' ? 'Development data — not live' : appStatus.state === 'unavailable' ? 'Service unreachable' : 'Checking…'}
+          showInspector={showInspector} onInspector={setShowInspector} />
+      )}
+      {sheet === 'trip' && <TripSummary ctx={context} />}
+      {sheet === 'suggest' && (
+        <div className="bk-menu">
+          {QUICK_PROMPTS.map(p => (
+            <button key={p.text} type="button" className="bk-menu__item" onClick={() => pickPrompt(p.text)} disabled={isLoading}>{p.icon} {p.text}</button>
+          ))}
+        </div>
+      )}
+    </Sheet>
   );
 
   return (
-    <div style={{ height: '100dvh', maxWidth: 600, margin: '0 auto', background: '#f5f7fa', display: 'flex', flexDirection: 'column' }}>
-      <div style={{ padding: '16px 20px', background: '#1976d2', color: '#fff', fontWeight: 700, fontSize: 18, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', zIndex: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div>🚆 Railway AI Assistant</div>
-        <div style={{ fontSize: 10, opacity: 0.85, background: 'rgba(255,255,255,0.2)', padding: '4px 8px', borderRadius: 8 }}>
-          MOCK DEV DATA
-        </div>
-      </div>
+    <div className="bk-app">
+      <a href="#bk-input" className="bk-skip">Skip to message box</a>
+      <TopBar
+        isChat={view === 'chat'}
+        status={status}
+        onHome={() => setView('home')}
+        onNewChat={startNewChat}
+        newChatDisabled={isLoading}
+        onTrip={view === 'chat' && showTrip ? () => setSheet('trip') : undefined}
+        onSettings={() => setSheet('settings')}
+        onMenu={() => setSheet('menu')}
+      />
 
-      <SessionInspector ctx={context} meta={meta} />
-
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 0 20px' }}>
-        {messages.map(msg => {
-          if (msg.role === 'card') {
-            if (msg.cardType === 'trains') {
-              const trains = msg.cardData.trains || [];
-              return (
-                <div key={msg.id}>
-                  <SearchStatus label={`🚂 ${trains.length} trains found · list v${msg.cardData.searchResultsVersion ?? '?'}`} />
-                  {trains.map((t: any) => (
-                    <TrainCard
-                      key={t.trainNumber || t.number}
-                      train={{
-                        trainNumber: t.trainNumber || t.number,
-                        trainName: t.trainName || t.name,
-                        origin: t.origin,
-                        destination: t.destination,
-                        departure: t.departure,
-                        arrival: t.arrival,
-                        duration: t.duration,
-                        classes: t.classes || (t.availableClasses || []).map((code: string) => ({
-                          code, availability: null, availabilityStatus: 'UNKNOWN' as const, fare: null, fareCurrency: null
-                        }))
-                      }}
-                      onSelectTrain={(n: string) => handleSelectTrain(n, msg.cardData.searchResultsVersion)}
-                      onSelectClass={(n: string, c: string) => handleSelectClass(n, c, msg.cardData.searchResultsVersion)}
-                    />
-                  ))}
-                  {msg.cardData.source === 'mock' && (
-                    <div style={{ padding: '4px 16px', fontSize: 11, color: '#9e9e9e', textAlign: 'center' }}>* यह डेवलपमेंट मॉक डेटा है लाइव डेटा नहीं</div>
-                  )}
-                </div>
-              );
-            }
-            if (msg.cardType === 'passengers') {
-              return (
-                <div key={msg.id}>
-                  <div style={{ padding: '8px 16px', fontSize: 13, color: '#2e7d32', fontWeight: 500 }}>👥 Passenger Details</div>
-                  {msg.cardData.passengers.map((p: any, i: number) => <PassengerCard key={p.id} passenger={p} index={i} />)}
-                </div>
-              );
-            }
-            if (msg.cardType === 'review') {
-              return (
-                <div key={msg.id}>
-                  <BookingReviewCard
-                    data={msg.cardData}
-                    confirmable={context?.bookingState === 'AWAITING_CONFIRMATION' && !!context?.review?.valid && context?.confirmedReviewVersion === msg.cardData.reviewVersion}
-                    onChange={() => send('change details', 'TEXT')}
-                    onConfirm={(v?: number) => send('haan', 'TEXT', { reviewVersion: v })}
-                  />
-                </div>
-              );
-            }
-            if (msg.cardType === 'handoff') {
-              const bx: any = msg.cardData.bookingExecution;
-              const ex: any = bx?.execution;
-              const confirmed = ex?.status === 'CONFIRMED';
-              return (
-                <div key={msg.id} style={{ margin: '8px 16px', padding: 16, background: '#e8f5e9', borderRadius: 12, textAlign: 'center' }}>
-                  <div style={{ fontWeight: 600, color: '#2e7d32', marginBottom: 6 }}>{confirmed ? '✅ Booking provider ne confirm kiya' : ex?.submitted ? `⏳ Booking provider: ${ex.status}` : '📝 Booking details ready · real booking disabled'} (v{msg.cardData.reviewVersion})</div>
-                  <div style={{ fontSize: 13, color: '#424242' }}>{msg.cardData.message}</div>
-                  {msg.cardData.handoffId && (
-                    <div style={{ fontSize: 11, color: '#616161', marginTop: 8, fontFamily: 'monospace' }}>
-                      handoff {msg.cardData.handoffId} · {msg.cardData.handoffStatus} · executor: {msg.cardData.executorName} → {msg.cardData.executionStatus}
-                      {msg.cardData.expiresAt ? ` · valid till ${new Date(msg.cardData.expiresAt).toLocaleTimeString()}` : ''}{msg.cardData.duplicate ? ' · duplicate (no new handoff)' : ''}
-                    </div>
-                  )}
-                  {msg.cardData.handoffSessionId && (
-                    <div style={{ fontSize: 11, color: '#616161', marginTop: 4, fontFamily: 'monospace' }}>
-                      session {msg.cardData.handoffSessionId.slice(0, 11)}… · {msg.cardData.handoffSessionStatus}
-                      {msg.cardData.handoffSessionExpiresAt ? ` · expires ${new Date(msg.cardData.handoffSessionExpiresAt).toLocaleTimeString()}` : ''}
-                      {' · executor '}{msg.cardData.executorCapability?.executorName} ({msg.cardData.executorCapability?.enabled ? 'enabled' : 'disabled'}, real booking: {msg.cardData.executorCapability?.supportsRealBooking ? 'yes' : 'no'})
-                    </div>
-                  )}
-                  {bx && (
-                    <div style={{ fontSize: 11, color: '#616161', marginTop: 4, fontFamily: 'monospace' }}>
-                      provider {bx.provider?.providerName} ({bx.provider?.available ? 'available' : 'unavailable'}, health {bx.provider?.health}) · {bx.code}
-                      {ex?.providerReference ? ` · ref ${ex.providerReference}` : ''}
-                    </div>
-                  )}
-                  {confirmed && ex?.pnr && <div style={{ fontSize: 14, fontWeight: 700, color: '#1b5e20', marginTop: 6 }}>PNR {ex.pnr}</div>}
-                  {msg.cardData.handoffSessionId && !ex?.submitted && (
-                    <button
-                      onClick={() => runExecute()}
-                      style={{ marginTop: 10, padding: '6px 14px', borderRadius: 8, border: '1px solid #9e9e9e', background: '#fafafa', color: '#616161', fontSize: 12, cursor: 'pointer' }}
-                    >
-                      Booking provider status
-                    </button>
-                  )}
-                </div>
-              );
-            }
-            const d: any = msg.cardData;
-            if (msg.cardType === ('booking_execution' as any)) return (
-              <div key={msg.id}>
-                {chip(d.execution?.status === 'CONFIRMED' ? '#e8f5e9' : d.execution?.unresolved ? '#fff8e1' : '#eceff1', '#37474f', <>🔒 Booking provider <b>{d.execution?.providerName || d.provider?.providerName}</b>: <b>{d.execution?.status || d.code}</b>{d.duplicate ? ' · duplicate (no new request)' : ''}{d.execution?.status === 'CONFIRMED' && d.execution?.pnr ? <> · PNR <b>{d.execution.pnr}</b></> : ''}{d.manualVerificationRequired ? ' · manual provider verification required' : ''}{d.execution?.reconciliationAttempts ? ` · status checks: ${d.execution.reconciliationAttempts}` : ''}</>, msg.id + '-c')}
-                {d.execution?.unresolved && (
-                  <div style={{ margin: '0 16px 8px' }}>
-                    <button onClick={runReconcile} style={{ fontSize: 12, padding: '6px 12px', borderRadius: 16, border: '1px solid #f9a825', background: '#fffde7', color: '#5d4037', cursor: 'pointer' }}>Status verify karein</button>
-                  </div>
-                )}
-              </div>
-            );
-            if (msg.cardType === ('handoff_consume' as any)) return chip('#eceff1', '#37474f', <>🔒 Handoff execution: <b>{d.code}</b>{d.duplicate ? ' · duplicate (no new attempt)' : ''} · executor {d.executorName || 'none'} ({d.executorEnabled ? 'enabled' : 'disabled'}) · real booking: no</>, msg.id);
-            if (msg.cardType === ('handoff_status' as any)) return chip('#fff3e0', '#e65100', <>⚠️ Handoff {d.handoffId} <b>{d.status}</b> ({d.reason}) — naya review confirm karna hoga</>, msg.id);
-            if (msg.cardType === ('selected_train' as any)) return chip('#e3f2fd', '#0d47a1', <>🚆 Selected: <b>{d.trainNumber}</b> {d.trainName}</>, msg.id);
-            if (msg.cardType === ('selected_class' as any)) return chip('#e3f2fd', '#0d47a1', <>🎫 Class: <b>{d.classCode}</b></>, msg.id);
-            if (msg.cardType === ('availability' as any)) return chip('#fff8e1', '#795548', <>📊 {d.trainNumber} {d.travelClass} availability: <b>{d.status}</b> <span style={{ opacity: 0.7 }}>({d.date})</span></>, msg.id);
-            if (msg.cardType === ('fare' as any)) return chip('#f1f8e9', '#33691e', <>💰 {d.trainNumber} {d.travelClass}: ₹{d.perPassenger} × {d.passengersCount} = <b>₹{d.total}</b></>, msg.id);
-            if (msg.cardType === ('train_info' as any)) return chip('#ede7f6', '#4527a0', <>ℹ️ {d.trainNumber} {d.trainName}: {d.departure} → {d.arrival} ({d.duration})</>, msg.id);
-            if (msg.cardType === ('timetable' as any)) return chip('#ede7f6', '#4527a0', <>🕒 {(d || []).map((x: any) => `${x.station} ${x.departure || x.arrival}`).join(' → ')}</>, msg.id);
-            // Prompt 14: post-booking cards — backend BookingDetailsResponse / normalized lookups only (no raw provider data)
-            if (msg.cardType === ('booking_details' as any)) return chip(d.status === 'CONFIRMED' ? '#e8f5e9' : d.status === 'FAILED' || d.status === 'CANCELLED' ? '#ffebee' : '#fff8e1', '#37474f', <>🧾 <b>{d.train?.trainNumber}</b> {d.journey?.origin} → {d.journey?.destination} · {d.journeyDate} · {d.travelClass} · {d.passengersCount} pax · <b>{d.statusLabel}</b> · PNR {d.pnr ? <b>{d.pnr}</b> : d.pnrMasked ? d.pnrMasked : 'not available'}</>, msg.id);
-            if (msg.cardType === ('booking_action' as any)) return chip(d.status === 'ACTION_CONFIRMED' ? '#e8f5e9' : d.status === 'ACTION_FAILED' ? '#ffebee' : '#fff8e1', '#37474f', <>🛠️ {String(d.actionType || '').replace(/_/g, ' ').toLowerCase()} · <b>{String(d.status || '').replace(/^ACTION_/, '').replace(/_/g, ' ').toLowerCase()}</b>{d.resultStatus ? ` · ${d.resultStatus}` : ''}</>, msg.id);
-            if (msg.cardType === ('booking_history' as any)) return chip('#eceff1', '#37474f', <>🗂️ {(d.bookings || []).map((b: any) => `${b.train?.trainNumber} ${b.journey?.origin}→${b.journey?.destination} ${b.journeyDate} (${b.statusLabel})`).join(' · ') || 'Koi booking nahi'}</>, msg.id);
-            if (msg.cardType === ('pnr_status' as any)) return chip('#e3f2fd', '#0d47a1', <>🎟️ PNR {d.pnrMasked}: <b>{d.pnrStatus}</b>{d.chartStatus ? ` · chart: ${d.chartStatus}` : ''}{(d.passengers || []).map((p: any) => ` · P${p.number}: ${p.currentStatus}`).join('')} <span style={{ opacity: 0.7 }}>({d.dataSource === 'MOCK' ? 'mock / non-live' : 'fetched now'})</span></>, msg.id);
-            if (msg.cardType === ('live_status' as any)) return chip('#e0f2f1', '#004d40', <>📍 {d.trainNumber}: <b>{d.currentStatus}</b>{d.currentStationName || d.currentStationCode ? ` · ${d.currentStationName || d.currentStationCode}` : ''}{typeof d.delayMinutes === 'number' ? ` · ${d.delayMinutes} min late` : ''} <span style={{ opacity: 0.7 }}>({d.dataSource === 'MOCK' ? 'mock / non-live' : 'fetched now'})</span></>, msg.id);
-            return null;
-          }
-          return <MessageBubble key={msg.id} message={msg} />;
-        })}
-
-        {isLoading && (
-          <div style={{ padding: '0 16px', marginBottom: 12, display: 'flex', justifyContent: 'flex-start' }}>
-            <div style={{ padding: '12px 16px', borderRadius: '18px 18px 18px 4px', background: '#fff', fontSize: 14, color: '#9e9e9e' }}>
-              {toolActivity || 'Soch raha hoon…'}
-            </div>
-          </div>
-        )}
-
-        {conv.snapshot.listening && conv.snapshot.partialTranscript && (
-          <div style={{ margin: '8px 16px', padding: '10px 14px', background: '#e3f2fd', borderRadius: 12, fontSize: 14, color: '#1565c0' }}>🎙️ {conv.snapshot.partialTranscript}</div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
-
-      <div style={{ borderTop: '1px solid #e0e0e0', background: '#fff', paddingBottom: 8 }}>
-        <MicButton isRecording={conv.snapshot.listening} isSupported={conv.snapshot.sttAvailable} onStart={handleMicStart} onStop={handleMicStop} transcript={conv.snapshot.partialTranscript}
-          conversationMode={conv.snapshot.conversationMode} onToggleConversationMode={conv.setConversationMode} agentState={conv.snapshot.state} textFallback={conv.snapshot.textFallback}
-          sttPhase={conv.sttPhase} inputError={conv.inputErrorMessage} />
-        <form onSubmit={handleFormSubmit} style={{ display: 'flex', gap: 8, padding: '0 16px' }}>
-          <input
-            type="text"
-            value={inputText}
-            onChange={e => setInputText(e.target.value)}
-            placeholder="Type a message..."
-            disabled={isLoading || (conv.snapshot.listening && !conv.snapshot.conversationMode)}
-            style={{ flex: 1, padding: '12px 16px', borderRadius: 24, border: '1px solid #e0e0e0', fontSize: 15, outline: 'none', background: '#fafafa' }}
+      {view === 'home' ? (
+        <main className="bk-main">
+          <HomeView
+            composer={composerEl('hero')}
+            voicePanel={voicePanelEl}
+            onPrompt={pickPrompt}
+            promptsDisabled={isLoading || !sessionId}
+            status={appStatus}
+            voiceAvailable={snap.sttAvailable}
+            hasConversation={hasConversation}
+            onResume={() => setView('chat')}
           />
-          <button
-            type="submit"
-            disabled={!inputText.trim() || isLoading}
-            style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: inputText.trim() ? '#1976d2' : '#bdbdbd', color: '#fff', fontSize: 18, cursor: inputText.trim() ? 'pointer' : 'not-allowed' }}
-          >➤</button>
-        </form>
-      </div>
+        </main>
+      ) : (
+        <main className="bk-main">
+          <div className="bk-chat">
+            <div className="bk-chat__col">
+              <div className="bk-chat__scroll" ref={scrollRef} aria-live="polite" aria-relevant="additions" aria-label="Conversation">
+                <div className="bk-chat__thread">
+                  {showInspector && <div className="bk-inspector-wrap"><SessionInspector ctx={context} meta={meta} /></div>}
+                  {!hasConversation && <EmptyChat onPick={pickPrompt} disabled={isLoading || !sessionId} />}
+                  {conversation.map((msg, i) =>
+                    msg.role === 'card'
+                      ? <div key={`${msg.id}-${i}`} className="bk-block">{renderCard(msg, `${msg.id}-${i}`)}</div>
+                      : <MessageBubble key={`${msg.id}-${i}`} message={msg} />
+                  )}
+                  {isLoading && <ThinkingIndicator label={progressLabel} />}
+                  {snap.listening && snap.partialTranscript && (
+                    <div className="bk-partial" aria-live="polite"><span className="bk-dot bk-dot--busy" aria-hidden="true" /> {snap.partialTranscript}</div>
+                  )}
+                  {error && <ErrorBanner onRetry={retry} onDismiss={() => setError(null)} />}
+                  <div ref={messagesEndRef} />
+                </div>
+              </div>
+              <div className="bk-chat__dock">
+                <div className="bk-chat__dock-inner">
+                  {voicePanelEl}
+                  {composerEl('dock')}
+                </div>
+              </div>
+            </div>
+            {showTrip && <TripPanel ctx={context} />}
+          </div>
+        </main>
+      )}
+      {view === 'home' && error && (
+        <div className="bk-toast"><ErrorBanner onRetry={retry} onDismiss={() => setError(null)} /></div>
+      )}
+      {sheets}
     </div>
   );
 };

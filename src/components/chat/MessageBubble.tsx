@@ -1,36 +1,35 @@
 import React from 'react';
 import type { ChatMessage } from '@shared/entities';
+import { BrandMark, IconMic } from '../icons/Icons';
 
 interface Props {
   message: ChatMessage;
 }
 
+/**
+ * Assistant turns read like a document (avatar + name + text, no bubble);
+ * user turns are compact, right-aligned and visually lighter. The text shown is
+ * exactly the text the backend returned (the same text TTS speaks).
+ */
 export const MessageBubble: React.FC<Props> = ({ message }) => {
-  const isUser = message.role === 'user';
+  if (message.role === 'user') {
+    return (
+      <div className="bk-msg bk-msg--user">
+        <div>
+          <div className="bk-msg__bubble">{message.content}</div>
+          {message.inputMode === 'VOICE' && (
+            <div className="bk-msg__via"><IconMic size={12} /> Spoken</div>
+          )}
+        </div>
+      </div>
+    );
+  }
   return (
-    <div
-      style={{
-        display: 'flex',
-        justifyContent: isUser ? 'flex-end' : 'flex-start',
-        marginBottom: 12,
-        padding: '0 16px'
-      }}
-    >
-      <div
-        style={{
-          maxWidth: '80%',
-          padding: '12px 16px',
-          borderRadius: isUser ? '18px 18px 4px 18px' : '18px 18px 18px 4px',
-          background: isUser ? '#1976d2' : '#ffffff',
-          color: isUser ? '#ffffff' : '#212121',
-          boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-          fontSize: 15,
-          lineHeight: 1.5,
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word'
-        }}
-      >
-        {message.content}
+    <div className="bk-msg">
+      <div className="bk-msg__avatar" aria-hidden="true"><BrandMark size={16} /></div>
+      <div className="bk-msg__body">
+        <div className="bk-msg__name">BookKaro</div>
+        <div className="bk-msg__text">{message.content}</div>
       </div>
     </div>
   );

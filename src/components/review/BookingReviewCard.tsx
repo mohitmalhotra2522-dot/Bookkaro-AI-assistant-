@@ -1,9 +1,11 @@
 import React from 'react';
+import { IconArrowRight, IconInfo, IconLock } from '../icons/Icons';
+import { formatDate, genderLabel, inr } from '../../lib/format';
 
 /**
  * Booking review — renders ONLY the deterministic BookingReview built on the
  * server (server/booking/review-builder.ts). Unverified fare/availability are
- * shown as "not verified" — never as ₹0 or "confirmed". The Confirm button
+ * shown as "not verified yet" — never as ₹0 or "confirmed". The Confirm button
  * sends the reviewVersion it was rendered from; the server rejects it if the
  * review changed since (CONFIRMATION_VERSION_MISMATCH). Nothing is booked.
  */
@@ -17,10 +19,11 @@ interface ReviewData {
   selectedClass?: string;
   passengersCount: number;
   passengers: Array<{ passengerId?: string; name?: string; age?: number; gender?: string }>;
-  fare: { verified: boolean; perPassenger?: number; total?: number };
+  fare: { verified: boolean; perPassenger?: number; total?: number; breakdown?: Record<string, unknown> };
   availability: { verified: boolean; status?: string };
   warnings?: string[];
   dataSource?: string;
+  realBooking?: boolean;
 }
 
 interface Props {
@@ -29,56 +32,84 @@ interface Props {
   confirmable: boolean;
   onChange: () => void;
   onConfirm: (reviewVersion?: number) => void;
+  /** From GET /api/health — when false (or the review says realBooking=false) the boundary is stated. */
+  realBookingEnabled?: boolean | null;
 }
 
-const Row: React.FC<{ k: string; v: React.ReactNode; muted?: boolean }> = ({ k, v, muted }) => (
-  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-    <span style={{ color: '#757575' }}>{k}</span>
-    <span style={{ textAlign: 'right', color: muted ? '#b26a00' : undefined }}>{v}</span>
-  </div>
+const Line: React.FC<{ k: string; v: React.ReactNode; pending?: boolean }> = ({ k, v, pending }) => (
+  <div className="bk-review__line"><span>{k}</span><span className={pending ? 'bk-review__pending' : undefined}>{v}</span></div>
 );
-const G: Record<string, string> = { MALE: 'M', FEMALE: 'F', OTHER: 'O' };
 
-export const BookingReviewCard: React.FC<Props> = ({ data, confirmable, onChange, onConfirm }) => {
+export const BookingReviewCard: React.FC<Props> = ({ data, confirmable, onChange, onConfirm, realBookingEnabled }) => {
   const r = data.journey || data.route || {};
   const t = data.selectedTrain || data.train;
+  const bookingDisabled = data.realBooking === false || realBookingEnabled === false;
+  const fareParts = data.fare?.verified && data.fare.perPassenger != null ? `${inr(data.fare.perPassenger)} × ${data.passengersCount}` : null;
   return (
-    <div style={{ margin: '8px 16px', padding: 16, background: '#fff', borderRadius: 12, boxShadow: '0 2px 8px rgba(0,0,0,0.08)', opacity: confirmable ? 1 : 0.7 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
-        <span style={{ fontWeight: 700, fontSize: 16, color: '#212121' }}>📋 Booking Review</span>
-        <span style={{ fontSize: 11, color: '#757575' }}>v{data.reviewVersion ?? '?'}{confirmable ? '' : ' · purana'}</span>
+    <section className={`bk-card bk-review${confirmable ? '' : ' is-stale'}`} aria-label="Booking review">
+      <div className="bk-review__head">
+        <h3 className="bk-review__title">Review your booking</h3>
+        <span className={`bk-tag ${confirmable ? 'bk-tag--navy' : ''}`}>v{data.reviewVersion ?? '?'}{confirmable ? '' : ' · outdated'}</span>
       </div>
-      <div style={{ fontSize: 14, lineHeight: 1.8 }}>
-        <Row k="From → To" v={`${r.originName || r.origin || '—'} → ${r.destinationName || r.destination || '—'}`} />
-        <Row k="Date" v={data.date || '—'} />
-        <Row k="Train" v={t ? `${t.number} · ${t.name}` : '—'} />
-        <Row k="Class" v={data.selectedClass || '—'} />
-        <Row k="Passengers" v={String(data.passengersCount)} />
-        {(data.passengers || []).map((p, i) => (
-          <Row key={p.passengerId || i} k={`  ${p.passengerId || `P${i + 1}`}`} v={`${p.name || '—'}${p.age ? `, ${p.age}` : ''}${p.gender ? `, ${G[p.gender] || p.gender}` : ''}`} />
-        ))}
-        <Row k="Availability" v={data.availability?.verified ? data.availability.status : 'Abhi verify nahi hui'} muted={!data.availability?.verified} />
-        <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #eee', fontWeight: 600 }}>
-          <Row k="Total Fare" v={data.fare?.verified ? `₹${data.fare.total}` : 'Abhi verify nahi hua'} muted={!data.fare?.verified} />
+
+      <div className="bk-review__sec">
+        <div className="bk-review__label">Journey</div>
+        <div className="bk-review__route">
+          <span>{r.originName || r.origin || '—'}</span>
+          <IconArrowRight size={18} />
+          <span>{r.destinationName || r.destination || '—'}</span>
         </div>
-        {!!data.warnings?.length && (
-          <div style={{ marginTop: 8, padding: 8, background: '#fff8e1', borderRadius: 6, fontSize: 12, color: '#8d6e00' }}>
-            {data.warnings.map((w, i) => <div key={i}>⚠️ {w}</div>)}
-          </div>
-        )}
-        {data.dataSource && <div style={{ fontSize: 11, color: '#9e9e9e', marginTop: 6 }}>{data.dataSource}</div>}
+        <Line k="Date" v={formatDate(data.date) || '—'} />
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-        <button onClick={onChange} style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: '1px solid #1976d2', background: '#fff', color: '#1976d2', fontWeight: 600, cursor: 'pointer' }}>
-          Change
+
+      <div className="bk-review__sec">
+        <div className="bk-review__label">Train</div>
+        <Line k="Train" v={t ? `${t.number} · ${t.name}` : '—'} />
+        {t?.departure && t?.arrival && <Line k="Timing" v={`${t.departure} → ${t.arrival}`} />}
+        <Line k="Class" v={data.selectedClass || '—'} />
+        <Line k="Availability" v={data.availability?.verified ? (data.availability.status || '—') : 'Not verified yet'} pending={!data.availability?.verified} />
+      </div>
+
+      <div className="bk-review__sec">
+        <div className="bk-review__label">Passengers · {data.passengersCount}</div>
+        {(data.passengers || []).map((p, i) => (
+          <Line key={p.passengerId || i} k={p.name || `Passenger ${i + 1}`} v={[p.age ? String(p.age) : '', genderLabel(p.gender)].filter(Boolean).join(' · ') || '—'} />
+        ))}
+      </div>
+
+      <div className="bk-review__sec">
+        <div className="bk-review__label">Fare</div>
+        {fareParts && <Line k="Fare" v={fareParts} />}
+        {data.fare?.verified && data.fare.breakdown && Object.entries(data.fare.breakdown).filter(([, v]) => typeof v === 'number').map(([k, v]) => (
+          <Line key={k} k={k.replace(/([A-Z])/g, ' $1').replace(/^\w/, c => c.toUpperCase())} v={inr(v)} />
+        ))}
+        <div className="bk-review__total">
+          <span>Total</span>
+          {data.fare?.verified && data.fare.total != null ? <b>{inr(data.fare.total)}</b> : <span className="bk-review__pending">Not verified yet</span>}
+        </div>
+      </div>
+
+      {!!data.warnings?.length && (
+        <div className="bk-callout bk-callout--warn" role="note">
+          <IconInfo size={16} />
+          <span>{data.warnings.join(' ')}</span>
+        </div>
+      )}
+
+      <div className="bk-review__actions">
+        <button type="button" className="bk-btn bk-btn--ghost" onClick={onChange}>Change</button>
+        <button type="button" className="bk-btn bk-btn--primary" disabled={!confirmable} onClick={() => onConfirm(data.reviewVersion)}>
+          Confirm &amp; Continue
         </button>
-        <button disabled={!confirmable} onClick={() => onConfirm(data.reviewVersion)} style={{ flex: 1, padding: '10px 0', borderRadius: 8, border: 'none', background: confirmable ? '#1976d2' : '#b0bec5', color: '#fff', fontWeight: 600, cursor: confirmable ? 'pointer' : 'not-allowed' }}>
-          Confirm (v{data.reviewVersion ?? '?'})
-        </button>
       </div>
-      <div style={{ fontSize: 11, color: '#757575', marginTop: 8, textAlign: 'center' }}>
-        Confirm sirf booking details tayyar karta hai — asli booking, IRCTC login ya payment is milestone mein nahi hai.
-      </div>
-    </div>
+
+      {bookingDisabled && (
+        <div className="bk-callout" role="note">
+          <IconLock size={16} />
+          <span>Confirming verifies your booking details only. Real railway booking, IRCTC login and payment are not enabled — no ticket will be booked.</span>
+        </div>
+      )}
+      {data.dataSource && <div className="bk-meta" style={{ marginTop: 10 }}>{data.dataSource}</div>}
+    </section>
   );
 };

@@ -1,5 +1,13 @@
 import React from 'react';
+import { IconClose, IconMic, IconStop } from '../icons/Icons';
 
+/**
+ * Voice status panel. Purely presentational: every label and animation is driven by the
+ * EXISTING voice agent snapshot (state / listening / partialTranscript / textFallback) and the
+ * P36-C batch STT phase. Rings animate only while the agent is really listening or speaking —
+ * there is no fake audio level. Tap semantics are unchanged: tap = start, tap again = send
+ * (batch STT) / stop, and a tap while BookKaro speaks is the barge-in handled by the agent.
+ */
 interface Props {
   isRecording: boolean;
   isSupported: boolean;
@@ -16,74 +24,74 @@ interface Props {
   sttPhase?: 'IDLE' | 'RECORDING' | 'TRANSCRIBING';
   /** P36-C: short, safe voice-input failure message (typing stays available). */
   inputError?: string | null;
+  /** Contextual progress label from real turn events (tool STARTED), when available. */
+  progressLabel?: string | null;
 }
 
-const STATE_LABEL: Record<string, string> = {
-  LISTENING: 'Sun raha hoon…', USER_SPEAKING: 'Sun raha hoon…', PROCESSING: 'Soch raha hoon…', SPEAKING: 'Bol raha hoon — beech mein bol sakte hain', INTERRUPTED: 'Ruk gaya — boliye'
-};
-/** P36-C: Recording → Transcribing → Thinking → Speaking (batch STT phases take precedence while active). */
-const PHASE_LABEL: Record<string, string> = { RECORDING: 'Recording… bolne ke baad dobara tap karein', TRANSCRIBING: 'Transcribing…' };
+export type VoiceVisual = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'interrupted';
 
-export const MicButton: React.FC<Props> = ({ isRecording, isSupported, onStart, onStop, transcript, conversationMode, onToggleConversationMode, agentState, textFallback, sttPhase, inputError }) => {
-  const phase = sttPhase && sttPhase !== 'IDLE' ? sttPhase : null;
-  const statusLabel = phase ? PHASE_LABEL[phase] : agentState ? STATE_LABEL[agentState] : undefined;
-  if (!isSupported) {
-    return (
-      <div style={{ padding: '12px 16px', color: '#9e9e9e', fontSize: 12, textAlign: 'center' }}>
-        Voice input is not supported in your browser. Please type your message.
-      </div>
-    );
+/** Maps the real agent state + STT phase to one visual state (batch STT phases take precedence). */
+export function voiceVisual(p: { isRecording: boolean; agentState?: string; sttPhase?: string }): VoiceVisual {
+  if (p.sttPhase === 'TRANSCRIBING') return 'transcribing';
+  if (p.sttPhase === 'RECORDING') return 'listening';
+  switch (p.agentState) {
+    case 'LISTENING': case 'USER_SPEAKING': return 'listening';
+    case 'PROCESSING': return 'thinking';
+    case 'SPEAKING': return 'speaking';
+    case 'INTERRUPTED': return 'interrupted';
+    default: return p.isRecording ? 'listening' : 'idle';
   }
+}
+
+const COPY: Record<VoiceVisual, { title: string; sub: string }> = {
+  idle: { title: 'Tap to speak', sub: 'Hindi, Hinglish or English' },
+  listening: { title: 'Listening…', sub: 'Tap again when you’re done' },
+  transcribing: { title: 'Understanding…', sub: 'Turning your voice into text' },
+  thinking: { title: 'Finding the best option…', sub: 'Tap to interrupt' },
+  speaking: { title: 'BookKaro is speaking…', sub: 'Tap to interrupt' },
+  interrupted: { title: 'Stopped — go ahead', sub: 'Tap to speak' }
+};
+
+export const MicButton: React.FC<Props> = ({
+  isRecording, isSupported, onStart, onStop, transcript, conversationMode, onToggleConversationMode,
+  agentState, textFallback, sttPhase, inputError, progressLabel
+}) => {
+  const v = voiceVisual({ isRecording, agentState, sttPhase });
+  const copy = COPY[v];
+  const title = v === 'thinking' && progressLabel ? `${progressLabel.replace(/[.…]+$/, '')}…` : copy.title;
+  const orbClass = v === 'idle' || v === 'interrupted' ? 'is-idle' : v === 'listening' ? 'is-listening' : v === 'speaking' ? 'is-speaking' : 'is-busy';
+  const orbLabel =
+    sttPhase === 'RECORDING' ? 'Send recording' :
+    sttPhase === 'TRANSCRIBING' ? 'Cancel transcription' :
+    isRecording ? (conversationMode ? 'Stop conversation' : 'Stop listening') :
+    v === 'speaking' || v === 'thinking' ? 'Interrupt BookKaro and speak' : 'Start speaking';
+
+  if (!isSupported) return null;
+
   return (
-    <div style={{ padding: '8px 16px' }}>
-      <button
-        onClick={isRecording ? onStop : onStart}
-        style={{
-          width: '100%',
-          padding: '14px',
-          borderRadius: 24,
-          border: 'none',
-          background: isRecording ? '#d32f2f' : '#1976d2',
-          color: '#fff',
-          fontWeight: 600,
-          fontSize: 15,
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 8,
-          transition: 'background 0.2s'
-        }}
-      >
-        <span style={{ fontSize: 20 }}>{isRecording ? '⏹️' : '🎙️'}</span>
-        {phase === 'RECORDING' ? 'Tap to send' : phase === 'TRANSCRIBING' ? 'Transcribing… (tap to cancel)' : isRecording ? (conversationMode ? 'Stop conversation' : 'Stop Recording') : 'Talk to AI'}
+    <div className="bk-voice" role="region" aria-label="Voice conversation">
+      <button type="button" className={`bk-voice__orb ${orbClass}`} onClick={isRecording ? onStop : onStart} aria-label={orbLabel}>
+        <span className="bk-voice__ring" /><span className="bk-voice__ring" />
+        {isRecording ? <IconStop size={22} /> : <IconMic size={24} />}
       </button>
-      {onToggleConversationMode && (
-        <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 12, color: '#616161' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-            <input type="checkbox" checked={!!conversationMode} onChange={(e) => onToggleConversationMode(e.target.checked)} />
-            Conversation mode {conversationMode ? '(mic on — interrupt anytime)' : '(off — tap to talk)'}
-          </label>
-          {statusLabel && <span style={{ fontStyle: 'italic' }}>{statusLabel}</span>}
+      <div className="bk-voice__text" aria-live="polite">
+        <div className="bk-voice__title">
+          {title}
+          {conversationMode && <span className="bk-hands-free">Hands-free on</span>}
         </div>
-      )}
-      {inputError && <div role="status" style={{ marginTop: 4, fontSize: 12, color: '#c62828' }}>{inputError}</div>}
-      {textFallback && <div style={{ marginTop: 4, fontSize: 11, color: '#9e9e9e' }}>Voice output unavailable — replies are shown as text.</div>}
-      {isRecording && transcript && (
-        <div
-          style={{
-            marginTop: 8,
-            padding: '8px 12px',
-            background: '#f5f5f5',
-            borderRadius: 8,
-            fontSize: 13,
-            color: '#616161',
-            fontStyle: 'italic'
-          }}
-        >
-          {transcript}
-        </div>
-      )}
+        {isRecording && transcript
+          ? <div className="bk-voice__transcript">“{transcript}”</div>
+          : <div className="bk-voice__sub">{sttPhase === 'RECORDING' ? 'Tap again to send' : conversationMode && (v === 'listening' || v === 'speaking') ? (v === 'speaking' ? 'Speak anytime to interrupt' : 'Mic is on — speak naturally') : copy.sub}</div>}
+        {inputError && <div className="bk-voice__error" role="status">{inputError}</div>}
+        {textFallback && <div className="bk-voice__sub">Voice replies unavailable — showing text</div>}
+      </div>
+      <div className="bk-voice__actions">
+        {conversationMode && onToggleConversationMode ? (
+          <button type="button" className="bk-btn bk-btn--ghost bk-btn--sm" onClick={() => onToggleConversationMode(false)}>Turn off</button>
+        ) : (isRecording || sttPhase === 'TRANSCRIBING') ? null : (
+          v !== 'idle' && <button type="button" className="bk-iconbtn" onClick={onStop} aria-label="Close voice panel"><IconClose size={18} /></button>
+        )}
+      </div>
     </div>
   );
 };
