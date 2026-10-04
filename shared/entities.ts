@@ -193,6 +193,12 @@ export interface BookingSession {
   focusTrainNumber?: string;
   /** Previously selected train number (before a change of mind). */
   previousTrainNumber?: string;
+  /** Prompt 30: orchestrator turn whose successful info tool (GET_TRAIN_INFO / GET_TIMETABLE) set the focus — lets a
+   *  discarded turn's focus be rolled back. Internal; never shown to the user. */
+  focusTurnId?: string;
+  /** Prompt 30: the train / class the user had chosen for an OLDER journey (date / route changed). A conversational
+   *  preference only — every fact about it expired with the old journey; re-verify on the new results. */
+  staleReference?: StaleReference;
   /** Monotonic per-turn request version + id of the latest started turn.
    *  Results from older requests are rejected as STALE_TOOL_RESULT. */
   requestVersion: number;
@@ -458,4 +464,14 @@ export interface TurnLog {
   toolResultStatus?: 'ok' | 'error' | 'none';
   stateAfter: string;
   latencyMs: number;
+}
+
+/** Prompt 30: previous choice retained across a date / route change as a preference — never as a railway fact. */
+export interface StaleReference {
+  trainNumber: string;
+  classCode?: string;
+  date?: string;
+  origin?: string;
+  destination?: string;
+  reason: 'DATE_CHANGED' | 'ROUTE_CHANGED';
 }

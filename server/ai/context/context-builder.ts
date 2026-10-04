@@ -13,6 +13,7 @@
  * is ALSO built from BookingSession — an LLM-generated summary can never
  * replace BookingSession.
  */
+import { referenceContextView } from './reference-context';
 import type { BookingSession } from '@shared/entities';
 import { currentResults } from './train-reference-resolver';
 import type { PostBookingContextView } from '../../booking/post-booking/post-booking-service';
@@ -54,6 +55,12 @@ export interface LLMContext {
    * from BookingSession — never an LLM-written summary, never PNR values / names / secrets.
    */
   conversationContext?: Readonly<Record<string, any>>;
+  /**
+   * Prompt 30 — what references can point at: the active result set's journey (display positions address ONLY it),
+   * the current focus, and the previous choice for an older journey (an expired preference, never a fact).
+   * No internal ids.
+   */
+  referenceContext?: ReturnType<typeof referenceContextView>;
 }
 
 export const MAX_RECENT_MESSAGES = 12;
@@ -86,6 +93,7 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
         departure: x.departure, arrival: x.arrival, duration: x.duration, classes: (x.classes || []).map(c => c.code)
       }))
     },
+    referenceContext: referenceContextView(s),
     summary: compressed ? summarizeFromSession(s) : undefined,
     recentMessages: recent,
     ...(s.bookingExecution ? { bookingExecution: Object.freeze({

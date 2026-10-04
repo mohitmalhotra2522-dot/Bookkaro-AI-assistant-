@@ -68,6 +68,8 @@ import { SAFE_ERROR_MESSAGE } from '../tool-runtime/tool-error-normalizer';
 import { naturalResponseComposer, type NaturalComposeResult } from '../response/natural-response-composer';
 import { speechOf } from '../conversation/assistant-response';
 import { actionLedgerFromSteps, guardActionClaims, type ActionExecution, type ActionClaimDiagnostic } from '../response/action-claims';
+import { guardReferenceClaims, type ReferenceClaimDiagnostic } from '../response/reference-claims';
+import { recordToolArgReference, type ReferenceResolutionRecord } from '../context/reference-context';
 
 export interface ProcessTurnOptions {
   /** Prompt 17: client-generated id of ONE user message. A duplicate DELIVERY (retry, reconnect,
@@ -158,6 +160,9 @@ interface TurnExtras {
   entityRejections?: Array<{ sentence: string; reason: string; binding: string }>;
   /** Prompt 29: action / progress statements checked against this turn's actual executions (codes + ids only). */
   actionClaims?: ActionClaimDiagnostic[];
+  /** Prompt 30 */
+  referenceClaims?: ReferenceClaimDiagnostic[];
+  referenceRecords?: ReferenceResolutionRecord[];
 }
 
 const SENSITIVE_REPLY = 'Main kabhi password, OTP, CAPTCHA, CVV, card, UPI PIN ya IRCTC credentials nahi maangta. Kripya aisi jaankari share na karein.';
@@ -535,7 +540,18 @@ export class ConversationAgentOrchestrator {
     const actionGuard = guardActionClaims(composed, actionLedger);
     extra.actionClaims = actionGuard.diagnostics;
     this.lastActions.set(sessionId, actionLedger.current);
-    const message = actionGuard.text || (actionGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : composed);
+    const actionChecked = actionGuard.text || (actionGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : composed);
+    // ---- Prompt 30 (guard step 7): position / list-membership claims ("doosri wali 12497 hai", "12497 parso ki list
+    //      mein nahi hai") must hold for the CURRENT result set; only the false sentence is removed (text = TTS)
+    const refGuard = guardReferenceClaims(actionChecked, sess);
+    extra.referenceClaims = refGuard.diagnostics;
+    extra.referenceRecords = [
+      ...rt.applyOutcomes.flatMap(o => o.references || []),
+      // the LLM's own interpretation of a reference, as a train number in a tool call → validated against the current set
+      ...[...rt.steps, ...(prep?.steps || [])].filter(st => st.status !== 'stale' && (st.validatedArguments?.trainNumber || (st.toolCall.arguments as any)?.trainNumber))
+        .map(st => recordToolArgReference(st.toolCall.name, String(st.validatedArguments?.trainNumber || (st.toolCall.arguments as any)?.trainNumber), sess, st.status === 'ok' && !!st.result?.success))
+    ];
+    const message = refGuard.text || (refGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : actionChecked);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     // Prompt 23: a native agent may have answered after a rejected proposal — the rejection stays the turn's error
@@ -690,7 +706,8 @@ export class ConversationAgentOrchestrator {
       validation: { accepted: ns?.segments.length ?? 0, rejected: (ns?.rejected || []).map(r => r.reason), repaired: ns?.repaired ?? 0, claimTypes, source: ns?.source ?? null },
       ...(a.rt?.chain ? { chain: { ...a.rt.chain, sessionId: a.sessionId, turnId: a.turnId, stateBefore: String(a.stateBefore), stateAfter: String(this.state.getSession(a.sessionId).bookingState) } } : {}),
       binding: this.bindingDiagnostics(a, x, wording),
-      actionClaims: [...(x.actionClaims || []), ...(ns?.actionClaims || [])]
+      actionClaims: [...(x.actionClaims || []), ...(ns?.actionClaims || [])],
+      references: { records: x.referenceRecords || [], claims: [...(ns?.referenceClaims || []), ...(x.referenceClaims || [])] }
     };
   }
 

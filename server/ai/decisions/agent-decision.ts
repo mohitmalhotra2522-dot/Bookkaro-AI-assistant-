@@ -378,6 +378,9 @@ export interface TurnRecord {
     };
     /** Prompt 29: action / progress claim validation (actionType, actionStatus, toolCallId, validationStatus, removalReason). */
     actionClaims?: import('../response/action-claims').ActionClaimDiagnostic[];
+    /** Prompt 30: reference resolutions (LLM trainRefs / tool-argument trains vs the current result set) and the reply's
+     *  position / list-membership claims. Codes + internal ids for logs only — never shown to the user. */
+    references?: { records: import('../context/reference-context').ReferenceResolutionRecord[]; claims: import('../response/reference-claims').ReferenceClaimDiagnostic[] };
   };
   // ---- Prompt 9 observability ----
   bookingReadiness?: { ready: boolean; blockers: string[]; warnings: string[] };

@@ -745,7 +745,11 @@ export class BoundToolRuntime {
           ...t, displayIndex: i + 1, resultId: `${resultId}:${i + 1}`, provider: r.provider, retrievedAt
         }));
         const patch: any = {
-          searchResults: { ...sr, trains, version, resultId, retrievedAt },
+          // Prompt 30: result-set provenance (journey the set belongs to + the turn / tool result that produced it) —
+          // display indexes are addressable only while this set matches the session journey
+          searchResults: { ...sr, trains, version, resultId, retrievedAt,
+            date: sr?.journey?.date ?? vt.arguments.date, origin: sr?.journey?.origin ?? vt.arguments.origin, destination: sr?.journey?.destination ?? vt.arguments.destination,
+            sourceTurnId: H.turnId ?? null, sourceToolResultId: r.toolExecutionId ?? null },
           searchResultsVersion: version,
           searchMeta: { resultId, retrievedAt, totalCount: trains.length }
         };
@@ -757,11 +761,13 @@ export class BoundToolRuntime {
         break;
       }
       case 'GET_TRAIN_INFO': {
-        this.commitSession({ lastTrainInfo: r.data, focusTrainNumber: r.data?.trainNumber || vt.arguments.trainNumber } as any);
+        // Prompt 30: only a SUCCESSFUL, non-stale result reaches here (failures returned above; the guarded commit rejects
+        // stale turns); the focus is stamped with its turn so a discarded turn's focus can be rolled back
+        this.commitSession({ lastTrainInfo: r.data, focusTrainNumber: r.data?.trainNumber || vt.arguments.trainNumber, focusTurnId: H.turnId } as any);
         break;
       }
       case 'GET_TIMETABLE': {
-        this.commitSession({ lastTimetable: r.data, focusTrainNumber: vt.arguments.trainNumber } as any);
+        this.commitSession({ lastTimetable: r.data, focusTrainNumber: vt.arguments.trainNumber, focusTurnId: H.turnId } as any);
         break;
       }
       case 'CHECK_AVAILABILITY': {

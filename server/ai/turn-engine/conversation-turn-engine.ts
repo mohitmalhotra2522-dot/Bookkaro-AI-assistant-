@@ -34,6 +34,7 @@ import type { VoiceTurnOutcome } from '@shared/voice/conversational-voice-agent'
 import { pendingQuestionCode } from './pending-question';
 import { syncJourneyVersion } from '../tool-runtime/journey-version';
 import { maskPnrsInText } from '../../booking/post-booking/pnr-validator';
+import { currentResults } from '../context/train-reference-resolver';
 import { containsSensitiveRequest } from '../../security/validators/intent-validator';
 import { v4 as uuid } from '../orchestrator/utils';
 
@@ -120,6 +121,22 @@ export class ConversationTurnEngine {
     return { turnId: null, kind: null, providerCancellation: 'NOT_SUPPORTED' };
   }
 
+  /**
+   * Prompt 30 — a DISCARDED turn (stale / superseded / no longer relevant) never leaves the conversational focus it set.
+   * Only a focus stamped by THIS turn's info tool (and not since overwritten / cleared) is rolled back; an explicit
+   * selection stays (it is the user's choice and is reflected in the selected train). The restored focus must still
+   * point at the current results or the selected train — otherwise there is no focus (never a guess).
+   */
+  private rollbackDiscardedFocus(sid: string, orchestratorTurnId: string | undefined, focusBefore: string | undefined): void {
+    const s = this.state.getSession(sid);
+    if (!orchestratorTurnId || !s.focusTurnId || s.focusTurnId !== orchestratorTurnId) return;
+    const selected = (s.selectedTrain as any)?.number || (s.selectedTrain as any)?.trainNumber;
+    if (selected && s.focusTrainNumber === selected) { s.focusTurnId = undefined; return; }
+    const valid = !!focusBefore && (focusBefore === selected || currentResults(s).some(t => t.trainNumber === focusBefore));
+    s.focusTrainNumber = valid ? focusBefore : (selected || undefined);
+    s.focusTurnId = undefined;
+  }
+
   /** Part 55 — conversation history (safe; no secrets). */
   getTurns(sessionId: string): ConversationTurn[] { return (this.turns.get(sessionId) || []).map(t => this.publicTurn(t)); }
 
@@ -161,6 +178,8 @@ export class ConversationTurnEngine {
     }
     const sequence = (this.seq.get(sid) || 0) + 1;
     this.seq.set(sid, sequence);
+    // Prompt 30: focus before this turn — restored if the turn is discarded after its info tool moved the focus
+    const focusBefore = this.state.getSession(sid).focusTrainNumber;
     const sensitive = containsSensitiveRequest(userText);
     // Prompt 21 (Part 4): STT cleanup for VOICE only (fillers, spoken digits, class names, repeated words)
     const stt = mode === 'VOICE' && !sensitive ? normalizeTranscript(userText) : null;
@@ -323,6 +342,7 @@ export class ConversationTurnEngine {
     }
     let response: AssistantTurnResponse | null = null;
     if (r.stale || irrelevant || staleOnly) {
+      this.rollbackDiscardedFocus(sid, r.turnLog.turnId, focusBefore);
       turn.superseded = true;
       turn.presentation = 'DISCARDED';
       this.finalize(turn, 'SUPERSEDED', t0);

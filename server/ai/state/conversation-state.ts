@@ -128,7 +128,7 @@ export class ConversationStateManager {
     }
     for (const k of ['origin', 'originName', 'destination', 'destinationName', 'date', 'passengersCount', 'preferredClass', 'preferredTime',
       'searchResults', 'lastSearch', 'searchMeta', 'selectedTrain', 'selectedClass', 'selectedJourney', 'fare', 'availability',
-      'lastTrainInfo', 'lastTimetable', 'focusTrainNumber', 'previousTrainNumber', 'review', 'readiness', 'confirmation',
+      'lastTrainInfo', 'lastTimetable', 'focusTrainNumber', 'previousTrainNumber', 'focusTurnId', 'staleReference', 'review', 'readiness', 'confirmation',
       'confirmedReviewVersion', 'carryOverSelection', 'lastPassengerRefId', 'activeBookingId', 'postBookingClarification',
       'pendingLifecycleAction', 'lifecycleClarification', 'lastLifecycleAction', 'lastDetectedChanges'] as Array<keyof BookingSession>) clear(k);
     clear('availableTrains', []);
@@ -183,6 +183,20 @@ export class ConversationStateManager {
     const cleared: string[] = [];
     const clr = (k: keyof BookingSession) => { if ((s as any)[k] !== undefined && !(Array.isArray((s as any)[k]) && (s as any)[k].length === 0)) cleared.push(String(k)); };
     if (scope === 'ROUTE' || scope === 'DATE') {
+      // Prompt 30: the old choice survives ONLY as a conversational preference for the older journey (every fact about
+      // it — list, availability, fare, timings — is cleared below); the LLM may re-pick it only from fresh results
+      const prevNo = s.selectedTrain ? ((s.selectedTrain as any).number || (s.selectedTrain as any).trainNumber) : undefined;
+      if (prevNo) {
+        const j: any = (s.searchResults as any)?.journey || {};
+        const sr: any = s.searchResults || {};
+        const oc = (x: any) => (x && typeof x === 'object' ? x.code : x) || undefined;
+        s.staleReference = {
+          trainNumber: String(prevNo), ...(s.selectedClass ? { classCode: s.selectedClass } : {}),
+          date: sr.date ?? j.date ?? (s.selectedTrain as any)?.date, origin: oc(sr.origin) ?? oc(j.origin), destination: oc(sr.destination) ?? oc(j.destination),
+          reason: scope === 'DATE' ? 'DATE_CHANGED' : 'ROUTE_CHANGED'
+        };
+      }
+      s.focusTurnId = undefined;
       clr('searchResults'); clr('selectedTrain'); clr('selectedClass'); clr('availability'); clr('fare');
       s.availableTrains = [];
       s.searchResults = undefined;
@@ -301,6 +315,9 @@ export class ConversationStateManager {
     if (prev && prev !== normalized.number) s.previousTrainNumber = prev;
     s.selectedTrain = normalized as any;
     s.focusTrainNumber = normalized.number;
+    // Prompt 30: an explicit selection is the new focus (no turn-scoped rollback) and supersedes the older-journey choice
+    s.focusTurnId = undefined;
+    s.staleReference = undefined;
     s.selectedClass = undefined;
     s.fare = undefined;
     s.availability = undefined;

@@ -45,6 +45,7 @@ import { ContextPatchValidator, classPreferenceFamily, type PatchReview } from '
 import type { ContextPatch, RejectedPatch } from '@shared/conversation-context';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { TrainReferenceResolver, currentResults, type ResultTrain } from './train-reference-resolver';
+import { recordTrainReference, type ReferenceResolutionRecord } from './reference-context';
 import { ClassReferenceResolver } from './class-reference-resolver';
 import { passengerCollection, passengerLabel } from '../../booking/passenger-collection';
 import { derivePendingInteraction, questionFor } from './pending-interaction';
@@ -68,6 +69,8 @@ export interface ApplyCtx {
 }
 
 export interface ApplyOutcome {
+  /** Prompt 30: internal reference-resolution records (observability only). */
+  references?: ReferenceResolutionRecord[];
   notes: string[];
   error?: OrchestratorError;
   /** Tool calls attached to this decision must NOT run (context could not be applied). */
@@ -411,6 +414,7 @@ export class ContextualTurnApplier {
     // 8) Train reference
     if (e.trainRef) {
       const res = this.trainRefs.resolve(e.trainRef, S());
+      (out.references ||= []).push(recordTrainReference(e.trainRef, res, S()));
       if (!res.ok) return fail(res.code, res.message, res.code === 'AMBIGUOUS_REFERENCE' ? { type: 'TRAIN_SELECTION_REQUIRED', data: { candidates: (res.candidates || []).map(c => c.trainNumber) } } : undefined);
       const r = this.applyTrainSelection(sessionId, res.train, ctx, emit);
       out.notes.push(...r.notes);

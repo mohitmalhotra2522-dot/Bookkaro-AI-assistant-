@@ -32,6 +32,7 @@ import { ClaimEntityBinder, verifyBoundClaim, diagnoseCrossEntity, resultTrainsO
 import { explicitDates } from './claim-dates';
 import { RESULT_REF_RE } from '../tool-runtime/tool-result-identity';
 import { actionLedgerFromSteps, guardActionSentence, type ActionLedger, type ActionClaimDiagnostic } from './action-claims';
+import { verifyReferenceClaims, type ReferenceClaimDiagnostic } from './reference-claims';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -102,6 +103,8 @@ export interface NaturalComposeResult {
   claimBinding?: ClaimBindingSummary;
   /** Prompt 29: action / progress statements checked against this turn's executions (internal diagnostics only). */
   actionClaims?: ActionClaimDiagnostic[];
+  /** Prompt 30: position / list-membership claims checked against the current result set (codes only). */
+  referenceClaims?: ReferenceClaimDiagnostic[];
   /** Prompt 28: extended provenance of every accepted sentence (claimId, entity, binding, verification) — internal only.
    *  `provenance` keeps the P25 / P26 shape unchanged. */
   claimProvenance?: ClaimProvenance[];
@@ -295,6 +298,7 @@ export class NaturalResponseComposer {
     const rejected: NaturalComposeResult['rejected'] = [];
     const actionLedger: ActionLedger = i.actionLedger ?? actionLedgerFromSteps(i.steps, { session: s });
     const actionDiag: ActionClaimDiagnostic[] = [];
+    const refDiag: ReferenceClaimDiagnostic[] = [];
     let streamed = 0;
     const len = () => accepted.join(' ').length;
     const hasQ = () => accepted.some(a => a.includes('?')) || (!!accepted.length && ASKS_RE.test(accepted[accepted.length - 1]));
@@ -417,6 +421,9 @@ export class NaturalResponseComposer {
           crossEntity.push({ reason: bv.reason, diagnosis: bv.reason === 'AMBIGUOUS_REFERENCE' ? 'AMBIGUOUS_REFERENCE' : (bv.diagnosis || 'CROSS_TRAIN_FACT'), binding: binding.status, trainNumber: binding.trainNumbers[0] });
         }
       } else if (/^CROSS_DATE_FACT/.test(why)) crossEntity.push({ reason: why, diagnosis: 'CROSS_DATE_FACT', binding: binding.status, trainNumber: binding.trainNumbers[0] });
+      // Prompt 30 (guard step 7): "doosri wali 12497 hai" / "12497 parso ki list mein nahi hai" must hold for the
+      // CURRENT result set — an index from an older list or a false membership claim removes only this sentence
+      if (!why) { const rv = verifyReferenceClaims(t, s); refDiag.push(...rv.diagnostics); if (rv.reason) why = rv.reason; }
       if (why) { rejected.push({ sentence: t.slice(0, 120), reason: why }); prevRejected = true; return; }
       prevRejected = false;
       if (hits.text && hits.text !== t) { t = hits.text; repaired++; }
@@ -479,7 +486,7 @@ export class NaturalResponseComposer {
     else if (buf.trim()) { take(buf); buf = ''; }
     const bindingSummary = (): ClaimBindingSummary => ({ counts: bindCounts, crossEntity,
       status: crossEntity.some(c => c.diagnosis !== 'AMBIGUOUS_REFERENCE') ? 'CROSS_ENTITY_REMOVED' : crossEntity.length ? 'AMBIGUOUS_REMOVED' : entityClaims ? 'BOUND' : 'NONE' });
-    if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary(), actionClaims: actionDiag };
+    if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag };
 
     // ---- guarantees ----
     if (confirmationTurn && !NOT_BOOKED_RE.test(accepted.join(' '))) return fallback('MISSING_NOT_BOOKED_DISCLAIMER', rejected);
@@ -491,7 +498,7 @@ export class NaturalResponseComposer {
     if (!streamable) segments.forEach((t, k) => i.onSegment?.(k, t));
     return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),
       provenance, claimProvenance, repaired, wordingCall: !agentText,
-      claimBinding: bindingSummary(), actionClaims: actionDiag };
+      claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag };
   }
 }
 
