@@ -19,9 +19,13 @@ export interface TurnToolResultView {
   /** Prompt 32: honest outcome category (DATA / NO_RESULTS / UNSUPPORTED / TIMEOUT / PROVIDER_FAILURE / MALFORMED_DATA / STALE / REJECTED). */
   outcome?: string;
   /** Prompt 32: provider identity of the data ('MOCK' development data is never live). */
-  dataSource?: 'MOCK' | 'LIVE' | null;
+  dataSource?: 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null;
   /** Prompt 27: provider attempts behind this result (2 = the backend already retried it once). */
   attempts?: number;
+  /** Prompt 35: live provider that answered (RAILCORE / RAILKIT / RAILRADAR), fallback flag and the failover chain. */
+  provider?: string;
+  fallbackUsed?: boolean;
+  providerAttempts?: Array<{ provider: string; outcome: string; errorCode: string | null }>;
   /** Prompt 28: authoritative result identity (train / date / class / route / provider) — internal ids never user-facing. */
   identity?: ToolResultIdentity;
   /** Prompt 28: per-turn reference the LLM sees for this result (`fare-2`). */

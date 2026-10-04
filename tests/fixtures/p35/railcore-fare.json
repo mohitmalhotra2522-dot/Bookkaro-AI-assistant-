@@ -1,0 +1,46 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:40.097Z",
+ "status": 200,
+ "endpoint": "/v1/availability/seats",
+ "body": {
+  "success": true,
+  "data": {
+   "train_number": "12014",
+   "from_station_code": "ASR",
+   "to_station_code": "NDLS",
+   "journey_date": "2026-10-05",
+   "quota": "GN",
+   "classes": [
+    {
+     "class_code": "CC",
+     "status": "WAITLIST",
+     "availability_text": "GNWL51/WL30",
+     "available_count": 0,
+     "waitlist_count": 30,
+     "rac_count": 0,
+     "wl_pool": "GNWL",
+     "wl_pool_position": 51,
+     "fare": 1125,
+     "catering_charge": 125,
+     "total_fare": 1125,
+     "confirmation_probability": {
+      "percentage": 37,
+      "label": "LOW",
+      "text": "37% Chance"
+     },
+     "last_updated_at": "2026-10-04T12:20:30+05:30"
+    }
+   ]
+  },
+  "meta": {
+   "api_version": "v1",
+   "request_id": "req_01M435G6KT5VM7VRZF9ZCSYRJY",
+   "trace_id": "trc_01M435G6KVKCS7J0JJE8D8MMP1",
+   "timestamp": "2026-10-04T15:26:39.988+05:30",
+   "freshness": {
+    "mode": "live",
+    "retrieved_at": "2026-10-04T09:56:39.988Z"
+   }
+  }
+ }
+}

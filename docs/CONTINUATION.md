@@ -7,7 +7,8 @@ Read this first in a new workspace. It is enough to continue the project from th
 BookKaro is a mobile-first Hindi/Hinglish/English **railway assistant** (text + voice) with a conversational booking
 *preparation* flow. A real LLM (OpenAI-compatible, e.g. NVIDIA `meta/muse-glimmer-30b`) is the agent: it decides
 meaning and tools. The backend is a strict safety and validation boundary. **Phase 1:**
-- railway data comes from `MockRailwayProvider` (labelled non-live);
+- railway data comes from `MockRailwayProvider` (labelled non-live) by default. **Since P35:** `RAILWAY_PROVIDER=live`
+  enables the real RailCore → RailKit → RailRadar failover chain (see `docs/P35-REAL-INTEGRATION.md`);
 - real booking, payment, IRCTC login and submission are **disabled** (interface-only handoff).
 
 Stack:
@@ -33,7 +34,9 @@ npm run build                            # tsc -b && vite build  (G1)
 Env:
 - No `LLM_PROVIDER` → MockLLM (offline stand-in; tests always use it or the FakeOpenAI helper).
 - Real LLM: `LLM_PROVIDER=openai-compatible`, `LLM_BASE_URL=https://integrate.api.nvidia.com/v1`, `LLM_MODEL=meta/muse-glimmer-30b`, `LLM_API_KEY=…` (in `.env` only).
-- `RAILWAY_PROVIDER` defaults to `mock` (the only registered provider). `REAL_IRCTC_ENABLED` must stay off.
+- `RAILWAY_PROVIDER` defaults to `mock`. P35: `RAILWAY_PROVIDER=live` + `RAILWAY_PRIMARY_PROVIDER=railcore` + `RAILWAY_FALLBACK_PROVIDERS=railkit,railradar` + `RAILCORE_API_KEY` / `RAILKIT_API_KEY` / `RAILRADAR_API_KEY` (`.env` only). Other registered ids: `railcore`, `railkit`, `railradar` (single provider). `REAL_IRCTC_ENABLED` must stay off.
+- P35 optional: web research (`WEB_RESEARCH_ENABLED=true`, `WEB_RESEARCH_PROVIDER=tavily`, `WEB_RESEARCH_API_KEY`); server voice (`VOICE_STT_*`, `VOICE_TTS_*`). All placeholders are in `.env.example`.
+- Live scripts (spend real credits; never part of the gates): `vite-node scripts/p35-live-providers.ts` (adapters) and `vite-node scripts/p35-live-llm.ts` (real LLM + real providers).
 
 ## 3. Architecture map (where things live)
 
@@ -90,7 +93,8 @@ Env:
 | 31 | — | **no P31 commit exists in this workspace** (P32 was built on P30) |
 | 32 | `397ce32` | full LLM agent authority + honest provider outcomes |
 | 33 | `6f71466`, `74063e1` | AI-driven booking preparation + review + secure handoff readiness — see `docs/AGENT_AUTHORITY.md` §7 |
-| 34 | `caa2ac4` + fare follow-up (see `git log`) | voice production hardening: structured STT boundary, no interim turns, TTS = final validated text only, barge-in/stale, TTS retry, voice observability — see `docs/AGENT_AUTHORITY.md` §8 |
+| 34 | `caa2ac4`, `8032d5c` (fare follow-up) | voice production hardening: structured STT boundary, no interim turns, TTS = final validated text only, barge-in/stale, TTS retry, voice observability — see `docs/AGENT_AUTHORITY.md` §8 |
+| 35 | see `git log` | real railway data (RailCore/RailKit/RailRadar adapters + failover), provenance, capability matrix, LLM-chosen web research, server STT/TTS routes, IRCTC handoff boundary wording — see `docs/P35-REAL-INTEGRATION.md` |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -111,7 +115,18 @@ Env:
 11. Stop after each milestone. End the report with "P(N+1) NOT STARTED.". Don't redesign the premium UI.
 12. Live check (when asked): only with a configured real provider, max 3 requests, no reruns.
 
-## 6. Test groups (P33 definition — booking milestone)
+## 6. Test groups
+
+**P35 definition (latest):**
+- G1 = `tsc --noEmit -p tsconfig.json` + `npm run build`.
+- G2 = unit p17, p21, p22, p25–p30, p32, p33, p34 ×2, p35-provider-failover.
+- G3 = integration p35-real-integration-e2e, p34-voice-e2e, p8-booking-engine, p10, p11, p16, p17, p21–p23, p25–p30, p32, p33.
+
+P35 results: G1 PASS; G2 232/234; G3 290/302. Then p28 [D] was corrected to the session-dated GET_FARE (a targeted run gave 14/14). All remaining failures are pre-existing.
+
+P35 test helpers: `tests/helpers/p35-fixture-fetch.ts` replays real trimmed provider bodies from `tests/fixtures/p35/` and re-dates them. It also lets tests inject faults and records calls. The fake keys only exist in tests.
+
+### Older definition (P33 — booking milestone)
 
 - **G1:** `npm run build` (tsc -b + vite build).
 - **G2 (booking domain / security, unit):** `tests/unit/p9-passenger-readiness`, `p10-execution-gateway`, `p11-handoff-session`, `p12-booking-provider`, `p13-execution-lifecycle`, `p15-lifecycle-actions`, `p19-passenger-collection`, `p20-passenger-workflow`, `p23-real-llm-adapter`, `p32-agent-authority`, `p33-booking-preparation`.
@@ -163,8 +178,14 @@ Found during P34 (verified failing at `74063e1`, before any P34 code): unit p21 
 - A new `ToolErrorCode` needs entries in `shared/railway-tool-runtime.ts`, `RUNTIME_CODES`, `SAFE_ERROR_MESSAGE`, and (if terminal) `NON_RETRYABLE_ERRORS`.
 - Native tool calling needs a tool message for every `tool_call_id`. Muse takes ~12–40 s per turn (timeout ≤ 60 s).
 - Use `rt.toolExecutions` / `turnLog.diagnostics.*` in tests. Voice tests need `agent.listen()` first.
+- P35 provider rules:
+  - live provider normalizers must echo the requested identity (train, date, class), or the runtime rejects the result as RESULT_IDENTITY_MISMATCH;
+  - `RailwayMeta` uses `providerId`;
+  - never add fields to `provenance`; use `meta` or view fields instead.
+- P35 execution boundary: a `BOOKING_EXECUTION_DISABLED` turn always states "Booking execution abhi enabled nahi hai" (`statesExecutionBoundary` in the composer and the orchestrator).
+- Never put provider keys anywhere but `.env`. Before zipping, grep the zip for every key value.
 
-## 8. Next-step template (for P35+)
+## 8. Next-step template (for P36+)
 
 1. `git remote -v` (stop if it shows RailBook) → `git log --oneline | head` → `npm ci`.
 2. Read this file + `docs/AGENT_AUTHORITY.md`.

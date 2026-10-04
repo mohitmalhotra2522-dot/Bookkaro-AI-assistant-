@@ -16,7 +16,9 @@ export const RailwayToolName = Object.freeze({
   TRACK_TRAIN: 'TRACK_TRAIN',
   CHECK_PNR: 'CHECK_PNR',
   GET_CANCELLED_TRAINS: 'GET_CANCELLED_TRAINS',
-  GENERAL_RAILWAY_ANSWER: 'GENERAL_RAILWAY_ANSWER'
+  GENERAL_RAILWAY_ANSWER: 'GENERAL_RAILWAY_ANSWER',
+  /** Prompt 35: WEB_EXTERNAL research — LLM-chosen, disabled unless configured, never authoritative. */
+  WEB_RAILWAY_RESEARCH: 'WEB_RAILWAY_RESEARCH'
 } as const);
 export type RailwayToolName = typeof RailwayToolName[keyof typeof RailwayToolName];
 export const RAILWAY_TOOL_NAMES: readonly RailwayToolName[] = Object.freeze(Object.values(RailwayToolName));
@@ -160,4 +162,10 @@ export interface ToolExecutionRecord {
   llmRetry?: boolean;
   /** Prompt 18: ToolExecutionPlan node (dependency graph) this execution belongs to. */
   planNodeId?: string | null;
+  /** Prompt 35 (observability, additive): MOCK | LIVE of the answering provider, honest outcome, failover chain. */
+  dataSource?: 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null;
+  outcome?: string | null;
+  fallbackUsed?: boolean;
+  providerAttempts?: Array<{ provider: string; attempt: number; outcome: string; errorCode: string | null; httpStatus: number | null; latencyMs: number; retryable: boolean }>;
+  freshness?: { mode?: string; retrievedAt?: string } | null;
 }

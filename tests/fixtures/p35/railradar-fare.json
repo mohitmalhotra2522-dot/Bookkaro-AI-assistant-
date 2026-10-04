@@ -1,0 +1,34 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:43.353Z",
+ "status": 200,
+ "endpoint": "/v1/trains/12014/fare",
+ "body": {
+  "success": true,
+  "data": {
+   "trainNumber": "12014",
+   "trainName": "Amritsar - New Delhi Shatabdi Express",
+   "distance": 448,
+   "breakdown": {
+    "baseFare": 618,
+    "reservationCharge": 40,
+    "superfastCharge": 45,
+    "tatkalFare": 0,
+    "goodsServiceTax": 48,
+    "cateringCharge": 125,
+    "dynamicFare": 248,
+    "otherCharge": 0,
+    "totalFare": 1125,
+    "fuelAmount": 0,
+    "totalConcession": 0,
+    "wpServiceTax": 0
+   },
+   "generatedAt": "2026-10-04T15:26:43+05:30"
+  },
+  "meta": {
+   "timestamp": "2026-10-04T15:26:43+05:30",
+   "traceId": "e268b4ec-2065-442a-8a00-a0fee6c6a3e0",
+   "source": "prs",
+   "executionTime": 219
+  }
+ }
+}

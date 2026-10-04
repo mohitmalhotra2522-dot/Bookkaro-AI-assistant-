@@ -128,6 +128,10 @@ const CLASS_RE = /\b(1A|2A|3A|3E|CC|EC|SL|2S|FC)\b/g;
 const SUCCESS_RE = /\b(book ho (gaya|gayi|gyi|chuka|chuki)|booked|booking (ho gayi|confirm(ed)?|successful|safal)|ticket (confirm|ban|book) (ho )?(gaya|gayi|chuka)|payment (ho gaya|done|successful)|pnr (number )?(hai|is|mil))/i;
 const NEGATION_RE = /\b(nahi|nahin|na|not|no|never|abhi tak nahi)\b/i;
 const NOT_BOOKED_RE = /(book nahi|booked nahi|nahi hua|not (been )?booked|no ticket|ticket book nahi)/i;
+/** Prompt 35: does a reply actually STATE the execution boundary (execution not enabled / nothing booked)? */
+export function statesExecutionBoundary(t: string | null | undefined): boolean {
+  return !!t && (NOT_BOOKED_RE.test(t) || /enabled nahi|not enabled|disabled/i.test(t));
+}
 
 /**
  * Prompt 33 — informed confirmation. On the turn a NEW review version is presented, the (LLM-worded) reply must carry
@@ -252,16 +256,25 @@ export class NaturalResponseComposer {
     // Prompt 34 (§7): ONLY the final validated segments reach TTS — emitted once, after every guard (declared before
     // `fallback`, which can run before any LLM wording exists)
     const emitFinal = (segs: string[]) => { if (i.onSegment) segs.forEach((t, k) => i.onSegment!(k, t)); };
-    const fallback = (reason: string, rejected: NaturalComposeResult['rejected'] = []): NaturalComposeResult => {
-      const segments = segmentForSpeech(i.deterministicSpeech);
+    const fallback = (reason: string, rejected: NaturalComposeResult['rejected'] = [], textOverride?: string): NaturalComposeResult => {
+      const text = textOverride || i.deterministicSpeech;
+      const segments = segmentForSpeech(text);
       emitFinal(segments);
-      return { text: i.deterministicSpeech, segments, source: 'FALLBACK', language, rejected, fallbackReason: reason, streamed: segments.length };
+      return { text, segments, source: 'FALLBACK', language, rejected, fallbackReason: reason, streamed: segments.length };
     };
     if (!i.deterministicSpeech) return { text: '', segments: [], source: 'FALLBACK', language, rejected: [], fallbackReason: 'EMPTY', streamed: 0 };
     if (i.sensitive) return fallback('SENSITIVE_TURN');
     if (i.error && SAFETY.has(i.error.code)) return fallback('SAFETY_ERROR');
     if (i.error?.code === 'LLM_UNAVAILABLE') return fallback('LLM_UNAVAILABLE');
     const agentText = typeof i.agentText === 'string' && i.agentText.trim() ? i.agentText.trim() : null;
+    // Prompt 35: an execution refusal must be COMMUNICATED. LLM wording is kept only when it states the boundary
+    // (execution not enabled / nothing booked); a bare "Theek hai." would read as agreement → backend text, which
+    // carries "Booking execution abhi enabled nahi hai." (validation of the LLM text, not a template)
+    const STATES_BOUNDARY = statesExecutionBoundary;
+    if (i.error?.code === 'BOOKING_EXECUTION_DISABLED' && !STATES_BOUNDARY(agentText)) {
+      // the deterministic reply may itself be agent wording on the handoff-ready path → use the backend refusal text
+      return fallback('EXECUTION_BOUNDARY_NOT_STATED', [], STATES_BOUNDARY(i.deterministicSpeech) ? undefined : i.error.message);
+    }
     if (!agentText && typeof i.llm.generateSpokenResponse !== 'function') return fallback('PROVIDER_NO_SPOKEN_RESPONSE');
     // Prompt 25 Part 10: no second LLM call for formatting / polishing / a non-semantic state move
     if (!agentText && i.allowWordingCall === false) return fallback('NO_MATERIAL_CHANGE');

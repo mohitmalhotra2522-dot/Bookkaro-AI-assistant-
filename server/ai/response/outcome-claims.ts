@@ -50,7 +50,7 @@ const LIVE_RE = [
 ];
 const NEGATED = /\b(?:nahi|nahin|not|non[-\s]?live|mock|development)\b/i;
 
-interface StepView { tool: string; outcome: ToolOutcome; dataSource: 'MOCK' | 'LIVE' | null }
+interface StepView { tool: string; outcome: ToolOutcome; dataSource: 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null }
 
 export function stepOutcomes(steps: any[] | undefined): StepView[] {
   return (steps || []).filter(st => RAILWAY_TOOLS.has(String(st?.result?.toolName || st?.toolCall?.name || ''))).map(st => ({

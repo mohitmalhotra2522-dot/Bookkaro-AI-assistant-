@@ -1,0 +1,376 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:41.949Z",
+ "status": 200,
+ "endpoint": "/v1/trains/12014/live",
+ "body": {
+  "success": true,
+  "data": {
+   "train_number": "12014",
+   "train_name": "Amritsar Shtabdi",
+   "journey_date": "2026-10-04",
+   "status": "COMPLETED",
+   "cancellation": null,
+   "current_station_code": "NDLS",
+   "current_station_name": "New Delhi",
+   "next_station_code": null,
+   "previous_station_code": "UMB",
+   "delay_minutes": -5,
+   "status_text": "Journey completed",
+   "progress_percent": 100,
+   "last_reported_at": "2026-10-04T10:56:00+05:30",
+   "confidence": "medium",
+   "eta_destination_at": "2026-10-04T10:56:00+05:30",
+   "latitude": 28.6438165,
+   "longitude": 77.2194983,
+   "speed_kmph": 0,
+   "total_distance_km": 448,
+   "distance_covered_km": 448,
+   "freshness": {
+    "state": "stale",
+    "fetched_at": "2026-10-04T15:26:41.571+05:30",
+    "last_reported_at": "2026-10-04T10:56:00+05:30",
+    "age_seconds": 16241
+   },
+   "route_stations": [
+    {
+     "sequence": 1,
+     "station_code": "ASR",
+     "station_name": "AMRITSAR JN",
+     "arrival_time": "00:00",
+     "departure_time": "04:55",
+     "halt_minutes": 0,
+     "day": 1,
+     "distance_km": 0,
+     "platform_number": "1",
+     "latitude": 31.631752,
+     "longitude": 74.858265,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": true
+    },
+    {
+     "sequence": 2,
+     "station_code": "MOW",
+     "station_name": "MANANWALA",
+     "arrival_time": "05:02",
+     "departure_time": "05:02",
+     "halt_minutes": 0,
+     "day": 1,
+     "distance_km": 10.46,
+     "platform_number": null,
+     "latitude": 31.612677,
+     "longitude": 74.966412,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": false
+    },
+    {
+     "sequence": 3,
+     "station_code": "JNL",
+     "station_name": "JANDIALA",
+     "arrival_time": "05:08",
+     "departure_time": "05:08",
+     "halt_minutes": 0,
+     "day": 1,
+     "distance_km": 19.17,
+     "platform_number": null,
+     "latitude": 31.589869,
+     "longitude": 75.054302,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": false
+    },
+    {
+     "sequence": 4,
+     "station_code": "TRA",
+     "station_name": "TANGRA",
+     "arrival_time": "05:11",
+     "departure_time": "05:11",
+     "halt_minutes": 0,
+     "day": 1,
+     "distance_km": 24.39,
+     "platform_number": null,
+     "latitude": 31.576196,
+     "longitude": 75.107002,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": false
+    }
+   ],
+   "geometry_accuracy": "approximate",
+   "previous_station": {
+    "station_code": "UMB",
+    "station_name": "Ambala Cant Jn",
+    "eta": "2026-10-04T08:32:00+05:30",
+    "etd": "2026-10-04T08:37:00+05:30",
+    "scheduled_arrival": "2026-10-04T08:31:00+05:30",
+    "scheduled_departure": "2026-10-04T08:34:00+05:30",
+    "delay_arrival_minutes": 1,
+    "delay_departure_minutes": 3,
+    "halt_minutes": 3,
+    "distance_km": 250,
+    "day": 1,
+    "platform_number": "2",
+    "latitude": 30.3377658,
+    "longitude": 76.8257413,
+    "has_arrived": true,
+    "has_departed": true,
+    "is_stopping": true,
+    "is_diverted": false,
+    "travelled": true,
+    "actual_arrival": "2026-10-04T08:32:00+05:30",
+    "actual_departure": "2026-10-04T08:37:00+05:30",
+    "last_reported_at": null,
+    "sequence": 6
+   },
+   "current_station": {
+    "station_code": "NDLS",
+    "station_name": "New Delhi",
+    "eta": "2026-10-04T10:56:00+05:30",
+    "etd": null,
+    "scheduled_arrival": "2026-10-04T11:02:00+05:30",
+    "scheduled_departure": null,
+    "delay_arrival_minutes": -5,
+    "delay_departure_minutes": 0,
+    "halt_minutes": 0,
+    "distance_km": 448,
+    "day": 1,
+    "platform_number": "1",
+    "latitude": 28.642,
+    "longitude": 77.22023,
+    "has_arrived": true,
+    "has_departed": false,
+    "is_stopping": true,
+    "is_diverted": false,
+    "travelled": false,
+    "actual_arrival": "2026-10-04T10:56:00+05:30",
+    "actual_departure": null,
+    "last_reported_at": null,
+    "sequence": 7
+   },
+   "next_stop": null,
+   "stations": [
+    {
+     "station_code": "ASR",
+     "station_name": "Amritsar Jn",
+     "eta": null,
+     "etd": "2026-10-04T05:02:00+05:30",
+     "scheduled_arrival": null,
+     "scheduled_departure": "2026-10-04T04:55:00+05:30",
+     "delay_arrival_minutes": 0,
+     "delay_departure_minutes": 7,
+     "halt_minutes": 0,
+     "distance_km": 0,
+     "day": 1,
+     "platform_number": "1",
+     "latitude": 31.633245,
+     "longitude": 74.867228,
+     "has_arrived": true,
+     "has_departed": true,
+     "is_stopping": true,
+     "is_diverted": false,
+     "travelled": true,
+     "actual_arrival": null,
+     "actual_departure": "2026-10-04T05:02:00+05:30",
+     "last_reported_at": null,
+     "sequence": 0
+    },
+    {
+     "station_code": "BEAS",
+     "station_name": "Beas",
+     "eta": "2026-10-04T05:30:00+05:30",
+     "etd": "2026-10-04T05:32:00+05:30",
+     "scheduled_arrival": "2026-10-04T05:23:00+05:30",
+     "scheduled_departure": "2026-10-04T05:25:00+05:30",
+     "delay_arrival_minutes": 7,
+     "delay_departure_minutes": 7,
+     "halt_minutes": 2,
+     "distance_km": 43,
+     "day": 1,
+     "platform_number": "2",
+     "latitude": 31.52001,
+     "longitude": 75.291136,
+     "has_arrived": true,
+     "has_departed": true,
+     "is_stopping": true,
+     "is_diverted": false,
+     "travelled": true,
+     "actual_arrival": "2026-10-04T05:30:00+05:30",
+     "actual_departure": "2026-10-04T05:32:00+05:30",
+     "last_reported_at": null,
+     "sequence": 1
+    },
+    {
+     "station_code": "JUC",
+     "station_name": "Jalandhar City",
+     "eta": "2026-10-04T06:01:00+05:30",
+     "etd": "2026-10-04T06:04:00+05:30",
+     "scheduled_arrival": "2026-10-04T05:58:00+05:30",
+     "scheduled_departure": "2026-10-04T06:01:00+05:30",
+     "delay_arrival_minutes": 3,
+     "delay_departure_minutes": 3,
+     "halt_minutes": 3,
+     "distance_km": 79,
+     "day": 1,
+     "platform_number": "2",
+     "latitude": 31.33137,
+     "longitude": 75.59074,
+     "has_arrived": true,
+     "has_departed": true,
+     "is_stopping": true,
+     "is_diverted": false,
+     "travelled": true,
+     "actual_arrival": "2026-10-04T06:01:00+05:30",
+     "actual_departure": "2026-10-04T06:04:00+05:30",
+     "last_reported_at": null,
+     "sequence": 2
+    },
+    {
+     "station_code": "PGW",
+     "station_name": "Phagwara Jn",
+     "eta": "2026-10-04T06:22:00+05:30",
+     "etd": "2026-10-04T06:25:00+05:30",
+     "scheduled_arrival": "2026-10-04T06:19:00+05:30",
+     "scheduled_departure": "2026-10-04T06:21:00+05:30",
+     "delay_arrival_minutes": 3,
+     "delay_departure_minutes": 4,
+     "halt_minutes": 2,
+     "distance_km": 100,
+     "day": 1,
+     "platform_number": "1",
+     "latitude": 31.21786,
+     "longitude": 75.76507,
+     "has_arrived": true,
+     "has_departed": true,
+     "is_stopping": true,
+     "is_diverted": false,
+     "travelled": true,
+     "actual_arrival": "2026-10-04T06:22:00+05:30",
+     "actual_departure": "2026-10-04T06:25:00+05:30",
+     "last_reported_at": null,
+     "sequence": 3
+    }
+   ],
+   "position": {
+    "kind": "reported",
+    "coordinates": [
+     77.2194983,
+     28.6438165
+    ]
+   },
+   "route": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      74.867228,
+      31.633245
+     ],
+     [
+      75.291136,
+      31.52001
+     ],
+     [
+      75.59074,
+      31.33137
+     ],
+     [
+      75.76507,
+      31.21786
+     ]
+    ],
+    "geometry_accuracy": "approximate"
+   },
+   "geojson": {
+    "type": "FeatureCollection",
+    "features": [
+     {
+      "type": "Feature",
+      "id": "station:0:ASR",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        74.867228,
+        31.633245
+       ]
+      },
+      "properties": {
+       "kind": "station",
+       "station_code": "ASR",
+       "station_name": "Amritsar Jn",
+       "sequence": 0,
+       "travelled": true,
+       "selected": false
+      }
+     },
+     {
+      "type": "Feature",
+      "id": "station:1:BEAS",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        75.291136,
+        31.52001
+       ]
+      },
+      "properties": {
+       "kind": "station",
+       "station_code": "BEAS",
+       "station_name": "Beas",
+       "sequence": 1,
+       "travelled": true,
+       "selected": false
+      }
+     },
+     {
+      "type": "Feature",
+      "id": "station:2:JUC",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        75.59074,
+        31.33137
+       ]
+      },
+      "properties": {
+       "kind": "station",
+       "station_code": "JUC",
+       "station_name": "Jalandhar City",
+       "sequence": 2,
+       "travelled": true,
+       "selected": false
+      }
+     },
+     {
+      "type": "Feature",
+      "id": "station:3:PGW",
+      "geometry": {
+       "type": "Point",
+       "coordinates": [
+        75.76507,
+        31.21786
+       ]
+      },
+      "properties": {
+       "kind": "station",
+       "station_code": "PGW",
+       "station_name": "Phagwara Jn",
+       "sequence": 3,
+       "travelled": true,
+       "selected": false
+      }
+     }
+    ]
+   }
+  },
+  "meta": {
+   "api_version": "v1",
+   "request_id": "req_01M435G870X0A4Q2H6RR9MK7K6",
+   "trace_id": "trc_01M435G87066HN73R9WVZ5F96M",
+   "timestamp": "2026-10-04T15:26:41.611+05:30",
+   "freshness": {
+    "mode": "live",
+    "retrieved_at": "2026-10-04T09:56:41.611Z"
+   }
+  }
+ }
+}

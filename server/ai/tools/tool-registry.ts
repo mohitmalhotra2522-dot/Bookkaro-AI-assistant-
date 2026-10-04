@@ -1,3 +1,4 @@
+import { webResearchEnabledFromEnv } from '../../research/web-research-service';
 /**
  * Registered tool that the LLM is allowed to invoke during a turn.
  * Only explicitly registered tools are exposed to the LLM. Each tool has
@@ -20,7 +21,8 @@ export type RegisteredToolName =
   | 'CHECK_AVAILABILITY'
   | 'GET_FARE'
   | 'TRACK_TRAIN'
-  | 'CHECK_PNR';
+  | 'CHECK_PNR'
+  | 'WEB_RAILWAY_RESEARCH';
 
 export interface ToolParam {
   type: 'string' | 'number' | 'boolean';
@@ -134,6 +136,18 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
   // NOTE: booking execution / history mutation are NEVER tools. GET_CANCELLED_TRAINS and
   // GENERAL_RAILWAY_ANSWER stay unexposed (no authoritative provider implementation).
 ];
+
+/**
+ * Prompt 35: WEB_EXTERNAL research. Listed for the LLM ONLY when WEB_RESEARCH_ENABLED=true and a key is set
+ * (default: absent → UNKNOWN_TOOL). The LLM decides whether web research is appropriate; the backend never
+ * launches it after a provider failure, and its results never authorize availability / fare / booking / PNR.
+ */
+export const WEB_RAILWAY_RESEARCH_TOOL: ToolDefinition = {
+  name: 'WEB_RAILWAY_RESEARCH',
+  description: 'Optional web research on trusted railway sources (official Indian Railways / IRCTC first, then ConfirmTkt / RailYatri / eRail as secondary). Use only for general railway information the railway tools cannot provide (rules, policies, news, station facilities). Results are WEB_EXTERNAL and NOT authoritative: never use them for seat availability, fare, booking or PNR status, and never call third-party pages official.',
+  parameters: { query: { type: 'string', description: 'Short search query (no PNR, no personal details).', required: true } }
+};
+if (webResearchEnabledFromEnv()) REGISTERED_TOOLS.push(WEB_RAILWAY_RESEARCH_TOOL);
 
 export function getToolDefinition(name: RegisteredToolName): ToolDefinition | undefined {
   return REGISTERED_TOOLS.find(t => t.name === name);

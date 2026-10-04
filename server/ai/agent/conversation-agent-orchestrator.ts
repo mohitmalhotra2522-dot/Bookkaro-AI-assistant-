@@ -66,7 +66,7 @@ import { syncPreparationState, recordDependencyOutcome, bookingPreparationSummar
 import { classifyAgentTurn } from '../decisions/state-actions';
 import { preparationErrorTypeOf } from '@shared/booking-preparation';
 import { SAFE_ERROR_MESSAGE } from '../tool-runtime/tool-error-normalizer';
-import { naturalResponseComposer, type NaturalComposeResult } from '../response/natural-response-composer';
+import { naturalResponseComposer, statesExecutionBoundary, type NaturalComposeResult } from '../response/natural-response-composer';
 import { speechOf } from '../conversation/assistant-response';
 import { actionLedgerFromSteps, guardActionClaims, type ActionExecution, type ActionClaimDiagnostic } from '../response/action-claims';
 import { guardReferenceClaims, type ReferenceClaimDiagnostic } from '../response/reference-claims';
@@ -564,7 +564,7 @@ export class ConversationAgentOrchestrator {
     //      "live". Only the false sentence is removed; an emptied reply states the real failure category instead.
     const outcomeGuard = guardOutcomeClaims(refChecked, { steps: turnSteps, session: sess });
     extra.outcomeClaims = outcomeGuard.diagnostics;
-    const message = outcomeGuard.text || (outcomeGuard.removed.length ? joinParts([honestFailureFallback(turnSteps), questionFor(sess.pendingInteraction, sess, mode)].filter(Boolean) as string[]) : refChecked);
+    let message = outcomeGuard.text || (outcomeGuard.removed.length ? joinParts([honestFailureFallback(turnSteps), questionFor(sess.pendingInteraction, sess, mode)].filter(Boolean) as string[]) : refChecked);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     // Prompt 23: a native agent may have answered after a rejected proposal — the rejection stays the turn's error
@@ -572,6 +572,9 @@ export class ConversationAgentOrchestrator {
     const lastEffect = [...rt.applyOutcomes].reverse().find(o => (o.applied || []).length || o.error);
     const nativeRejected = rt.stopReason === 'final' && this.llm.agentAuthoredReplies && lastEffect?.error ? lastEffect.error : undefined;
     const turnError = blockErr || lifecycleErr || prep?.error || handoffSync.error || softError || (rt.stopReason === 'tool_limit' || rt.stopReason === 'error' ? rt.error : undefined) || nativeRejected;
+    // Prompt 35: an execution refusal is always STATED ("Booking execution abhi enabled nahi hai."). Agent wording that
+    // does not state it (e.g. a bare "Theek hai.", which reads as agreement) is replaced by the backend refusal text.
+    if (turnError?.code === 'BOOKING_EXECUTION_DISABLED' && turnError.message && !statesExecutionBoundary(message)) message = turnError.message;
     // ---- Prompt 21/22: natural wording by the LLM for TEXT and VOICE — every sentence grounded against authoritative
     //      data; the backend reply (responseMessage) stays the authoritative fact base + safe fallback ----
     // Prompt 23: a native agent's own final answer is the reply when it was written from the CURRENT session (nothing
@@ -746,7 +749,7 @@ export class ConversationAgentOrchestrator {
 
   /** Prompt 32: one entry per provider execution — status, honest outcome, latency, retry, provider identity. */
   private toolDiagnostics(recs: any[], steps: ToolCallStep[]): NonNullable<NonNullable<TurnRecord['diagnostics']>['tools']> {
-    const kindOf = new Map<string, 'MOCK' | 'LIVE' | null>();
+    const kindOf = new Map<string, 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null>();
     for (const st of steps) if (st.execution?.toolExecutionId) kindOf.set(st.execution.toolExecutionId, st.dataSource ?? null);
     return recs.map(r => ({
       tool: String(r.tool), status: String(r.status), latencyMs: typeof r.latencyMs === 'number' ? r.latencyMs : null,

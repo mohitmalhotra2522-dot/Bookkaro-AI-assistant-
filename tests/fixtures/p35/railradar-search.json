@@ -1,0 +1,156 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:42.333Z",
+ "status": 200,
+ "endpoint": "/v1/trains/between/ASR/NDLS",
+ "body": {
+  "success": true,
+  "data": {
+   "from": {
+    "code": "ASR",
+    "name": "Amritsar"
+   },
+   "to": {
+    "code": "NDLS",
+    "name": "New Delhi"
+   },
+   "trains": [
+    {
+     "train": {
+      "number": "22126",
+      "name": "Nagpur AC SF Express",
+      "type": "Superfast Express",
+      "runDays": [
+       "mon"
+      ],
+      "runningDaysBitmap": 1
+     },
+     "from": {
+      "code": "ASR",
+      "name": "Amritsar",
+      "city": "Amritsar",
+      "departure": "04:00",
+      "day": 1,
+      "sequence": 1
+     },
+     "to": {
+      "code": "NDLS",
+      "name": "New Delhi",
+      "city": "Delhi",
+      "arrival": "10:50",
+      "day": 1,
+      "sequence": 72
+     },
+     "distance": 448.3,
+     "duration": 410,
+     "totalHaltsBetween": 4
+    },
+    {
+     "train": {
+      "number": "12014",
+      "name": "Amritsar - New Delhi Shatabdi Express",
+      "type": "Shatabdi Express",
+      "runDays": [
+       "mon",
+       "tue",
+       "wed",
+       "thu"
+      ],
+      "runningDaysBitmap": 127
+     },
+     "from": {
+      "code": "ASR",
+      "name": "Amritsar",
+      "city": "Amritsar",
+      "departure": "04:55",
+      "day": 1,
+      "sequence": 1
+     },
+     "to": {
+      "code": "NDLS",
+      "name": "New Delhi",
+      "city": "Delhi",
+      "arrival": "11:02",
+      "day": 1,
+      "sequence": 72
+     },
+     "distance": 448.3,
+     "duration": 367,
+     "totalHaltsBetween": 6
+    },
+    {
+     "train": {
+      "number": "12716",
+      "name": "Sachkhand Express",
+      "type": "Superfast Express",
+      "runDays": [
+       "mon",
+       "tue",
+       "wed",
+       "thu"
+      ],
+      "runningDaysBitmap": 127
+     },
+     "from": {
+      "code": "ASR",
+      "name": "Amritsar",
+      "city": "Amritsar",
+      "departure": "05:30",
+      "day": 1,
+      "sequence": 1
+     },
+     "to": {
+      "code": "NDLS",
+      "name": "New Delhi",
+      "city": "Delhi",
+      "arrival": "12:45",
+      "day": 1,
+      "sequence": 72
+     },
+     "distance": 448.3,
+     "duration": 435,
+     "totalHaltsBetween": 11
+    },
+    {
+     "train": {
+      "number": "12926",
+      "name": "Paschim SF Express",
+      "type": "Superfast Express",
+      "runDays": [
+       "mon",
+       "tue",
+       "wed",
+       "thu"
+      ],
+      "runningDaysBitmap": 127
+     },
+     "from": {
+      "code": "ASR",
+      "name": "Amritsar",
+      "city": "Amritsar",
+      "departure": "07:20",
+      "day": 1,
+      "sequence": 1
+     },
+     "to": {
+      "code": "NDLS",
+      "name": "New Delhi",
+      "city": "Delhi",
+      "arrival": "16:20",
+      "day": 1,
+      "sequence": 73
+     },
+     "distance": 491.8,
+     "duration": 540,
+     "totalHaltsBetween": 13
+    }
+   ],
+   "count": 8
+  },
+  "meta": {
+   "timestamp": "2026-10-04T15:26:42+05:30",
+   "traceId": "e03b0232-67a4-462d-a854-1429832e6eff",
+   "source": "database",
+   "executionTime": 63
+  }
+ }
+}

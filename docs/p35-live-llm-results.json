@@ -1,0 +1,213 @@
+{
+ "kind": "LIVE",
+ "ranAt": "2026-10-04T10:19:23.051Z",
+ "model": "meta/muse-glimmer-30b",
+ "rows": [
+  {
+   "id": "A",
+   "mode": "TEXT",
+   "request": "RAC kya hota hai?",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 13247,
+   "llmCalls": 1,
+   "llmMs": 13176,
+   "toolCalls": [],
+   "providerCalls": [],
+   "fallbacks": [],
+   "finalResult": "RAC ka matlab hai Reservation Against Cancellation. Is status mein aapki seat confirm nahi hoti, lekin aapko train mein chadhne ki permission milti hai aur do logon ke liye ek berth allot hoti hai. Cancellation hone par RAC number confirm ho kar poori seat mil sakti hai. Kahan se kahan jaana hai?",
+   "bookingState": "IDLE",
+   "errors": []
+  },
+  {
+   "id": "B",
+   "mode": "TEXT",
+   "request": "Kal Amritsar se Delhi jaana hai",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 57089,
+   "llmCalls": 3,
+   "llmMs": 55511,
+   "toolCalls": [
+    "SEARCH_TRAINS:DATA/LIVE@RAILCORE"
+   ],
+   "providerCalls": [
+    "RAILCORE /v1/routes/trains"
+   ],
+   "fallbacks": [],
+   "finalResult": "Kal 5 Oct ko Amritsar Junction ASR se New Delhi NDLS ke liye 14 trains mil rahi hain. Sabse jaldi 22126 Nagpur AC Exp subah 04:00 ko nikalti hai aur 10:50 par pahunchti hai, 6h 50m mein. Uske baad 12014 Amritsar Shatabdi 04:55 se 11:02, 22488 Vande Bharat 08:20 se 13:50 jaise options hain. Aapko kis class mein chahiye — CC, 3A, Sleeper — aur kitne passengers hain?",
+   "bookingState": "SHOWING_TRAINS",
+   "errors": []
+  },
+  {
+   "id": "C",
+   "mode": "TEXT",
+   "request": "Doosri wali ka 3A availability batao",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 39783,
+   "llmCalls": 2,
+   "llmMs": 39760,
+   "toolCalls": [],
+   "providerCalls": [],
+   "fallbacks": [],
+   "finalResult": "Doosri wali train 12014 AMRITSAR SHTABDI hai, 5 Oct ko Amritsar se 04:55 par chalti hai aur New Delhi 11:02 par pahunchti hai. Is train mein 3A class listed nahi hai — railway data ke according isme sirf CC aur EC classes hain. Aap CC/EC ki availability dekhna chahenge ya 3A wali koi aur train jaise 22126 NAGPUR AC EXP ya 12716 SACHKHAND EXP check karun?",
+   "bookingState": "CLASS_OPTIONS",
+   "errors": []
+  },
+  {
+   "id": "D",
+   "mode": "TEXT",
+   "request": "Uska fare batao",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 30109,
+   "llmCalls": 1,
+   "llmMs": 30102,
+   "toolCalls": [],
+   "providerCalls": [],
+   "fallbacks": [],
+   "finalResult": "12014 AMRITSAR SHTABDI ke liye fare dekhne ke liye class aur passenger count chahiye. Is train mein 3A nahi hai, sirf CC aur EC classes listed hain. Aapko kis class ka fare chahiye — CC ya EC — aur kitne passengers ke liye?",
+   "bookingState": "CLASS_OPTIONS",
+   "errors": []
+  },
+  {
+   "id": "E",
+   "mode": "TEXT",
+   "request": "Kaunsi sabse jaldi Delhi pahunchti hai?",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 43068,
+   "llmCalls": 1,
+   "llmMs": 43056,
+   "toolCalls": [],
+   "providerCalls": [],
+   "fallbacks": [],
+   "finalResult": "5 Oct ko Amritsar → New Delhi ke liye railway data ke according sabse jaldi pahunchne wali train 22126 NAGPUR AC EXP hai. Ye 04:00 par Amritsar se chalti hai aur 10:50 par New Delhi pahunchti hai. Iske baad 12014 AMRITSAR SHTABDI 11:02 par pahunchti hai. Kaunsi class chahiye?",
+   "bookingState": "CLASS_OPTIONS",
+   "errors": []
+  },
+  {
+   "id": "F",
+   "mode": "TEXT",
+   "request": "Kal nahi, parso",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 56456,
+   "llmCalls": 2,
+   "llmMs": 55038,
+   "toolCalls": [
+    "SEARCH_TRAINS:DATA/LIVE@RAILCORE"
+   ],
+   "providerCalls": [
+    "RAILCORE /v1/routes/trains"
+   ],
+   "fallbacks": [],
+   "finalResult": "Date parso kar diya — ab journey Amritsar → New Delhi 6 Oct 2026 ke liye hai. Is date par 12 trains mili hain. Sabse jaldi pahunchne wali train 12014 AMRITSAR SHTABDI hai jo 04:55 par chalti hai aur 11:02 par Delhi pahunchti hai. Iske baad 12716 SACHKHAND EXP 12:45 par aur 22488 VANDE BHARAT EXP 13:50 par pahunchti hai. Aapko kaunsi train aur kis class mein dekhna hai — CC, 3A, SL ya koi aur?",
+   "bookingState": "SHOWING_TRAINS",
+   "errors": []
+  },
+  {
+   "id": "G",
+   "mode": "TEXT",
+   "request": "Abhi dobara availability check karo",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 56312,
+   "llmCalls": 3,
+   "llmMs": 55026,
+   "toolCalls": [
+    "CHECK_AVAILABILITY:DATA/LIVE@RAILCORE"
+   ],
+   "providerCalls": [
+    "RAILCORE /v1/availability/seats"
+   ],
+   "fallbacks": [],
+   "finalResult": "Aap fare check karna chahenge ya koi aur train/class dekhni hai?",
+   "bookingState": "CLASS_SELECTED",
+   "errors": []
+  },
+  {
+   "id": "K",
+   "mode": "VOICE",
+   "request": "Kal Amritsar se Delhi jaana hai",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 24529,
+   "llmCalls": 3,
+   "llmMs": 23290,
+   "toolCalls": [
+    "SEARCH_TRAINS:DATA/LIVE@RAILCORE"
+   ],
+   "providerCalls": [
+    "RAILCORE /v1/routes/trains"
+   ],
+   "fallbacks": [],
+   "finalResult": "Kal 5 Oct ko Amritsar Junction se New Delhi ke liye 14 trains hain. Sabse tez 22488 Vande Bharat 08:20 se 13:50, 5h 30m hai. Aap kitne passengers hain aur kaunsi class chahiye?",
+   "bookingState": "SHOWING_TRAINS",
+   "errors": []
+  },
+  {
+   "id": "L1",
+   "mode": "TEXT",
+   "request": "Kal Amritsar se Delhi jaana hai",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 33207,
+   "llmCalls": 3,
+   "llmMs": 31678,
+   "toolCalls": [
+    "SEARCH_TRAINS:DATA/LIVE@RAILCORE"
+   ],
+   "providerCalls": [
+    "RAILCORE /v1/routes/trains"
+   ],
+   "fallbacks": [],
+   "finalResult": "Kal ke liye Amritsar Junction ASR se New Delhi NDLS 5 Oct 2026 ko 14 trains mili hain. Aap kitne passengers ke liye ticket chahiye aur kaunsi class prefer karte hain — CC, 3A, sleeper ya koi aur?",
+   "bookingState": "SHOWING_TRAINS",
+   "errors": []
+  },
+  {
+   "id": "L2",
+   "mode": "TEXT",
+   "request": "Doosri wali CC mein, do log: Rahul 31 male, Neha 28 female",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 116116,
+   "llmCalls": 5,
+   "llmMs": 111626,
+   "toolCalls": [
+    "CHECK_AVAILABILITY:DATA/LIVE@RAILCORE",
+    "GET_FARE:DATA/LIVE@RAILCORE"
+   ],
+   "providerCalls": [
+    "RAILCORE /v1/availability/seats",
+    "RAILCORE /v1/availability/seats"
+   ],
+   "fallbacks": [],
+   "finalResult": "12014 AMRITSAR SHTABDI select ho gayi.\nCC class select ho gayi.\nDoosri wali train 12014 AMRITSAR SHTABDI 5 Oct ko ASR → NDLS ke liye CC class select ho gayi hai, aur 2 passengers [PASSENGER] 31 Male aur [PASSENGER] 28 Female ke details bhi note ho gaye hain. Aap fare check karna chahenge ya CC wali koi aur train dekhni hai?\nReview (v1):\nAmritsar → New Delhi\n5 Oct\n12014 AMRITSAR SHTABDI\nCC\n2 passen",
+   "bookingState": "AWAITING_CONFIRMATION",
+   "errors": []
+  },
+  {
+   "id": "L3",
+   "mode": "TEXT",
+   "request": "haan confirm",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 20446,
+   "llmCalls": 3,
+   "llmMs": 16541,
+   "toolCalls": [],
+   "providerCalls": [],
+   "fallbacks": [],
+   "finalResult": "Review confirm ho gaya hai.\nAmritsar → New Delhi, 5 Oct, 12014 AMRITSAR SHTABDI, CC class, 2 passengers [PASSENGER] 31 M aur [PASSENGER] 28 F. Fare ₹2250 (₹1125 × 2) aur availability railway data ke according WL 32 hai.\nTicket abhi book nahi hua — yeh sirf IRCTC handoff ke liye tayar hai. Aage ki booking aapko IRCTC par complete karni hogi.\nBooking details verify ho gaye hain. Actual railway booki",
+   "bookingState": "IRCTC_HANDOFF_READY",
+   "errors": []
+  },
+  {
+   "id": "L4",
+   "mode": "TEXT",
+   "request": "ab book kar do",
+   "model": "meta/muse-glimmer-30b",
+   "latencyMs": 29552,
+   "llmCalls": 1,
+   "llmMs": 29537,
+   "toolCalls": [],
+   "providerCalls": [],
+   "fallbacks": [],
+   "finalResult": "Abhi booking yahan complete nahi ho sakti — railway booking execution disabled hai. Aapka review tayar hai: Amritsar → New Delhi, 5 Oct, 12014 AMRITSAR SHTABDI, CC class, 2 passengers [PASSENGER] 31 M aur [PASSENGER] 28 F. Fare ₹2250 (₹1125 × 2) aur availability railway data ke according WL 32 hai. Yeh IRCTC handoff ke liye ready hai, ticket abhi book nahi hua hai. Aage ki booking aapko IRCTC par ",
+   "bookingState": "IRCTC_HANDOFF_READY",
+   "errors": []
+  }
+ ]
+}

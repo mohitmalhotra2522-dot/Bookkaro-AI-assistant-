@@ -22,6 +22,10 @@ import { createProductionBookingProviderRegistry } from './booking/provider/book
 import { bookingExecutionView } from './booking/provider/booking-provider-execution-service';
 import { ConversationTurnEngine } from './ai/turn-engine/conversation-turn-engine';
 import { sanitizeTranscriptInfo, VoiceTranscriptRejectedError } from '@shared/voice/transcript';
+import { liveProviderStatus } from './railway/providers/live/live-config';
+import { webResearchStatus } from './research/web-research-service';
+import { createServerSTT, createServerTTS, voiceProviderStatus } from './voice/live/openai-compatible-voice';
+import { registerVoiceRoutes } from './voice/live/voice-routes';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -190,7 +194,7 @@ server.post('/api/handoff/consume', async (request, reply) => {
   const r = await orchestrator.preparation.consumeHandoff(sessionId, String(handoffSessionId || ''), { turnId: `consume-${randomUUID()}`, mode: 'TEXT', cards, events: [], changes: [], requestId: randomUUID() });
   const s = stateManager.getSession(sessionId);
   const message = r.code === 'BOOKING_EXECUTION_DISABLED'
-    ? `${HANDOFF_READY_MESSAGE} Booking execution disabled hai — kuch book nahi hua.`
+    ? `${HANDOFF_READY_MESSAGE} Booking execution abhi enabled nahi hai — kuch book nahi hua.`
     : `Handoff execute nahi hua (${r.code}). Kuch book nahi hua.`;
   return reply.send({ code: r.code, message, duplicate: !!r.duplicate, executorAttempted: r.executorAttempted, executionStatus: r.executionStatus ?? null,
     handoffSession: handoffSessionView(s.handoffSession), executorCapability: executorCapability(), realBooking: false, cards });
@@ -278,6 +282,18 @@ server.post('/api/session', async (_, reply) => {
   return reply.send({ sessionId: s.sessionId, activeProvider: railwayRegistry.getActiveId() });
 });
 
+// Prompt 35: optional server STT/TTS transport → the same /api/chat pipeline (no second voice brain)
+registerVoiceRoutes(server, {
+  stt: createServerSTT(), tts: createServerTTS(),
+  latestSpeech: (sid) => {
+    const snap = turnEngine.resume(sid);
+    const r: any = snap?.latestAssistantResponse;
+    const text = r ? String(r.speechText || r.text || '').trim() : '';
+    return text ? { text, turnId: r.turnId ?? null } : null;
+  },
+  log: (e) => server.log.info(e)
+});
+
 server.get('/api/health', async (_, reply) => {
   return reply.send({
     ok: true,
@@ -290,7 +306,11 @@ server.get('/api/health', async (_, reply) => {
     executionCapability: executionCapability(),
     executorCapability: executorCapability(),
     // static capability only — no live health check, never reported "healthy" without one
-    bookingProvider: bookingProviderView()
+    bookingProvider: bookingProviderView(),
+    // Prompt 35: provider chain + per-provider configured flag (NEVER key values) and WEB_EXTERNAL gate
+    railwayProviders: liveProviderStatus(),
+    webResearch: webResearchStatus(),
+    voice: voiceProviderStatus()
   });
 });
 
@@ -300,4 +320,5 @@ console.log(`Railway AI Assistant server running on http://localhost:${PORT}`);
 console.log(`Active railway provider: ${railwayRegistry.getActiveId()} (${railwayRegistry.getActive().label}) [${railwayRegistry.getActiveKind()}]`);
 console.log(`Active LLM provider: ${llmSelection.info.providerId}${llmSelection.info.model ? ` (${llmSelection.info.model})` : ''} — ${llmSelection.info.reason}`);
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
+console.log(`Railway provider chain (RAILWAY_PROVIDER=live): ${liveProviderStatus().filter(p => p.priority).sort((a, b) => a.priority! - b.priority!).map(p => `${p.provider}${p.configured ? '' : '(no key)'}`).join(' → ')}`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

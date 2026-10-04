@@ -13,7 +13,7 @@
  *
  * The runtime never mutates BookingSession; callers own session sync behind their RequestGuard.
  */
-import { dataSourceOf, isWellFormedToolData, type DataSourceKind } from './tool-outcome';
+import { dataSourceOf, isWellFormedToolData, toolOutcomeOf, type DataSourceKind } from './tool-outcome';
 import type { BookingSession } from '@shared/entities';
 import type {
   LLMToolResult, ToolErrorCode, ToolExecutionRecord, ToolExecutionStatus, RailwayToolName
@@ -107,6 +107,10 @@ export interface ExecutedCall {
   provider: string | null;
   /** Prompt 32: provider identity from the provider's own response meta ('MOCK' | 'LIVE'; null = no response). */
   dataSource?: DataSourceKind | null;
+  /** Prompt 35: failover chain behind this answer (provider layer; never a different tool, never a cache). */
+  providerAttempts?: ToolExecutionRecord['providerAttempts'];
+  fallbackUsed?: boolean;
+  freshness?: ToolExecutionRecord['freshness'];
   latencyMs: number;
   timedOut: boolean;
   /** The result guard dropped it (superseded journey / request) before any commit. */
@@ -322,10 +326,17 @@ export class ToolTurn {
       rec.fresh = status === 'SUCCEEDED';
       rec.resultCount = x.success ? countOf(p.vt.name, x.data) : null;
       if (x.error) rec.rejectionReason = x.error.code;
+      // Prompt 35: observability — data source, honest outcome, failover attempts, provider freshness (no keys, no bodies)
+      const pm = raw?.meta;
+      rec.dataSource = dataSourceOf(pm);
+      rec.outcome = toolOutcomeOf({ ok: !!x.success, empty: !!x.empty, status, code: x.error?.code, normalizedCode: x.error?.normalized });
+      if (Array.isArray(pm?.attempts)) { rec.providerAttempts = pm.attempts.map((a: any) => ({ provider: String(a.provider), attempt: Number(a.attempt), outcome: String(a.outcome), errorCode: a.errorCode ?? null, httpStatus: a.httpStatus ?? null, latencyMs: Number(a.latencyMs) || 0, retryable: !!a.retryable })); rec.fallbackUsed = !!pm.fallbackUsed; }
+      if (pm?.freshness && typeof pm.freshness === 'object') rec.freshness = { ...(pm.freshness.mode ? { mode: String(pm.freshness.mode) } : {}), ...(pm.freshness.retrievedAt ? { retrievedAt: String(pm.freshness.retrievedAt) } : {}) };
       this.notify(rec, status === 'SUCCEEDED' ? 'COMPLETED' : 'FAILED');
       const out: ExecutedCall = {
         prepared: p, record: rec, success: !!x.success, empty: !!x.empty, data: x.data, error: x.error, provider,
-        latencyMs, timedOut, stale: !!x.stale, result: undefined as any, dataSource: dataSourceOf(raw?.meta)
+        latencyMs, timedOut, stale: !!x.stale, result: undefined as any, dataSource: dataSourceOf(raw?.meta),
+        ...(rec.providerAttempts ? { providerAttempts: rec.providerAttempts, fallbackUsed: !!rec.fallbackUsed } : {}), ...(rec.freshness ? { freshness: rec.freshness } : {})
       };
       out.result = this.toLLMResult(rec, status, {
         result: x.success ? llmView(p.vt.name, x.data) : undefined, empty: x.empty || undefined,

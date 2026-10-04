@@ -1,0 +1,106 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:41.120Z",
+ "status": 200,
+ "endpoint": "/v1/trains/12014/schedule",
+ "body": {
+  "success": true,
+  "data": {
+   "train_number": "12014",
+   "train_name": "Shatabdi Express",
+   "source_station_code": "ASR",
+   "destination_station_code": "NDLS",
+   "running_days": [
+    "MON",
+    "TUE",
+    "WED",
+    "THU"
+   ],
+   "classes": [
+    "CC",
+    "EC",
+    "UNKNOWN"
+   ],
+   "total_duration_minutes": 367,
+   "distance_km": 448,
+   "catering": true,
+   "rake_type": "LHB",
+   "pantry": true,
+   "stops": [
+    {
+     "sequence": 1,
+     "station_code": "ASR",
+     "station_name": "AMRITSAR JN",
+     "arrival_time": "00:00",
+     "departure_time": "04:55",
+     "halt_minutes": 0,
+     "day": 1,
+     "distance_km": 0,
+     "platform_number": "1",
+     "latitude": 31.631752,
+     "longitude": 74.858265,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": true
+    },
+    {
+     "sequence": 2,
+     "station_code": "BEAS",
+     "station_name": "BEAS",
+     "arrival_time": "05:23",
+     "departure_time": "05:25",
+     "halt_minutes": 2,
+     "day": 1,
+     "distance_km": 43,
+     "platform_number": "2",
+     "latitude": 31.5198538,
+     "longitude": 75.2912885,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": true
+    },
+    {
+     "sequence": 3,
+     "station_code": "JUC",
+     "station_name": "JALANDHAR CITY",
+     "arrival_time": "05:58",
+     "departure_time": "06:01",
+     "halt_minutes": 3,
+     "day": 1,
+     "distance_km": 79,
+     "platform_number": "2",
+     "latitude": 31.331425,
+     "longitude": 75.591259,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": true
+    },
+    {
+     "sequence": 4,
+     "station_code": "PGW",
+     "station_name": "PHAGWARA JN",
+     "arrival_time": "06:19",
+     "departure_time": "06:21",
+     "halt_minutes": 2,
+     "day": 1,
+     "distance_km": 100,
+     "platform_number": "1",
+     "latitude": 31.2172057498,
+     "longitude": 75.7651519775,
+     "arrival_delay_minutes": null,
+     "departure_delay_minutes": null,
+     "is_stop": true
+    }
+   ]
+  },
+  "meta": {
+   "api_version": "v1",
+   "request_id": "req_01M435G7PZ6JFWYF0AX3Q1C2GC",
+   "trace_id": "trc_01M435G7PZQGHHFFN13ANJKFEJ",
+   "timestamp": "2026-10-04T15:26:41.009+05:30",
+   "freshness": {
+    "mode": "live",
+    "retrieved_at": "2026-10-04T09:56:41.009Z"
+   }
+  }
+ }
+}

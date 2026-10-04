@@ -1,3 +1,4 @@
+import { getWebResearchService } from '../../research/web-research-service';
 /**
  * LLMToolCallingRuntime — the real multi-step tool-calling loop.
  *
@@ -93,7 +94,7 @@ export interface ToolCallStep {
   execution?: ToolExecutionRecord;
   llmResult?: LLMToolResult;
   /** Prompt 32: provider identity from the provider's own meta ('MOCK' | 'LIVE'; null = no provider response). */
-  dataSource?: 'MOCK' | 'LIVE' | null;
+  dataSource?: 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null;
 }
 
 /**
@@ -598,8 +599,9 @@ export class BoundToolRuntime {
     steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', dataSource: x.dataSource ?? null, validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
     turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status,
       outcome: toolOutcomeOf({ ok: norm.success, empty: x.empty, status: x.record.status, code: norm.error?.code, normalizedCode: x.error?.normalized }), dataSource: x.dataSource ?? null, attempts: x.record.attempt || 1,
+      ...providerViewOf(x),
       identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}) });
-    localHistory.push({ role: 'tool', content: JSON.stringify(this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null)), toolCallId: tc.callId, toolName: tc.name });
+    localHistory.push({ role: 'tool', content: JSON.stringify({ ...this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null), ...providerViewOf(x) }), toolCallId: tc.callId, toolName: tc.name });
     this.syncToSession(vt, norm);
     if (!norm.success) {
       H.emit?.('TOOL_FAILED', { toolName: vt.name, code: norm.error?.code, stage: 'provider', status: x.record.status, toolExecutionId: x.record.toolExecutionId });
@@ -628,12 +630,16 @@ export class BoundToolRuntime {
         return this.tools.GET_TIMETABLE(vt.arguments.trainNumber);
       case 'CHECK_AVAILABILITY':
         return this.tools.CHECK_AVAILABILITY({
-          trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, date: vt.arguments.date
+          trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, date: vt.arguments.date,
+          // Prompt 35: live availability APIs need the segment — authoritative session journey (never an LLM argument)
+          origin: this.getSession().origin, destination: this.getSession().destination
         });
       case 'GET_FARE':
         return this.tools.GET_FARE({
           trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, passengersCount: vt.arguments.passengersCount,
-          date: vt.arguments.date,
+          // Prompt 35: live fares are date-specific (dynamic pricing) — fall back to the AUTHORITATIVE session journey
+          // date (the review-boundary refresh sends no date argument); never an LLM-invented value
+          date: vt.arguments.date ?? this.getSession().date ?? undefined,
           // authoritative journey from BookingSession (never an LLM argument)
           origin: this.getSession().origin, destination: this.getSession().destination
         } as any);
@@ -642,6 +648,9 @@ export class BoundToolRuntime {
         return this.live.track(vt.arguments.trainNumber);
       case 'CHECK_PNR':
         return this.pnr.check(vt.arguments.pnr);
+      // Prompt 35: LLM-chosen WEB_EXTERNAL research (never auto-launched by the backend; never authoritative)
+      case 'WEB_RAILWAY_RESEARCH':
+        return getWebResearchService().search(vt.arguments.query);
       default:
         return { ok: false, error: { code: 'UNKNOWN_TOOL', message: `"${vt.name}" अज्ञात tool है।` } };
     }
@@ -683,7 +692,7 @@ export class BoundToolRuntime {
    * We deliberately do NOT forward internal metadata (source timestamps,
    * raw provider fields) — only facts + success/error.
    */
-  private serializeForLLM(r: NormalizedToolResult, llm?: LLMToolResult, attempts = 1, dataSource: 'MOCK' | 'LIVE' | null = null): any {
+  private serializeForLLM(r: NormalizedToolResult, llm?: LLMToolResult, attempts = 1, dataSource: 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null = null): any {
     // Prompt 32: explicit honest outcome + provider identity (additive keys; the LLM words the answer from them)
     const oc = { outcome: toolOutcomeOf({ ok: r.success, empty: r.empty, status: r.status, code: r.error?.code, normalizedCode: r.normalizedErrorCode }), dataSource };
     // Prompt 17: freshness / provenance metadata (no credentials, no raw provider payload)
@@ -798,6 +807,16 @@ export class BoundToolRuntime {
 }
 
 function safeObs(f: () => void) { try { f(); } catch { /* observers never break the loop */ } }
+
+/**
+ * Prompt 35: provider provenance the LLM may read (additive keys, outside the pinned P26 `provenance` object):
+ * which provider answered, whether a fallback provider served it, and the compact attempt chain. Never keys / bodies.
+ */
+export function providerViewOf(x: Pick<ExecutedCall, 'provider' | 'providerAttempts' | 'fallbackUsed'>): { provider?: string; fallbackUsed?: boolean; providerAttempts?: Array<{ provider: string; outcome: string; errorCode: string | null }> } {
+  if (!x.providerAttempts?.length) return {};
+  return { provider: String(x.provider || '').toUpperCase(), fallbackUsed: !!x.fallbackUsed,
+    providerAttempts: x.providerAttempts.map(a => ({ provider: a.provider.toUpperCase(), outcome: a.outcome, errorCode: a.errorCode })) };
+}
 
 function computeMissing(s: BookingSession): string[] {
   const m: string[] = [];

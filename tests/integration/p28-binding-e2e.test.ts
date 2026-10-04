@@ -130,7 +130,8 @@ describe('P28 G3 — search, display index, class + fare binding', () => {
     const n0 = { ...rail.n };
     const r = await h.say('Beech wali mein 3A ka fare batao');
     expect(delta(n0)).toMatchObject({ fare: 1, avail: 0, search: 0 });
-    expect(rail.calls.at(-1)).toEqual(['fare', '12497', '3A', '']);
+    // Prompt 35: GET_FARE carries the authoritative session date (live providers price per date)
+    expect(rail.calls.at(-1)).toEqual(['fare', '12497', '3A', '2026-10-05']);
     expect(binding(r).toolEntity.at(-1)).toMatchObject({ trainNumber: '12497', class: '3A', date: KAL });
     expect(text(r)).toMatch(/₹650/);
     expect(binding(r).claimBindingStatus).toBe('BOUND');

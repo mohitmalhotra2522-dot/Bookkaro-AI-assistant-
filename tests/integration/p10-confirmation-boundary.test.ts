@@ -211,7 +211,8 @@ describe('G3 — confirmation → gateway → Disabled → IRCTC_HANDOFF_READY',
       const r = await say(sid, w);
       expect(r.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
       expect(r.error?.code).toBe('BOOKING_EXECUTION_DISABLED');
-      expect(r.responseMessage).toMatch(/Actual railway booking abhi enabled nahi hai/);
+      // Prompt 35: the execution-boundary sentence is mandated verbatim
+      expect(r.responseMessage).toMatch(/Booking execution abhi enabled nahi hai/);
       expect(r.responseMessage).not.toMatch(FAKE_SUCCESS);
     }
     expect(S(sid).handoff.snapshot.handoffId).toBe(id);

@@ -19,12 +19,23 @@ export type RailwayErrorCode =
   | 'FARE_UNAVAILABLE'
   | 'TIMEOUT'
   | 'TRAIN_NOT_IN_RESULTS'
-  | 'CLASS_NOT_AVAILABLE';
+  | 'CLASS_NOT_AVAILABLE'
+  // Prompt 35: live-provider outcomes (all map onto the existing ToolErrorCode vocabulary — no new tool codes)
+  | 'RATE_LIMITED'
+  | 'AUTH_ERROR'
+  | 'PROVIDER_DATA_INVALID'
+  | 'TOOL_NOT_IMPLEMENTED'
+  | 'NOT_FOUND'
+  | 'INVALID_REQUEST'
+  | 'NOT_CONFIGURED';
 
 export interface RailwayError {
   code: RailwayErrorCode;
   message: string;
   missing?: string[];
+  /** Prompt 35 (additive): provider said the same request may succeed later (429 / 5xx / timeout). */
+  retryable?: boolean;
+  httpStatus?: number | null;
 }
 
 export interface RailwayMeta {
@@ -34,6 +45,23 @@ export interface RailwayMeta {
   responseTimestamp: string;
   latencyMs: number;
   cache: 'disabled';
+  /** Prompt 35 (additive): provider freshness metadata as returned (never synthesized). */
+  freshness?: { mode?: string; retrievedAt?: string } | null;
+  /** Prompt 35 (additive): every provider attempt behind this response (failover chain), no credentials. */
+  attempts?: ProviderAttempt[];
+  /** Prompt 35 (additive): true when a fallback provider (not the primary) served this response. */
+  fallbackUsed?: boolean;
+}
+
+/** Prompt 35 — one provider attempt inside a failover chain (observability; never contains keys or raw bodies). */
+export interface ProviderAttempt {
+  provider: string;
+  attempt: number;
+  outcome: 'DATA' | 'NO_RESULTS' | 'UNSUPPORTED' | 'NOT_CONFIGURED' | 'TIMEOUT' | 'PROVIDER_FAILURE' | 'MALFORMED_DATA' | 'REJECTED' | 'SKIPPED_BUDGET';
+  errorCode: string | null;
+  httpStatus: number | null;
+  latencyMs: number;
+  retryable: boolean;
 }
 
 export interface RailwayResponse<T> {
@@ -95,7 +123,7 @@ export interface TrainSearchResultData {
 // ---- Other tools ----
 export interface TrainInfoRequest { trainNumber: string; date?: string; }
 export interface TimetableRequest { trainNumber: string; }
-export interface AvailabilityRequest { trainNumber: string; travelClass: string; date: string; }
+export interface AvailabilityRequest { trainNumber: string; travelClass: string; date: string; /** Prompt 35: authoritative session journey (live APIs need the segment). */ origin?: string; destination?: string; }
 export interface FareRequest { trainNumber: string; travelClass: string; passengersCount: number; date?: string; origin?: string; destination?: string; }
 export interface TrackRequest { trainNumber: string; }
 export interface PNRRequest { pnr: string; }
@@ -110,6 +138,10 @@ export interface AvailabilityData {
   date: string;
   status: string;
   available: boolean;
+  /** Prompt 35 (additive, provider-returned only): raw availability text (e.g. "GNWL51/WL30"), quota, provider update time. */
+  statusText?: string;
+  quota?: string;
+  providerUpdatedAt?: string | null;
 }
 
 export interface FareData {
@@ -120,6 +152,9 @@ export interface FareData {
   total: number;
   currency: 'INR';
   breakdown: Record<string, number>;
+  /** Prompt 35 (additive): journey date the provider priced (absent when the provider fare is not date-specific). */
+  date?: string;
+  quota?: string;
 }
 
 export interface TrackData {

@@ -30,7 +30,9 @@ import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, VOICE_RESPONSE_
 import { MockRailwayProvider } from '../../server/railway/providers/mock/mock-provider';
 
 const ROOT = path.resolve(__dirname, '../..');
-const APPROVED = ['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE', 'TRACK_TRAIN', 'CHECK_PNR', 'GET_CANCELLED_TRAINS', 'GENERAL_RAILWAY_ANSWER'];
+const APPROVED = ['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE', 'TRACK_TRAIN', 'CHECK_PNR', 'GET_CANCELLED_TRAINS', 'GENERAL_RAILWAY_ANSWER',
+  // Prompt 35: approved WEB_EXTERNAL research (disabled / not LLM-callable unless configured)
+  'WEB_RAILWAY_RESEARCH'];
 const FORBIDDEN = ['BOOK_TICKET', 'executeBooking', 'EXECUTE_BOOKING', 'BookingProviderAdapter.execute', 'MAKE_PAYMENT', 'PAYMENT', 'IRCTC_LOGIN', 'OTP', 'CAPTCHA', 'UPI_PAYMENT', 'CARD_PAYMENT', 'SUBMIT_BOOKING', 'FINAL_SUBMISSION'];
 
 function mk(llm: any = new MockLLMProvider()) {

@@ -387,7 +387,7 @@ export interface TurnRecord {
     outcomeClaims?: import('../response/outcome-claims').OutcomeClaimDiagnostic[];
     /** Prompt 32: per-tool observability (no arguments, ids, PII or secrets). providerKind MOCK = development data. */
     tools?: Array<{ tool: string; status: string; outcome: string; latencyMs: number | null; attempt: number; retried: boolean;
-      provider: string | null; providerKind: 'MOCK' | 'LIVE' | null; errorCode: string | null; fresh: boolean; resultCount: number | null }>;
+      provider: string | null; providerKind: 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null; errorCode: string | null; fresh: boolean; resultCount: number | null }>;
     /** Prompt 32: agent loop bounds (MAX_TOOL_STEPS is never raised silently). */
     steps?: { count: number; limitReached: boolean; limitReason: string | null; stopReason: string | null; timeouts: number; retries: number };
   };

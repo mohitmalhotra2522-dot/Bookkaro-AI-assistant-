@@ -1,0 +1,141 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:43.961Z",
+ "status": 200,
+ "endpoint": "/v1/trains/12014",
+ "body": {
+  "success": true,
+  "data": {
+   "train": {
+    "number": "12014",
+    "name": "Amritsar - New Delhi Shatabdi Express",
+    "type": "Shatabdi Express",
+    "category": "Premium",
+    "source": {
+     "code": "ASR",
+     "name": "Amritsar",
+     "lat": 31.633,
+     "lng": 74.8671
+    },
+    "destination": {
+     "code": "NDLS",
+     "name": "New Delhi",
+     "lat": 28.64177,
+     "lng": 77.22027
+    },
+    "runDays": [
+     "mon",
+     "tue",
+     "wed",
+     "thu"
+    ],
+    "distance": 448.3,
+    "duration": 367,
+    "avgSpeed": 73.3,
+    "maxSpeed": 90.6,
+    "totalHalts": 8,
+    "returnTrain": "12013",
+    "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR",
+    "classes": [
+     "EC",
+     "CC"
+    ],
+    "availableClasses": [
+     "EC",
+     "CC"
+    ],
+    "hasReversal": false,
+    "isPrsBookable": true
+   },
+   "route": [
+    {
+     "sequence": 1,
+     "station": {
+      "code": "ASR",
+      "name": "Amritsar",
+      "lat": 31.633,
+      "lng": 74.8671
+     },
+     "isHalt": true,
+     "platform": "1",
+     "speedToNextStationKmph": 90.6,
+     "departure": "04:55",
+     "departureDay": 1,
+     "distance": 0,
+     "isReversal": false,
+     "isReversed": false,
+     "legIndex": 0,
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR"
+    },
+    {
+     "sequence": 7,
+     "station": {
+      "code": "BEAS",
+      "name": "Beas",
+      "lat": 31.51991,
+      "lng": 75.29119
+     },
+     "isHalt": true,
+     "platform": "2",
+     "speedToNextStationKmph": 65.8,
+     "arrival": "05:23",
+     "arrivalDay": 1,
+     "departure": "05:25",
+     "departureDay": 1,
+     "distance": 42.3,
+     "isReversal": false,
+     "isReversed": false,
+     "legIndex": 0,
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR"
+    },
+    {
+     "sequence": 14,
+     "station": {
+      "code": "JUC",
+      "name": "Jalandhar City",
+      "lat": 31.33121,
+      "lng": 75.59116
+     },
+     "isHalt": true,
+     "platform": "2",
+     "speedToNextStationKmph": 70.7,
+     "arrival": "05:58",
+     "arrivalDay": 1,
+     "departure": "06:01",
+     "departureDay": 1,
+     "distance": 78.5,
+     "isReversal": false,
+     "isReversed": false,
+     "legIndex": 0,
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR"
+    },
+    {
+     "sequence": 17,
+     "station": {
+      "code": "PGW",
+      "name": "Phagwara Jn",
+      "lat": 31.21718,
+      "lng": 75.765292
+     },
+     "isHalt": true,
+     "platform": "1",
+     "speedToNextStationKmph": 59.7,
+     "arrival": "06:19",
+     "arrivalDay": 1,
+     "departure": "06:21",
+     "departureDay": 1,
+     "distance": 99.7,
+     "isReversal": false,
+     "isReversed": false,
+     "legIndex": 0,
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR"
+    }
+   ]
+  },
+  "meta": {
+   "timestamp": "2026-10-04T15:26:43+05:30",
+   "traceId": "3e1e4238-518c-4b66-80df-e7812076e206",
+   "source": "database",
+   "executionTime": 7
+  }
+ }
+}

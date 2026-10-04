@@ -288,7 +288,8 @@ export class ContextualTurnApplier {
         const o = fail('BOOKING_EXECUTION_DUPLICATE', messageForRecord(rec));
         return { ...o, duplicateConfirmation: !e.executionRequested };
       }
-      const o = fail('BOOKING_EXECUTION_DISABLED', 'Booking details verify ho gaye hain. Actual railway booking abhi enabled nahi hai — main ticket book, IRCTC login, submission ya payment nahi kar sakta.');
+      // Prompt 35: execution attempt at the handoff boundary → the required sentence
+      const o = fail('BOOKING_EXECUTION_DISABLED', 'Booking details verify ho gaye hain. Booking execution abhi enabled nahi hai — main ticket book, IRCTC login, submission ya payment nahi kar sakta.');
       return { ...o, duplicateConfirmation: !e.executionRequested };
     }
     // Ambiguous reply while a booking confirmation is pending ("hmm", "achha", "theek hai?")
@@ -299,7 +300,8 @@ export class ContextualTurnApplier {
       return fail('INVALID_CONFIRMATION', AMBIGUOUS_CONFIRMATION_PROMPT, { type: 'CONFIRMATION_REQUIRED' });
     }
     if (e.executionRequested) {
-      return fail('BOOKING_EXECUTION_DISABLED', 'Actual booking, IRCTC login, submission ya payment is milestone mein enabled nahi hai. Main sirf booking details tayyar karke confirmation tak le ja sakta hoon.');
+      // Prompt 35: explicit execution attempt → the required boundary sentence first
+      return fail('BOOKING_EXECUTION_DISABLED', 'Booking execution abhi enabled nahi hai. Actual booking, IRCTC login, submission ya payment main nahi kar sakta — sirf booking details tayyar karke confirmation aur IRCTC handoff tak le ja sakta hoon.');
     }
     if (d.intent === 'CONFIRM_BOOKING' || d.action === 'PREPARE_IRCTC_HANDOFF' || d.action === 'REQUEST_CONFIRMATION') {
       const s = S();

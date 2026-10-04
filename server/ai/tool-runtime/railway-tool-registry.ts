@@ -16,9 +16,9 @@ import {
 } from '@shared/railway-tool-runtime';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 
-export type ToolCapability = 'SEARCH' | 'TRAIN_INFO' | 'TIMETABLE' | 'AVAILABILITY' | 'FARE' | 'LIVE_STATUS' | 'PNR_STATUS' | 'CANCELLED_TRAINS' | 'GENERAL_INFO';
+export type ToolCapability = 'SEARCH' | 'TRAIN_INFO' | 'TIMETABLE' | 'AVAILABILITY' | 'FARE' | 'LIVE_STATUS' | 'PNR_STATUS' | 'CANCELLED_TRAINS' | 'GENERAL_INFO' | 'WEB_RESEARCH';
 /** Which existing backend component executes the tool (the LLM never picks a provider). */
-export type ProviderRoute = 'RailwaySearchOrchestrator' | 'RailwayToolService' | 'LiveTrainStatusService' | 'PnrStatusService' | 'NONE';
+export type ProviderRoute = 'RailwaySearchOrchestrator' | 'RailwayToolService' | 'LiveTrainStatusService' | 'PnrStatusService' | 'WebResearchService' | 'NONE';
 
 export interface RailwayToolMetadata {
   name: RailwayToolName;
@@ -44,7 +44,7 @@ export interface RailwayToolMetadata {
 
 /** Normalized result contract per tool (Part 1 / Part 18). Every result also carries LLMToolResult metadata:
  *  toolExecutionId, status, fresh, fetchedAt, provider, requestId. */
-export interface ToolOutputSchema { resultType: string; fields: readonly string[]; source: 'RAILWAY_PROVIDER' | 'NONE' }
+export interface ToolOutputSchema { resultType: string; fields: readonly string[]; source: 'RAILWAY_PROVIDER' | 'WEB_EXTERNAL' | 'NONE' }
 const OUT = (resultType: string, fields: string[]): ToolOutputSchema => Object.freeze({ resultType, fields: Object.freeze(fields), source: 'RAILWAY_PROVIDER' as const });
 export const TOOL_OUTPUT_SCHEMAS: Readonly<Record<RailwayToolName, ToolOutputSchema>> = Object.freeze({
   SEARCH_TRAINS: OUT('NormalizedTrainSearchResult', ['resultId', 'origin', 'destination', 'date', 'trains[]{trainNumber,trainName,departure,arrival,duration,classes[]}']),
@@ -55,7 +55,8 @@ export const TOOL_OUTPUT_SCHEMAS: Readonly<Record<RailwayToolName, ToolOutputSch
   TRACK_TRAIN: OUT('NormalizedLiveStatus', ['trainNumber', 'currentStatus', 'currentStationCode', 'delayMinutes']),
   CHECK_PNR: OUT('NormalizedPnrStatus', ['pnr(masked in logs)', 'status', 'chartStatus', 'passengers[]{number,bookingStatus,currentStatus}']),
   GET_CANCELLED_TRAINS: OUT('NormalizedCancelledTrains', ['date', 'trains[]{trainNumber,trainName,cancellationType}']),
-  GENERAL_RAILWAY_ANSWER: Object.freeze({ resultType: 'NotApplicable', fields: Object.freeze([]), source: 'NONE' as const })
+  GENERAL_RAILWAY_ANSWER: Object.freeze({ resultType: 'NotApplicable', fields: Object.freeze([]), source: 'NONE' as const }),
+  WEB_RAILWAY_RESEARCH: Object.freeze({ resultType: 'WebResearchResult', fields: Object.freeze(['query', 'dataSource=WEB_EXTERNAL', 'authority=NOT_AUTHORITATIVE', 'results[]{title,url,domain,sourceTier,snippet}']), source: 'WEB_EXTERNAL' as const })
 });
 
 const schemaOf = (d: ToolDefinition | undefined): RailwayToolMetadata['inputSchema'] => ({
@@ -99,6 +100,16 @@ entries.push(Object.freeze({
   capability: 'GENERAL_INFO', inputSchema: { fields: {}, required: [], additionalProperties: false }, requiredFields: [], outputSchema: TOOL_OUTPUT_SCHEMAS.GENERAL_RAILWAY_ANSWER,
   freshnessPolicy: 'NOT_APPLICABLE', allowedStates: 'ANY', providerRoute: 'NONE', enabled: false, llmCallable: false, implemented: false, dependsOnSelection: false
 }) as RailwayToolMetadata);
+
+// Prompt 35: WEB_EXTERNAL research — enabled / LLM-callable only when configured (definition present).
+{
+  const d = def('WEB_RAILWAY_RESEARCH');
+  entries.push(Object.freeze({
+    name: 'WEB_RAILWAY_RESEARCH', description: d?.description || 'Web research (disabled — not configured).',
+    capability: 'WEB_RESEARCH', inputSchema: schemaOf(d), requiredFields: Object.freeze(schemaOf(d).required), outputSchema: TOOL_OUTPUT_SCHEMAS.WEB_RAILWAY_RESEARCH,
+    freshnessPolicy: 'ALWAYS_FRESH', allowedStates: 'ANY', providerRoute: 'WebResearchService', enabled: !!d, llmCallable: !!d, implemented: !!d, dependsOnSelection: false
+  }) as RailwayToolMetadata);
+}
 
 export const RAILWAY_TOOL_REGISTRY: ReadonlyMap<RailwayToolName, RailwayToolMetadata> = new Map(entries.map(e => [e.name, e]));
 

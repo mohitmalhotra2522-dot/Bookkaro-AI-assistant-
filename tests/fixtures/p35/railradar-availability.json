@@ -1,0 +1,56 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:42.857Z",
+ "status": 200,
+ "endpoint": "/v1/trains/12014/seats",
+ "body": {
+  "success": true,
+  "data": {
+   "trainNumber": "12014",
+   "trainName": "Amritsar - New Delhi Shatabdi Express",
+   "quotaCode": "GN",
+   "generatedAt": "2026-10-04T15:26:42+05:30",
+   "calendar": [
+    {
+     "date": "2026-10-05",
+     "rawDate": "2026-10-05",
+     "status": "GNWL56/WL32",
+     "statusCode": "WAITLIST",
+     "isAvailable": false,
+     "waitlistNumber": 32,
+     "waitlistType": "GNWL"
+    },
+    {
+     "date": "2026-10-06",
+     "rawDate": "2026-10-06",
+     "status": "AVAILABLE-0333",
+     "statusCode": "AVAILABLE",
+     "isAvailable": true,
+     "availableSeats": 333
+    },
+    {
+     "date": "2026-10-07",
+     "rawDate": "2026-10-07",
+     "status": "AVAILABLE-0421",
+     "statusCode": "AVAILABLE",
+     "isAvailable": true,
+     "availableSeats": 421
+    },
+    {
+     "date": "2026-10-08",
+     "rawDate": "2026-10-08",
+     "status": "AVAILABLE-0414",
+     "statusCode": "AVAILABLE",
+     "isAvailable": true,
+     "availableSeats": 414
+    }
+   ],
+   "classCode": "CC"
+  },
+  "meta": {
+   "timestamp": "2026-10-04T15:26:42+05:30",
+   "traceId": "421eff6c-cf23-480a-8545-7605ddc4e69e",
+   "source": "prs",
+   "executionTime": 222
+  }
+ }
+}

@@ -44,10 +44,12 @@ export function guardResponseFacts(text: string, src: FactSources): FactGuardRes
   const P10 = /(?<!\d)(\d{10})(?!\d)/g;
   const authoritative = [s.searchResults, s.selectedTrain, s.lastTrainInfo, s.lastTimetable, s.carryOverSelection];
   for (const a of authoritative) numbersIn(a, T5, trains);
-  for (const st of src.steps) { numbersIn(st.result.data, T5, trains); numbersIn(st.result.error?.message, T5, trains); }
+  // Prompt 35: WEB_EXTERNAL research is never railway evidence — its train numbers / ₹ amounts authorize nothing
+  const railSteps = src.steps.filter(st => st.result?.toolName !== 'WEB_RAILWAY_RESEARCH');
+  for (const st of railSteps) { numbersIn(st.result.data, T5, trains); numbersIn(st.result.error?.message, T5, trains); }
   for (const r of src.records || []) if (r.train?.trainNumber) trains.add(String(r.train.trainNumber));
   for (const a of [s.fare, s.searchResults?.trains, s.review?.data, s.availability]) numbersIn(a, NUM, amounts);
-  for (const st of src.steps) if (st.status === 'ok') numbersIn(st.result.data, NUM, amounts);
+  for (const st of railSteps) if (st.status === 'ok') numbersIn(st.result.data, NUM, amounts);
   for (const r of src.records || []) if (r.fareSummary?.total) amounts.add(String(r.fareSummary.total));
   for (const r of src.records || []) if (r.pnr) pnrs.add(String(r.pnr));
   for (const st of src.steps) if (st.status === 'ok' && st.result.toolName === 'CHECK_PNR') numbersIn(st.result.data?.pnr, P10, pnrs);

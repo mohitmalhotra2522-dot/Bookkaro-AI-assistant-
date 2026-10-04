@@ -1,5 +1,6 @@
 import type { RailwayProvider } from '../providers/railway-provider';
 import { MockRailwayProvider } from '../providers/mock/mock-provider';
+import { createFailoverProvider, createLiveProvider } from '../providers/live/live-config';
 
 /**
  * RailwayProviderRegistry — simple config-driven provider selector.
@@ -13,10 +14,18 @@ export class RailwayProviderRegistry {
   constructor() {
     // Register built-in providers
     this.register('mock', () => new MockRailwayProvider());
-    // Real providers will register here later, e.g.:
-    // this.register('irctc-live', () => new RealIRCTCProvider({...}));
+    // Prompt 35: real providers (documented APIs, env keys only). 'live' = RAILCORE → RAILKIT → RAILRADAR failover
+    // (order from RAILWAY_PRIMARY_PROVIDER / RAILWAY_FALLBACK_PROVIDERS). The chain holds LIVE adapters only — there is
+    // never a fallback to MOCK, and MOCK never falls back to live.
+    this.register('live', () => createFailoverProvider());
+    this.register('railcore', () => createLiveProvider('railcore'));
+    this.register('railkit', () => createLiveProvider('railkit'));
+    this.register('railradar', () => createLiveProvider('railradar'));
 
     this.activeId = process.env.RAILWAY_PROVIDER || 'mock';
+    // an unknown id / chain is a startup error, never a silent switch
+    if (!this.providers.has(this.activeId)) throw new Error(`Unknown railway provider: ${this.activeId}. Available: ${[...this.providers.keys()].join(', ')}`);
+    if (this.activeId === 'live') createFailoverProvider();
   }
 
   register(id: string, factory: () => RailwayProvider): void {

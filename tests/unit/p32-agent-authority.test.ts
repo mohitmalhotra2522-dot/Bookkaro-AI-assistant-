@@ -205,7 +205,8 @@ describe('P32 G2 — freshness, provider identity, bounds, policy, security', ()
     const reg = new RailwayProviderRegistry();
     expect(() => reg.setActive('irctc-live')).toThrow(/Unknown railway provider/);
     expect(reg.getActiveId()).toBe(process.env.RAILWAY_PROVIDER || 'mock');
-    expect(reg.listAvailable()).toEqual(['mock']);
+    // Prompt 35: real providers are now registered EXPLICITLY (opt-in via RAILWAY_PROVIDER; default stays mock)
+    expect(reg.listAvailable()).toEqual(['mock', 'live', 'railcore', 'railkit', 'railradar']);
   });
 
   it('[14] step budget unchanged (8); the agent prompt tells the LLM the outcome semantics', () => {

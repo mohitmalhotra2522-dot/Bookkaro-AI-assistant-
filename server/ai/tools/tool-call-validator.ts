@@ -1,3 +1,4 @@
+import { validateWebQuery } from '../../research/web-research-service';
 /**
  * ToolCallValidator — validates individual LLM-issued tool calls BEFORE any
  * RailwayProvider call is made. Treats LLM arguments as UNTRUSTED external
@@ -98,6 +99,11 @@ export class ToolCallValidator {
       case 'GET_FARE': return this.validateFare(call.callId, def, args, session);
       case 'TRACK_TRAIN': return this.validateTrack(call.callId, def, args, session, ground);
       case 'CHECK_PNR': return this.validatePnr(call.callId, def, args, session, ground);
+      case 'WEB_RAILWAY_RESEARCH': {
+        const q = validateWebQuery(args.query);
+        if (!q.ok) return { ok: false, error: { code: 'INVALID_TOOL_CALL', message: q.message } as OrchestratorError };
+        return { ok: true, v: { name: def.name, callId: call.callId, arguments: { query: q.query }, tool: def } };
+      }
       default:
         return { ok: false, error: { code: 'UNKNOWN_TOOL', message: `"${def.name}" tool मौजूद नहीं है।` } };
     }

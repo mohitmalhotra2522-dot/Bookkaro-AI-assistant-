@@ -1,0 +1,210 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:38.820Z",
+ "status": 200,
+ "endpoint": "/v1/routes/trains",
+ "body": {
+  "success": true,
+  "data": {
+   "from_station_code": "ASR",
+   "to_station_code": "NDLS",
+   "journey_date": "2026-10-05",
+   "quota": "GN",
+   "trains": [
+    {
+     "train_number": "22126",
+     "train_name": "NAGPUR AC EXP",
+     "extended_train_name": null,
+     "departure_time": "04:00",
+     "arrival_time": "10:50",
+     "duration_minutes": 410,
+     "distance_km": 448,
+     "train_type": "MAIL_EXPRESS",
+     "classes": [
+      "3A",
+      "2A",
+      "1A"
+     ],
+     "running_days": [
+      "MON"
+     ],
+     "has_pantry": false,
+     "on_time_rating": 4.2,
+     "availability_summary": [
+      {
+       "class_code": "1A",
+       "status": "WAITLIST",
+       "text": "GNWL3/WL3",
+       "fare": 1830,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T13:02:33.001"
+      },
+      {
+       "class_code": "2A",
+       "status": "WAITLIST",
+       "text": "GNWL25/WL14",
+       "fare": 1100,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T14:00:58.001"
+      },
+      {
+       "class_code": "3A",
+       "status": "WAITLIST",
+       "text": "GNWL52/WL28",
+       "fare": 795,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T14:36:16.001"
+      }
+     ]
+    },
+    {
+     "train_number": "12014",
+     "train_name": "AMRITSAR SHTABDI",
+     "extended_train_name": null,
+     "departure_time": "04:55",
+     "arrival_time": "11:02",
+     "duration_minutes": 367,
+     "distance_km": 448,
+     "train_type": "MAIL_EXPRESS",
+     "classes": [
+      "CC",
+      "EC"
+     ],
+     "running_days": [
+      "MON",
+      "TUE",
+      "WED",
+      "THU"
+     ],
+     "has_pantry": false,
+     "on_time_rating": 4.4,
+     "availability_summary": [
+      {
+       "class_code": "EC",
+       "status": "WAITLIST",
+       "text": "GNWL10/WL6",
+       "fare": 1735,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T14:24:34.001"
+      },
+      {
+       "class_code": "CC",
+       "status": "WAITLIST",
+       "text": "GNWL51/WL30",
+       "fare": 1125,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T15:19:31.001"
+      }
+     ]
+    },
+    {
+     "train_number": "12716",
+     "train_name": "SACHKHAND EXP",
+     "extended_train_name": null,
+     "departure_time": "05:30",
+     "arrival_time": "12:45",
+     "duration_minutes": 435,
+     "distance_km": 448,
+     "train_type": "MAIL_EXPRESS",
+     "classes": [
+      "SL",
+      "3A",
+      "2A",
+      "1A"
+     ],
+     "running_days": [
+      "MON",
+      "TUE",
+      "WED",
+      "THU"
+     ],
+     "has_pantry": true,
+     "on_time_rating": 3.7,
+     "availability_summary": [
+      {
+       "class_code": "1A",
+       "status": "WAITLIST",
+       "text": "PQWL6/WL6",
+       "fare": 1830,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T10:59:12.001"
+      },
+      {
+       "class_code": "2A",
+       "status": "WAITLIST",
+       "text": "PQWL22/WL7",
+       "fare": 1100,
+       "confidence": "medium",
+       "last_updated_at": "2026-10-04T07:02:03.001"
+      },
+      {
+       "class_code": "3A",
+       "status": "WAITLIST",
+       "text": "PQWL44/WL28",
+       "fare": 795,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T14:24:56.001"
+      },
+      {
+       "class_code": "SL",
+       "status": "WAITLIST",
+       "text": "PQWL129/WL86",
+       "fare": 315,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T14:24:41.001"
+      }
+     ]
+    },
+    {
+     "train_number": "14680",
+     "train_name": "ASR DLI EXP",
+     "extended_train_name": null,
+     "departure_time": "06:15",
+     "arrival_time": "14:15",
+     "duration_minutes": 480,
+     "distance_km": 447,
+     "train_type": "MAIL_EXPRESS",
+     "classes": [
+      "2S",
+      "CC"
+     ],
+     "running_days": [
+      "MON",
+      "TUE",
+      "WED",
+      "THU"
+     ],
+     "has_pantry": false,
+     "on_time_rating": 4.1,
+     "availability_summary": [
+      {
+       "class_code": "CC",
+       "status": "UNKNOWN",
+       "text": "GNWL 13/WL 7",
+       "fare": 610,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T13:55:21.001"
+      },
+      {
+       "class_code": "2S",
+       "status": "UNKNOWN",
+       "text": "GNWL 26/WL 24",
+       "fare": 180,
+       "confidence": "high",
+       "last_updated_at": "2026-10-04T15:21:51.001"
+      }
+     ]
+    }
+   ]
+  },
+  "meta": {
+   "api_version": "v1",
+   "request_id": "req_01M435G4V5Y98H3GT4PCVNW4Q0",
+   "trace_id": "trc_01M435G4V5B949MG5CK50SJZBX",
+   "timestamp": "2026-10-04T15:26:38.695+05:30",
+   "freshness": {
+    "mode": "live",
+    "retrieved_at": "2026-10-04T09:56:38.695Z"
+   }
+  }
+ }
+}

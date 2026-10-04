@@ -9,7 +9,7 @@
 export type ToolOutcome =
   | 'DATA' | 'NO_RESULTS' | 'UNSUPPORTED' | 'TIMEOUT' | 'PROVIDER_FAILURE' | 'MALFORMED_DATA' | 'STALE' | 'REJECTED';
 
-export type DataSourceKind = 'MOCK' | 'LIVE';
+export type DataSourceKind = 'MOCK' | 'LIVE' | 'WEB_EXTERNAL';
 
 const NOT_FOUND = /^(NO_RESULTS|DATA_UNAVAILABLE|NO_TRAINS_FOUND|NOT_FOUND|TRAIN_NOT_FOUND|PNR_NOT_FOUND|EMPTY_RESULT)$/;
 const UNSUPPORTED = /^(TOOL_NOT_IMPLEMENTED|UNKNOWN_TOOL|TOOL_UNAVAILABLE)$/;
@@ -36,7 +36,8 @@ export function toolOutcomeOf(r: { ok?: boolean; success?: boolean; empty?: bool
 export function dataSourceOf(meta: any): DataSourceKind | null {
   const s = String(meta?.source || '').toLowerCase();
   if (!s) return null;
-  return s === 'mock' ? 'MOCK' : 'LIVE';
+  // Prompt 35: web research is labelled WEB_EXTERNAL — never LIVE railway data
+  return s === 'mock' ? 'MOCK' : s === 'web_external' ? 'WEB_EXTERNAL' : 'LIVE';
 }
 
 /**

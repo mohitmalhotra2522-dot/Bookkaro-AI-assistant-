@@ -1,0 +1,136 @@
+{
+ "_note": "P35 REAL provider sample (trimmed). Captured 2026-10-04T09:56:44.249Z",
+ "status": 200,
+ "endpoint": "/v1/trains/12014/live",
+ "body": {
+  "success": true,
+  "data": {
+   "trainNumber": "12014",
+   "trainName": "Amritsar - New Delhi Shatabdi Express",
+   "startDate": "2026-10-04",
+   "lastUpdatedAt": "2026-10-04T10:55:54+05:30",
+   "status": "completed",
+   "train": {
+    "number": "12014",
+    "name": "Amritsar - New Delhi Shatabdi Express",
+    "type": "Shatabdi Express",
+    "category": "Premium",
+    "source": {
+     "code": "ASR",
+     "name": "Amritsar",
+     "lat": 31.633,
+     "lng": 74.8671
+    },
+    "destination": {
+     "code": "NDLS",
+     "name": "New Delhi",
+     "lat": 28.64177,
+     "lng": 77.22027
+    },
+    "runDays": [
+     "mon",
+     "tue",
+     "wed",
+     "thu"
+    ],
+    "distance": 448.3,
+    "duration": 367,
+    "avgSpeed": 73.3,
+    "maxSpeed": 90.6,
+    "totalHalts": 8,
+    "returnTrain": "12013",
+    "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR"
+   },
+   "isLive": true,
+   "trackingMode": "real-time",
+   "previousHalt": {
+    "stationCode": "UMB",
+    "stationName": "Ambala Cantt Jn",
+    "sequence": 38,
+    "distance": 249.1
+   },
+   "nextHalt": {
+    "stationCode": "NDLS",
+    "stationName": "New Delhi",
+    "sequence": 72,
+    "distance": 448.3
+   },
+   "delayMinutes": 7,
+   "currentLocation": {
+    "stationCode": "NDLS",
+    "stationName": "New Delhi",
+    "sequence": 72,
+    "status": "departed",
+    "isHalt": true,
+    "distanceFromOriginKm": 447.97,
+    "distanceFromLastStationKm": 1.47,
+    "segmentProgress": 0.81,
+    "speedKmh": 0,
+    "delayMinutes": 7
+   },
+   "route": [
+    {
+     "sequence": 1,
+     "stationCode": "ASR",
+     "stationName": "Amritsar",
+     "isHalt": true,
+     "status": "departed",
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR",
+     "scheduledDeparture": "2026-10-04T04:55:00+05:30",
+     "departureDay": 1,
+     "platform": "1",
+     "distance": 0,
+     "speedToNextStationKmph": 90.6
+    },
+    {
+     "sequence": 2,
+     "stationCode": "MOW",
+     "stationName": "Mananwala",
+     "isHalt": false,
+     "status": "departed",
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR",
+     "scheduledArrival": "2026-10-04T05:01:00+05:30",
+     "arrivalDay": 1,
+     "scheduledDeparture": "2026-10-04T05:01:00+05:30",
+     "departureDay": 1,
+     "distance": 9.8,
+     "speedToNextStationKmph": 90.6
+    },
+    {
+     "sequence": 3,
+     "stationCode": "JNL",
+     "stationName": "Jandiala",
+     "isHalt": false,
+     "status": "departed",
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR",
+     "scheduledArrival": "2026-10-04T05:07:00+05:30",
+     "arrivalDay": 1,
+     "scheduledDeparture": "2026-10-04T05:07:00+05:30",
+     "departureDay": 1,
+     "distance": 18.7,
+     "speedToNextStationKmph": 90.6
+    },
+    {
+     "sequence": 4,
+     "stationCode": "TRA",
+     "stationName": "Tangra",
+     "isHalt": false,
+     "status": "departed",
+     "coachPosition": "ENG-LPR-E2-E1-C14-C13-C12-C11-C10-C9-C8-C7-C6-C5-C4-C3-C2-C1-LPR",
+     "scheduledArrival": "2026-10-04T05:12:00+05:30",
+     "arrivalDay": 1,
+     "scheduledDeparture": "2026-10-04T05:12:00+05:30",
+     "departureDay": 1,
+     "distance": 25.2,
+     "speedToNextStationKmph": 90.6
+    }
+   ]
+  },
+  "meta": {
+   "timestamp": "2026-10-04T15:26:44+05:30",
+   "traceId": "5eb20be1-c146-4792-a06f-b58d653faeaf",
+   "source": "hybrid",
+   "executionTime": 4
+  }
+ }
+}

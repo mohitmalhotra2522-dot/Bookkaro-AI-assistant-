@@ -37,7 +37,9 @@ afterEach(() => vi.restoreAllMocks());
 describe('P17 G2 — registry, enum, schemas', () => {
   it('[1] registry: exactly the 9 approved tools with full metadata; ALWAYS_FRESH; schemas derived from the LLM tool list', () => {
     expect([...RAILWAY_TOOL_REGISTRY.keys()].sort()).toEqual([...RAILWAY_TOOL_NAMES].sort());
-    expect(RAILWAY_TOOL_NAMES).toHaveLength(9);
+    // Prompt 35: + WEB_RAILWAY_RESEARCH (approved WEB_EXTERNAL capability; NOT LLM-callable unless configured)
+    expect(RAILWAY_TOOL_NAMES).toHaveLength(10);
+    expect(RAILWAY_TOOL_REGISTRY.get('WEB_RAILWAY_RESEARCH')).toMatchObject({ llmCallable: false, enabled: false, implemented: false });
     for (const m of RAILWAY_TOOL_REGISTRY.values()) {
       expect(m).toMatchObject({ name: expect.any(String), capability: expect.any(String), providerRoute: expect.any(String) });
       expect(m.inputSchema.additionalProperties).toBe(false);

@@ -309,6 +309,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
         ? { ...(r.resultRef ? { toolResultId: r.resultRef } : {}), tool: r.toolName, ...(entityOf(r.identity) ? { entity: entityOf(r.identity) } : {}), ok: r.ok,
             // Prompt 32: honest outcome category + provider identity (MOCK data is never live)
             ...(r.outcome ? { outcome: r.outcome } : {}), ...(r.dataSource ? { dataSource: r.dataSource } : {}),
+            // Prompt 35: which live provider answered + failover chain (provider normalization — no re-wording needed)
+            ...(r.provider ? { provider: r.provider, fallbackUsed: !!r.fallbackUsed, providerAttempts: r.providerAttempts } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
               : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details),
                   ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)) } }) }
