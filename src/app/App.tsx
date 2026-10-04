@@ -11,6 +11,7 @@ import { TrainCard, SearchStatus, ProviderErrorCard } from '../components/trains
 import { PassengerCard } from '../components/passengers/PassengerCard';
 import { BookingReviewCard } from '../components/review/BookingReviewCard';
 import { SessionInspector, type InspectorMeta } from '../components/debug/SessionInspector';
+import type { VoiceTranscriptInfo } from '@shared/voice/transcript';
 
 const App: React.FC = () => {
   const {
@@ -61,7 +62,7 @@ const App: React.FC = () => {
   }, [messages]);
 
   const send = useCallback(
-    async (text: string, mode: 'TEXT' | 'VOICE', extra: { searchResultsVersion?: number; reviewVersion?: number; bargeIn?: boolean } = {},
+    async (text: string, mode: 'TEXT' | 'VOICE', extra: { searchResultsVersion?: number; reviewVersion?: number; bargeIn?: boolean; transcript?: VoiceTranscriptInfo } = {},
       voiceTurn?: { onEvent: (e: VoiceTurnEvent) => void }): Promise<any> => {
       // Prompt 21: a voice barge-in may start a new turn while the previous request is still in flight
       if (!text.trim() || !sessionId || (isLoading && !extra.bargeIn)) return;
@@ -161,7 +162,8 @@ const App: React.FC = () => {
   // Prompt 21: the shared ConversationalVoiceAgent — HTTP turn processor (same /api/chat pipeline as text)
   const voiceProcess: TurnProcessor = useCallback(async (text, x) => {
     speechGenRef.current += 1;
-    const resp = await send(text, 'VOICE', x.bargeIn ? { bargeIn: true } : {}, { onEvent: x.onEvent });
+    // Prompt 34 (§2): the structured STT metadata of the FINAL transcript travels with the turn (no extra brain)
+    const resp = await send(text, 'VOICE', { ...(x.bargeIn ? { bargeIn: true } : {}), ...(x.transcript ? { transcript: x.transcript } : {}) }, { onEvent: x.onEvent });
     const none: VoiceTurnOutcome = { sessionId: sessionId || '', turnId: 'none', sequence: 0, presentable: false, assistantText: '', speechText: '', segments: [], shouldSpeak: false, interruptible: true, responsePriority: 'NORMAL' };
     return (resp && resp.voice) || none;
   }, [send, sessionId]);

@@ -324,6 +324,8 @@ export interface TurnRecord {
     toolErrors?: Array<{ tool: string; code: string; type: string | null }>;
   };
   turnEngine?: Record<string, any>;
+  /** Prompt 34 (§17): per-voice-turn observability (statuses / counts / timings — no transcript or response text). */
+  voiceTurn?: Record<string, any>;
   freshRequested?: boolean;
   /** Prompt 10 — PII-free execution-gateway log line (if the gateway ran this turn). */
   execution?: import('@shared/booking-execution').ExecutionLogRecord;

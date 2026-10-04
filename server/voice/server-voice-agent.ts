@@ -28,7 +28,7 @@ export function engineTurnProcessor(engine: ConversationTurnEngine, sessionId: s
       if (v) o.onEvent(v);
     });
     try {
-      const r = await engine.processTurn(sessionId, text, 'VOICE', { interruptPrevious: o.bargeIn });
+      const r = await engine.processTurn(sessionId, text, 'VOICE', { interruptPrevious: o.bargeIn, ...(o.transcript ? { transcript: o.transcript } : {}) });
       return r.voice;
     } finally { off(); }
   };

@@ -19,7 +19,8 @@
  */
 import { VoiceTurnDetector, type TurnDetectorConfig } from './voice-turn-detector';
 import { normalizeTranscript } from './stt-normalizer';
-import { isLikelyEcho, isSpeakable, preempts, segmentForSpeech, type ResponsePriority } from './voice-response-policy';
+import { isLikelyEcho, isSpeakable, preempts, redactForSpeech, segmentForSpeech, type ResponsePriority } from './voice-response-policy';
+import { isUncertainConfidence, makeTranscriptEvent, type TranscriptEvent, type TranscriptMeta, type TranscriptStatus, type VoiceTranscriptInfo } from './transcript';
 
 export type VoiceAgentState = 'IDLE' | 'LISTENING' | 'USER_SPEAKING' | 'PROCESSING' | 'SPEAKING' | 'INTERRUPTED';
 
@@ -50,13 +51,16 @@ export interface VoiceTurnOutcome {
   error?: { code: string; message?: string } | null;
 }
 
-export type TurnProcessor = (text: string, o: { bargeIn: boolean; priority: ResponsePriority; onEvent: (e: VoiceTurnEvent) => void }) => Promise<VoiceTurnOutcome>;
+/** Prompt 34: `transcript` = structured STT metadata of a spoken turn (absent for typed text in the voice UI). */
+export type TurnProcessor = (text: string, o: { bargeIn: boolean; priority: ResponsePriority; onEvent: (e: VoiceTurnEvent) => void; transcript?: VoiceTranscriptInfo }) => Promise<VoiceTurnOutcome>;
 
-export interface SpeechPlayback { done: Promise<void>; cancel(): void }
+/** `started` (optional) resolves when audio actually begins — used for TTS latency (Prompt 34 §17). */
+export interface SpeechPlayback { done: Promise<void>; cancel(): void; started?: Promise<void> }
 /** TEXT → AUDIO only (Part 29). */
 export interface SpeechOutput { readonly available: boolean; speak(text: string, o: { lang: string; turnId: string }): SpeechPlayback }
+/** Prompt 34 (§2): partial / final results may carry recogniser metadata (confidence, language). */
 export interface SpeechInputHandlers {
-  onSpeechStart(): void; onSpeechEnd(): void; onPartial(text: string): void; onFinal(text: string): void; onError(code: string): void;
+  onSpeechStart(): void; onSpeechEnd(): void; onPartial(text: string, meta?: TranscriptMeta): void; onFinal(text: string, meta?: TranscriptMeta): void; onError(code: string): void;
 }
 /** Microphone + STT. `start` is only ever called from an explicit user action (listen / conversation mode). */
 export interface SpeechInput { readonly available: boolean; start(h: SpeechInputHandlers, o: { continuous: boolean; lang: string }): void; stop(): void }
@@ -97,7 +101,38 @@ export type VoiceAgentEvent =
   | { type: 'SPEECH_CANCELLED'; turnId: string | null; reason: string }
   | { type: 'DISCARDED'; turnId: string; reason: string }
   | { type: 'TEXT_FALLBACK'; reason: string }
-  | { type: 'OUTCOME'; outcome: VoiceTurnOutcome };
+  | { type: 'OUTCOME'; outcome: VoiceTurnOutcome }
+  // Prompt 34 — structured STT results (UI only; never logged), uncertain / incomplete utterances (nothing submitted)
+  | { type: 'TRANSCRIPT'; transcript: TranscriptEvent }
+  | { type: 'TRANSCRIPT_UNCERTAIN'; confidence: number }
+  | { type: 'TRANSCRIPT_INCOMPLETE' };
+
+/**
+ * Prompt 34 (§17) — per-turn voice observability kept by the voice layer (no transcript / response text, no
+ * passenger data). The server-side counterpart (LLM latency / calls, tools, outcome) is `turnLog.voiceTurn`.
+ */
+export type VoiceTtsStatus = 'NONE' | 'PENDING' | 'SPOKEN' | 'PARTIAL' | 'CANCELLED' | 'FAILED' | 'TEXT_ONLY';
+export interface VoiceTurnMetrics {
+  localSeq: number;
+  turnId: string | null;
+  inputSource: 'SPEECH' | 'TYPED';
+  transcriptStatus: TranscriptStatus | null;
+  transcriptConfidence: number | null;
+  languageHint: string | null;
+  sttDurationMs: number | null;
+  turnLatencyMs: number | null;
+  timeToFirstSpeechMs: number | null;
+  ttsLatencyMs: number | null;
+  segmentsQueued: number;
+  segmentsSpoken: number;
+  tts: VoiceTtsStatus;
+  interrupted: boolean;
+  stale: boolean;
+  discardReason: string | null;
+  speechRetries: number;
+}
+interface MetricsRec extends Omit<VoiceTurnMetrics, 'tts'> { submittedAt: number; cancelled: number; failed: number; textOnly: number }
+const MAX_METRICS = 20;
 
 interface QueueItem { turnId: string; sequence: number; text: string; kind: 'ACK' | 'STATUS' | 'RESPONSE'; priority: ResponsePriority; index?: number }
 
@@ -118,6 +153,11 @@ export class ConversationalVoiceAgent {
   private partial = '';
   private tools: VoiceAgentSnapshot['toolActivity'] = [];
   private listeners = new Set<(e: VoiceAgentEvent) => void>();
+  // Prompt 34 — current utterance (STT metadata), per-turn metrics, the last presentable outcome (speech retry)
+  private uttSeq = 0;
+  private utt: { id: string; startedAt: number | null; confidences: number[]; language: string | null } = { id: '', startedAt: null, confidences: [], language: null };
+  private metrics: MetricsRec[] = [];
+  private lastOutcome: VoiceTurnOutcome | null = null;
 
   constructor(private readonly deps: VoiceAgentDeps) {
     this.detector = new VoiceTurnDetector(deps.detector);
@@ -171,8 +211,8 @@ export class ConversationalVoiceAgent {
       this.deps.input.start({
         onSpeechStart: () => this.onSpeechActivity('start'),
         onSpeechEnd: () => this.onSpeechActivity('end'),
-        onPartial: (t) => this.receiveTranscript(t, false),
-        onFinal: (t) => this.receiveTranscript(t, true),
+        onPartial: (t, m) => this.receiveTranscript(t, false, m),
+        onFinal: (t, m) => this.receiveTranscript(t, true, m),
         onError: (code) => this.onInputError(code)
       }, { continuous: this.conversationMode, lang: this.lang });
     } catch { this.onInputError('STT_START_FAILED'); }
@@ -181,6 +221,10 @@ export class ConversationalVoiceAgent {
 
   private onInputError(code: string) {
     this.listening = false;
+    // Prompt 34 (§15): an STT failure leaves no half-heard transcript behind (nothing is submitted or completed later)
+    this.detector.reset();
+    this.partial = '';
+    this.resetUtterance();
     this.lastError = code;
     this.emit({ type: 'TEXT_FALLBACK', reason: code });   // typing always works (Part 21)
     if (this.state === 'LISTENING' || this.state === 'USER_SPEAKING') this.setState('IDLE');
@@ -189,12 +233,12 @@ export class ConversationalVoiceAgent {
   /** Speech activity from VAD / the recogniser. During playback (conversation mode) it may be a barge-in. */
   onSpeechActivity(kind: 'start' | 'end'): void {
     const t = this.now();
-    if (kind === 'start') { this.detector.speechStart(t); if (this.state === 'LISTENING') this.setState('USER_SPEAKING'); }
+    if (kind === 'start') { this.beginUtterance(t); this.detector.speechStart(t); if (this.state === 'LISTENING') this.setState('USER_SPEAKING'); }
     else this.detector.speechEnd(t);
   }
 
   /** Streaming STT. Partials are display-only; only end-of-turn produces a turn (Part 11). */
-  receiveTranscript(text: string, isFinal: boolean): void {
+  receiveTranscript(text: string, isFinal: boolean, meta?: TranscriptMeta): void {
     const t = this.now();
     const clean = String(text || '').trim();
     if (!clean) return;
@@ -206,7 +250,16 @@ export class ConversationalVoiceAgent {
       this.detector.markBargeIn();
       this.detector.speechStart(t);
     }
-    if (isFinal) this.detector.finalTranscript(clean, t); else this.detector.partialTranscript(clean, t);
+    // Prompt 34 (§2/§3): structured transcript; an UNCERTAIN final (low reported confidence) is treated as interim —
+    // the agent waits for more speech and never fills in missing words
+    this.beginUtterance(t);
+    const ev = makeTranscriptEvent({ utteranceId: this.utt.id, sessionId: this.deps.sessionId, text: clean, isFinal, meta, now: t });
+    if (ev.languageHint) this.utt.language = ev.languageHint;
+    this.emit({ type: 'TRANSCRIPT', transcript: ev });
+    let final = isFinal;
+    if (final && isUncertainConfidence(meta?.confidence)) { final = false; this.emit({ type: 'TRANSCRIPT_UNCERTAIN', confidence: ev.confidence ?? 0 }); }
+    else if (final && ev.confidence !== null) this.utt.confidences.push(ev.confidence);
+    if (final) this.detector.finalTranscript(clean, t); else this.detector.partialTranscript(clean, t);
     this.partial = this.detector.transcript;
     this.emit({ type: 'PARTIAL', text: this.partial });
     if (this.state === 'LISTENING' || this.state === 'IDLE' || this.state === 'INTERRUPTED') this.setState('USER_SPEAKING');
@@ -214,19 +267,41 @@ export class ConversationalVoiceAgent {
 
   /** Drive end-of-turn detection (browser: interval; tests: explicit). Returns the turn promise when one started. */
   tick(): Promise<VoiceTurnOutcome | null> | null {
-    const d = this.detector.evaluate(this.now());
+    const now = this.now();
+    const d = this.detector.evaluate(now);
+    if (d.status === 'INCOMPLETE') {
+      // Prompt 34 (§3): no final transcript arrived — nothing is submitted (no half-heard turn, no guessed words)
+      this.detector.reset();
+      this.partial = '';
+      this.resetUtterance();
+      this.lastError = 'TRANSCRIPT_INCOMPLETE';
+      this.emit({ type: 'TRANSCRIPT_INCOMPLETE' });
+      if (!this.conversationMode) { this.stopInput(); this.setState('IDLE'); } else this.setState('LISTENING');
+      return null;
+    }
     if (d.status !== 'USER_FINISHED' || !d.finalTranscript) return null;
     const bargeIn = d.bargeIn || this.lastBarge;
+    const transcript: VoiceTranscriptInfo = {
+      status: 'FINAL', confidence: this.utt.confidences.length ? Math.min(...this.utt.confidences) : null, languageHint: this.utt.language,
+      sttDurationMs: this.utt.startedAt !== null ? Math.max(0, now - this.utt.startedAt) : null, utteranceId: this.utt.id || null
+    };
     this.detector.reset();
     this.partial = '';
+    this.resetUtterance();
     if (!this.conversationMode) this.stopInput();
-    return this.processTurn(d.finalTranscript, { bargeIn });
+    return this.processTurn(d.finalTranscript, { bargeIn, transcript });
   }
+
+  private beginUtterance(t: number) {
+    if (this.utt.startedAt !== null) return;
+    this.utt = { id: `u${++this.uttSeq}-${Math.max(0, Math.floor(t)).toString(36)}`, startedAt: t, confidences: [], language: null };
+  }
+  private resetUtterance() { this.utt = { id: '', startedAt: null, confidences: [], language: null }; }
 
   // ------------------------------------------------------------------ the turn
 
   /** Part 31 — hands the (normalized) transcript to the shared engine. Also used for typed text in voice UI. */
-  async processTurn(rawText: string, o: { bargeIn?: boolean; normalize?: boolean } = {}): Promise<VoiceTurnOutcome | null> {
+  async processTurn(rawText: string, o: { bargeIn?: boolean; normalize?: boolean; transcript?: VoiceTranscriptInfo } = {}): Promise<VoiceTurnOutcome | null> {
     const text = o.normalize === false ? String(rawText || '').trim() : normalizeTranscript(rawText).text;
     if (!text) return null;
     // a new user turn supersedes everything still pending / playing from the previous one (Part 33)
@@ -237,11 +312,19 @@ export class ConversationalVoiceAgent {
     const priority: ResponsePriority = bargeIn ? 'INTERRUPT' : 'HIGH';
     this.active = { turnId: null, localSeq, serverSeq: 0, priority, acked: false, spoken: new Set() };
     this.tools = [];
+    this.lastOutcome = null;
+    this.metrics.push({
+      localSeq, turnId: null, inputSource: o.transcript ? 'SPEECH' : 'TYPED', transcriptStatus: o.transcript?.status ?? null,
+      transcriptConfidence: o.transcript?.confidence ?? null, languageHint: o.transcript?.languageHint ?? null, sttDurationMs: o.transcript?.sttDurationMs ?? null,
+      submittedAt: this.now(), turnLatencyMs: null, timeToFirstSpeechMs: null, ttsLatencyMs: null, segmentsQueued: 0, segmentsSpoken: 0,
+      interrupted: false, stale: false, discardReason: null, speechRetries: 0, cancelled: 0, failed: 0, textOnly: 0
+    });
+    if (this.metrics.length > MAX_METRICS) this.metrics.splice(0, this.metrics.length - MAX_METRICS);
     this.setState('PROCESSING');
     this.emit({ type: 'TURN_SUBMITTED', text, bargeIn });
     let outcome: VoiceTurnOutcome;
     try {
-      outcome = await this.deps.processTurn(text, { bargeIn, priority, onEvent: (e) => this.onTurnEvent(localSeq, e) });
+      outcome = await this.deps.processTurn(text, { bargeIn, priority, onEvent: (e) => this.onTurnEvent(localSeq, e), ...(o.transcript ? { transcript: o.transcript } : {}) });
     } catch (e: any) {
       this.lastError = 'TURN_FAILED';
       if (this.isCurrent(localSeq)) { this.setState(this.conversationMode ? 'LISTENING' : 'IDLE'); this.afterSpeech(); }
@@ -262,7 +345,7 @@ export class ConversationalVoiceAgent {
   private onTurnEvent(localSeq: number, e: VoiceTurnEvent) {
     if (!this.isCurrent(localSeq) || !this.active) return;           // events of an abandoned turn are ignored
     if (this.interrupted.has(e.turnId)) return;
-    if (!this.active.turnId) { this.active.turnId = e.turnId; this.active.serverSeq = e.sequence; }
+    if (!this.active.turnId) { this.active.turnId = e.turnId; this.active.serverSeq = e.sequence; this.bindMetric(localSeq, e.turnId); }
     if (e.turnId !== this.active.turnId) return;
     switch (e.type) {
       case 'TOOL_REQUESTED': this.requestTool(e.tool); break;
@@ -289,8 +372,14 @@ export class ConversationalVoiceAgent {
   }
 
   private receiveOutcome(localSeq: number, o: VoiceTurnOutcome): VoiceTurnOutcome | null {
-    if (!this.isCurrent(localSeq) || !this.active) { this.emit({ type: 'DISCARDED', turnId: o.turnId, reason: 'SUPERSEDED' }); return null; }
+    const m = this.metrics.find(x => x.localSeq === localSeq);
+    if (m) m.turnLatencyMs = Math.max(0, this.now() - m.submittedAt);
+    if (!this.isCurrent(localSeq) || !this.active) {
+      if (m) { m.turnId = m.turnId || o.turnId; m.stale = true; m.discardReason = 'SUPERSEDED'; }
+      this.emit({ type: 'DISCARDED', turnId: o.turnId, reason: 'SUPERSEDED' }); return null;
+    }
     if (!this.active.turnId) { this.active.turnId = o.turnId; this.active.serverSeq = o.sequence; }
+    this.bindMetric(localSeq, o.turnId);
     this.active.journeyVersion = o.journeyVersion ?? null;
     this.emit({ type: 'OUTCOME', outcome: o });
     if (!o.presentable || this.interrupted.has(o.turnId)) {
@@ -299,9 +388,11 @@ export class ConversationalVoiceAgent {
       this.queue = this.queue.filter(q => q.turnId !== o.turnId);
       if (this.playing?.item.turnId === o.turnId) this.cancelPlayback('STALE');
       this.emit({ type: 'DISCARDED', turnId: o.turnId, reason: o.presentable ? 'INTERRUPTED' : 'NOT_PRESENTABLE' });
+      if (m) { m.stale = true; m.discardReason = o.presentable ? 'INTERRUPTED' : 'NOT_PRESENTABLE'; }
       this.setState(this.conversationMode ? 'LISTENING' : 'IDLE');
       return o;
     }
+    this.lastOutcome = o;
     if (o.shouldSpeak) {
       const segs = o.segments?.length ? o.segments : segmentForSpeech(o.speechText || o.assistantText);
       segs.forEach((text, index) => {
@@ -324,6 +415,7 @@ export class ConversationalVoiceAgent {
       { sessionId: this.deps.sessionId, latestSequence: this.active?.serverSeq || item.sequence, interruptedTurnIds: this.interrupted, journeyVersion: this.active?.journeyVersion });
     if (!ok.ok) { this.emit({ type: 'DISCARDED', turnId: item.turnId, reason: ok.reason }); return; }
     if (this.playing && preempts(item, this.playing.item) && item.turnId !== this.playing.item.turnId) this.cancelPlayback('PREEMPTED');
+    if (item.kind === 'RESPONSE') { const m = this.metricOf(item.turnId); if (m) m.segmentsQueued++; }
     this.queue.push(item);
     if (!this.playing) this.playNext();
   }
@@ -332,24 +424,35 @@ export class ConversationalVoiceAgent {
     const item = this.queue.shift();
     if (!item) { this.playing = null; if (this.state === 'SPEAKING') this.setState(this.conversationMode ? 'LISTENING' : 'IDLE'); this.afterSpeech(); return; }
     if (this.interrupted.has(item.turnId) || (this.active && this.active.turnId && item.turnId !== this.active.turnId)) { this.playNext(); return; }
+    const m = item.kind === 'RESPONSE' ? this.metricOf(item.turnId) : undefined;
     if (this.textFallback || !this.deps.output.available) {
       // TTS unavailable → the text is already on screen; nothing is lost (Part 21)
+      if (m) m.textOnly++;
       this.emit({ type: 'SPOKEN', turnId: item.turnId, text: item.text, kind: item.kind });
       this.playNext();
       return;
     }
+    // Prompt 34 (§7/§16): TTS gets the validated text unchanged — only credential-shaped tokens are masked (defence in
+    // depth; validated text never contains them)
     let playback: SpeechPlayback;
-    try { playback = this.deps.output.speak(item.text, { lang: this.lang, turnId: item.turnId }); }
-    catch { this.ttsFailed('TTS_FAILED'); this.playNext(); return; }
+    const t0 = this.now();
+    try { playback = this.deps.output.speak(redactForSpeech(item.text), { lang: this.lang, turnId: item.turnId }); }
+    catch { if (m) m.failed++; this.ttsFailed('TTS_FAILED'); this.playNext(); return; }
+    if (m) {
+      if (m.timeToFirstSpeechMs === null) m.timeToFirstSpeechMs = Math.max(0, t0 - m.submittedAt);
+      if (m.ttsLatencyMs === null && playback.started) playback.started.then(() => { if (m.ttsLatencyMs === null) m.ttsLatencyMs = Math.max(0, this.now() - t0); }, () => undefined);
+    }
     this.playing = { item, playback };
     this.setState('SPEAKING');
     playback.done.then(() => {
       if (this.playing?.playback !== playback) return;       // cancelled / pre-empted meanwhile
+      if (m) m.segmentsSpoken++;
       this.emit({ type: 'SPOKEN', turnId: item.turnId, text: item.text, kind: item.kind });
       this.playing = null;
       this.playNext();
     }, () => {
       if (this.playing?.playback !== playback) return;
+      if (m) m.failed++;
       this.playing = null;
       this.ttsFailed('TTS_FAILED');
       this.playNext();
@@ -363,8 +466,51 @@ export class ConversationalVoiceAgent {
   private cancelPlayback(reason: string) {
     const p = this.playing;
     this.playing = null;
-    if (p) { try { p.playback.cancel(); } catch { /* ignore */ } this.emit({ type: 'SPEECH_CANCELLED', turnId: p.item.turnId, reason }); }
+    if (p) {
+      try { p.playback.cancel(); } catch { /* ignore */ }
+      const m = reason === 'RETRY' ? undefined : this.metricOf(p.item.turnId);
+      if (m) { m.cancelled++; if (reason === 'STALE') m.stale = true; else m.interrupted = true; }
+      this.emit({ type: 'SPEECH_CANCELLED', turnId: p.item.turnId, reason });
+    }
   }
+
+  // ------------------------------------------------------------------ Prompt 34: audio failure recovery + metrics
+
+  /**
+   * §15 — "retry speech" after a TTS / playback failure: re-speaks the SAME validated outcome of the CURRENT turn.
+   * No new agent turn, no LLM call, no tool call, no state change. An interrupted / superseded / stale response can
+   * never be resumed (false).
+   */
+  retrySpeech(): boolean {
+    const o = this.lastOutcome;
+    if (!o || !this.active || this.active.localSeq !== this.seq || this.active.turnId !== o.turnId) return false;
+    if (this.interrupted.has(o.turnId) || !o.presentable || !o.shouldSpeak || !this.deps.output.available) return false;
+    this.textFallback = false;
+    this.lastError = null;
+    if (this.playing?.item.turnId === o.turnId) this.cancelPlayback('RETRY');
+    this.queue = this.queue.filter(q => q.turnId !== o.turnId);
+    const m = this.metricOf(o.turnId);
+    if (m) { m.speechRetries++; m.failed = 0; m.textOnly = 0; m.segmentsQueued = 0; m.segmentsSpoken = 0; }
+    this.active.spoken = new Set();
+    const segs = o.segments?.length ? o.segments : segmentForSpeech(o.speechText || o.assistantText);
+    segs.forEach((text, index) => {
+      this.active!.spoken.add(index);
+      this.enqueue({ turnId: o.turnId, sequence: o.sequence, text, kind: 'RESPONSE', priority: o.responsePriority, index });
+    });
+    return true;
+  }
+
+  /** §17 — per-turn voice metrics (newest last). Statuses / counts / timings only — no text. */
+  voiceMetrics(): VoiceTurnMetrics[] {
+    return this.metrics.map(({ submittedAt, cancelled, failed, textOnly, ...m }) => ({
+      ...m,
+      tts: failed ? 'FAILED' : cancelled ? 'CANCELLED' : textOnly ? 'TEXT_ONLY'
+        : m.segmentsSpoken && m.segmentsSpoken >= m.segmentsQueued ? 'SPOKEN' : m.segmentsSpoken ? 'PARTIAL' : m.segmentsQueued ? 'PENDING' : 'NONE'
+    }));
+  }
+
+  private metricOf(turnId: string): MetricsRec | undefined { return [...this.metrics].reverse().find(x => x.turnId === turnId); }
+  private bindMetric(localSeq: number, turnId: string) { const m = this.metrics.find(x => x.localSeq === localSeq); if (m && !m.turnId) m.turnId = turnId; }
 
   /** Conversation mode: re-open the mic after the agent finished speaking (still the same user-started session). */
   resumeListening(): void {
@@ -388,6 +534,9 @@ export class ConversationalVoiceAgent {
     this.queue = [];
     if (this.active) {
       if (this.active.turnId) this.interrupted.add(this.active.turnId);
+      // Prompt 34 (§6): the superseded response is stale — never resumed, never re-spoken (retrySpeech refuses it)
+      const m = this.metrics.find(x => x.localSeq === this.active!.localSeq);
+      if (m && hadWork) { m.interrupted = true; m.stale = true; }
       this.seq++;                       // any in-flight outcome of the old turn is now superseded locally
       this.active = null;
     }

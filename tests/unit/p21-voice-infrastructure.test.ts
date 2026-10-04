@@ -88,7 +88,10 @@ describe('P21 G2 — STT normalization + turn detection', () => {
     const p = new VoiceTurnDetector();
     p.partialTranscript('kal jaana', 0);
     expect(p.evaluate(500).status).toBe('USER_PAUSED');               // partial only → longer wait
-    expect(p.evaluate(710).status).toBe('USER_FINISHED');
+    // Prompt 34 (§3) supersedes the P21 pin "partial-only → USER_FINISHED at 710": interim speech is NEVER submitted;
+    // the detector waits for the final and gives up honestly (INCOMPLETE, nothing submitted) at the 2000ms ceiling
+    expect(p.evaluate(710)).toMatchObject({ status: 'USER_PAUSED', reason: 'WAITING_FOR_FINAL' });
+    expect(p.evaluate(2000)).toMatchObject({ status: 'INCOMPLETE', finalTranscript: null });
     const c = new VoiceTurnDetector();
     c.finalTranscript('Kal nahi', 0);                                  // trailing "nahi" → user is mid-correction
     expect(c.evaluate(900).status).toBe('USER_PAUSED');

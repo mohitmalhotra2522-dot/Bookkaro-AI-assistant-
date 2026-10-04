@@ -30,6 +30,7 @@ import { toolProgressText, voiceAcknowledgement } from './progress-messages';
 import { actionExecutionOfRecord, acknowledgementMatchesDispatch, stripStaleActionClaims } from '../response/action-claims';
 import { normalizeTranscript } from '@shared/voice/stt-normalizer';
 import { validateAcknowledgement, type ResponsePriority } from '@shared/voice/voice-response-policy';
+import { checkTranscriptForTurn, VoiceTranscriptRejectedError, type VoiceTranscriptInfo } from '@shared/voice/transcript';
 import type { VoiceTurnOutcome } from '@shared/voice/conversational-voice-agent';
 import { pendingQuestionCode } from './pending-question';
 import { syncJourneyVersion } from '../tool-runtime/journey-version';
@@ -66,7 +67,12 @@ const LONG_WAIT_STATUS = 'Thoda time lag raha hai, bas ek moment.';
 export interface EngineTurnOptions extends Omit<ProcessTurnOptions, 'turnId' | 'observer'> {
   /** Voice barge-in: the user started speaking while TTS was playing (stop + mark INTERRUPTED). */
   interruptPrevious?: boolean;
+  /** Prompt 34 (§2): structured STT metadata of a spoken turn (status / confidence / language / timing — no text). */
+  transcript?: VoiceTranscriptInfo;
 }
+
+/** Prompt 34 (§17): provider outcomes that are failures (DATA / NO_RESULTS are real answers). */
+const VOICE_FAILURE_OUTCOMES = new Set(['TIMEOUT', 'PROVIDER_FAILURE', 'MALFORMED_DATA', 'UNSUPPORTED', 'STALE', 'REJECTED']);
 
 export class ConversationTurnEngine {
   readonly events = new TurnEventBus();
@@ -80,6 +86,12 @@ export class ConversationTurnEngine {
 
   /** Part 3 / 27 — the ONE entry point for TEXT and (normalized) STT input. */
   async processTurn(sessionId: string, userText: string, mode: 'TEXT' | 'VOICE', opts: EngineTurnOptions = {}): Promise<EngineTurnResult> {
+    // Prompt 34 (§2/§3): STT boundary — an interim / empty transcript never becomes a turn (no LLM, no tool, no state).
+    // Checked BEFORE a turn exists, so it cannot interrupt / supersede the current turn either.
+    if (mode === 'VOICE' && opts.transcript) {
+      const chk = checkTranscriptForTurn(userText, opts.transcript);
+      if (!chk.ok) throw new VoiceTranscriptRejectedError(chk.code);
+    }
     // duplicate DELIVERY of the same client message → same logical turn (no second turn, no re-execution)
     if (opts.clientMessageId) {
       const id = String(opts.clientMessageId).slice(0, 100);
@@ -383,6 +395,22 @@ export class ConversationTurnEngine {
       shouldSpeak: mode === 'VOICE' && !!response && !!speechText, interruptible: true, responsePriority: priority,
       state: sNow.bookingState, requiresTool: recs.length > 0, error: r.error ? { code: r.error.code, message: r.error.message } : null
     };
+    // Prompt 34 (§17): one safe observability record per VOICE turn — same turn identity as text; no transcript /
+    // response text, no passenger data, no secrets. TTS timings are measured by the voice layer (voiceMetrics()).
+    if (mode === 'VOICE') {
+      const diag: any = r.turnLog.diagnostics || {};
+      const toolFailure = ((diag.tools || []) as Array<{ outcome?: string }>).map(t => String(t.outcome || '')).find(o => VOICE_FAILURE_OUTCOMES.has(o)) || null;
+      r.turnLog.voiceTurn = {
+        turnId: turn.turnId, sessionId: sid, mode: 'VOICE', inputSource: opts.transcript ? 'STT' : 'VOICE_CLIENT',
+        transcriptStatus: opts.transcript?.status ?? null, transcriptConfidence: opts.transcript?.confidence ?? null,
+        languageHint: opts.transcript?.languageHint ?? null, sttDurationMs: opts.transcript?.sttDurationMs ?? null,
+        llmLatencyMs: turn.llmLatencyMs, llmCallCount: typeof diag.llmCalls === 'number' ? diag.llmCalls : null,
+        toolCount: turn.toolCount, providerCalls: turn.toolResults.length,
+        bargeIn: !!opts.interruptPrevious, interrupted: turn.interrupted, stale: turn.superseded, presentation: turn.presentation,
+        finalStatus: turn.status, failureCategory: toolFailure ?? (turn.superseded ? 'SUPERSEDED' : null) ?? (r.error?.code ?? null),
+        speechSegments: voice.segments.length, speechSource: r.speech?.source ?? null, totalTurnLatencyMs: turn.totalTurnLatencyMs
+      };
+    }
     const publicTurn = this.publicTurn(turn);
     return {
       ...r,

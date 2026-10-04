@@ -44,6 +44,7 @@ export class MockStreamingTTS implements StreamingTTSProvider {
     if (this.autoFinish) queueMicrotask(() => this.finish());
     return {
       done,
+      started: Promise.resolve(),
       cancel: () => {
         if (this.spoken[idx].status === 'PLAYING') this.spoken[idx].status = 'CANCELLED';
         this.pending = this.pending.filter(p => p.idx !== idx);

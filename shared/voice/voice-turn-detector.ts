@@ -13,9 +13,12 @@
  *   trailing continuation ("Actually 12014 nahi…", "aur", "matlab") → longer (≈ 1400 ms),
  *   hard ceiling (maxSilenceMs) so a stuck recogniser can never hang the conversation.
  * Partial speech never produces a turn: only USER_FINISHED does (Part 11 — no irreversible action from partials).
+ * Prompt 34 (§3): USER_FINISHED requires a FINAL transcript covering everything heard. An interim-only (or
+ * interim-tail) utterance keeps waiting for the recogniser's final; if none arrives within the ceiling the utterance
+ * is INCOMPLETE — it is dropped (the user repeats or types), never submitted half-heard and never completed by guessing.
  * Pure + clock-injected → deterministic tests.
  */
-export type TurnDetectorStatus = 'IDLE' | 'USER_SPEAKING' | 'USER_PAUSED' | 'USER_FINISHED';
+export type TurnDetectorStatus = 'IDLE' | 'USER_SPEAKING' | 'USER_PAUSED' | 'USER_FINISHED' | 'INCOMPLETE';
 
 export interface TurnDetectorConfig {
   /** Silence after a FINAL STT result on a complete-sounding utterance. */
@@ -45,7 +48,7 @@ export interface TurnDetectorDecision {
   finalTranscript: string | null;
   /** Silence threshold currently in force (observability). */
   thresholdMs: number;
-  reason: 'NO_SPEECH' | 'SPEAKING' | 'WAITING_FOR_SILENCE' | 'FINAL_AND_SILENT' | 'SILENCE' | 'MAX_SILENCE';
+  reason: 'NO_SPEECH' | 'SPEAKING' | 'WAITING_FOR_SILENCE' | 'WAITING_FOR_FINAL' | 'FINAL_AND_SILENT' | 'SILENCE' | 'MAX_SILENCE' | 'NO_FINAL_TRANSCRIPT';
   /** The finished utterance interrupted the agent (barge-in). */
   bargeIn: boolean;
 }
@@ -106,10 +109,18 @@ export class VoiceTurnDetector {
     if (this.speaking) {
       // a recogniser that never reports speech-end is bounded by the ceiling
       if (now - this.lastActivity >= this.cfg.maxSilenceMs && this.finalSeen) return this.finish(transcript, threshold, 'MAX_SILENCE');
+      // Prompt 34 (§3): …and with interim text only, the ceiling ends it honestly (INCOMPLETE — never submitted)
+      if (now - this.lastActivity >= this.cfg.maxSilenceMs) return { ...base, status: 'INCOMPLETE', thresholdMs: this.cfg.maxSilenceMs, reason: 'NO_FINAL_TRANSCRIPT' };
       return { ...base, status: 'USER_SPEAKING', thresholdMs: threshold, reason: 'SPEAKING' };
     }
     const silent = now - this.lastActivity;
-    if (silent >= threshold) return this.finish(transcript, threshold, this.finalSeen ? 'FINAL_AND_SILENT' : 'SILENCE');
+    // Prompt 34 (§3): no final for (part of) what was heard → never submit interim speech; wait for the final, and
+    // give up honestly at the ceiling (INCOMPLETE — nothing is submitted, nothing is invented)
+    if (!this.finalSeen) {
+      if (silent >= this.cfg.maxSilenceMs) return { ...base, status: 'INCOMPLETE', thresholdMs: this.cfg.maxSilenceMs, reason: 'NO_FINAL_TRANSCRIPT' };
+      return { ...base, status: 'USER_PAUSED', thresholdMs: threshold, reason: 'WAITING_FOR_FINAL' };
+    }
+    if (silent >= threshold) return this.finish(transcript, threshold, 'FINAL_AND_SILENT');
     return { ...base, status: 'USER_PAUSED', thresholdMs: threshold, reason: 'WAITING_FOR_SILENCE' };
   }
 

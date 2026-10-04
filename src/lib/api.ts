@@ -113,7 +113,7 @@ export async function sendMessage(
   sessionId: string,
   text: string,
   mode: 'TEXT' | 'VOICE' = 'TEXT',
-  extra: { searchResultsVersion?: number; expectedSessionVersion?: number; reviewVersion?: number; clientMessageId?: string; bargeIn?: boolean } = {}
+  extra: { searchResultsVersion?: number; expectedSessionVersion?: number; reviewVersion?: number; clientMessageId?: string; bargeIn?: boolean; transcript?: import('@shared/voice/transcript').VoiceTranscriptInfo } = {}
 ): Promise<ChatResponse> {
   // Prompt 17: one id per user message — a network retry of the SAME message is replayed server-side,
   // a new message (even an identical "abhi dobara check karo") gets a new id and fresh provider calls.

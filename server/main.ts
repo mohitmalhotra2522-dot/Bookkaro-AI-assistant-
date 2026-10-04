@@ -21,6 +21,7 @@ import { parseBookingProviderConfig } from './booking/provider/booking-provider-
 import { createProductionBookingProviderRegistry } from './booking/provider/booking-provider-registry';
 import { bookingExecutionView } from './booking/provider/booking-provider-execution-service';
 import { ConversationTurnEngine } from './ai/turn-engine/conversation-turn-engine';
+import { sanitizeTranscriptInfo, VoiceTranscriptRejectedError } from '@shared/voice/transcript';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -70,6 +71,9 @@ await server.register(cors, { origin: true });
 server.post('/api/chat', async (request, reply) => {
   const body = request.body as any;
   const { text, mode, expectedSessionVersion, searchResultsVersion, reviewVersion, clientMessageId, bargeIn } = body || {};
+  // Prompt 34 (§2): structured STT metadata (untrusted → sanitized; never free text); only meaningful for VOICE
+  const transcript = mode === 'VOICE' ? sanitizeTranscriptInfo(body?.transcript) : undefined;
+  if (mode === 'VOICE' && body?.transcript !== undefined && !transcript) return reply.status(400).send({ error: 'invalid transcript metadata' });
   let { sessionId } = body || {};
   if (!text || typeof text !== 'string') return reply.status(400).send({ error: 'text required' });
   if (text.length > 2000) return reply.status(413).send({ error: 'text too long' });
@@ -77,14 +81,20 @@ server.post('/api/chat', async (request, reply) => {
     sessionId = stateManager.createSession().sessionId;
   }
   // Prompt 18: TEXT and STT transcripts share the SAME turn engine → orchestrator → runtime pipeline
-  const result = await turnEngine.processTurn(sessionId, text, mode === 'VOICE' ? 'VOICE' : 'TEXT', {
+  // Prompt 34 (§3): an interim / empty transcript is refused BEFORE a turn exists (422 — no LLM, no tool, no state)
+  let result;
+  try { result = await turnEngine.processTurn(sessionId, text, mode === 'VOICE' ? 'VOICE' : 'TEXT', {
     interruptPrevious: bargeIn === true,
+    ...(transcript ? { transcript } : {}),
     expectedSessionVersion: typeof expectedSessionVersion === 'number' ? expectedSessionVersion : undefined,
     searchResultsVersion: typeof searchResultsVersion === 'number' ? searchResultsVersion : undefined,
     reviewVersion: typeof reviewVersion === 'number' ? reviewVersion : undefined,
     // Prompt 17: duplicate delivery (retry / reconnect / double submit) replays the turn — never a cache of railway data
     clientMessageId: typeof clientMessageId === 'string' && /^[A-Za-z0-9_-]{6,100}$/.test(clientMessageId) ? clientMessageId : undefined
-  });
+  }); } catch (e) {
+    if (e instanceof VoiceTranscriptRejectedError) return reply.status(422).send({ sessionId, error: e.code, message: e.message });
+    throw e;
+  }
   const ctx = result.context;
   if (result.error?.code === 'SESSION_VERSION_CONFLICT') reply.status(409);
   return reply.send({

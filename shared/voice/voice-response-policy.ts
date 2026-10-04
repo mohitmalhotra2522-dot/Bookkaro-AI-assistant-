@@ -100,3 +100,16 @@ export function isLikelyEcho(heard: string, speaking: string): boolean {
   const overlap = h.filter(w => spoken.has(w)).length / h.length;
   return overlap >= 0.7;
 }
+
+// ------------------------------------------------------------------ TTS boundary secret mask (Prompt 34 §16)
+
+/** API-key / bearer-token shaped strings (provider secrets) — never handed to a TTS engine. */
+const SECRET_TOKEN = /\b(?:sk|pk|rk|nvapi|key)-[A-Za-z0-9_-]{8,}\b|\bBearer\s+[A-Za-z0-9._~+/-]{10,}=*/gi;
+
+/**
+ * Defence in depth at the TTS boundary: the text is already the final VALIDATED reply (identical facts); this only
+ * masks credential-shaped tokens so a secret can never become audio. Everything else is passed through unchanged.
+ */
+export function redactForSpeech(text: string): string {
+  return String(text || '').replace(SECRET_TOKEN, '[redacted]');
+}

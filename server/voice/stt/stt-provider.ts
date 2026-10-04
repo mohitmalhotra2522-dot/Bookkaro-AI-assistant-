@@ -11,6 +11,8 @@ export interface STTResult {
   confidence?: number;
   isFinal: boolean;
   error?: string;
+  /** Prompt 34 (§2): BCP-47 language hint when the recogniser reports one. */
+  language?: string;
 }
 
 export interface STTProvider {
@@ -32,12 +34,15 @@ export class BrowserSTTProvider implements STTProvider {
 /** One scripted STT step for deterministic tests / dev fixtures. */
 export type MockSTTStep =
   | { kind: 'speechStart' } | { kind: 'speechEnd' }
-  | { kind: 'partial'; text: string } | { kind: 'final'; text: string } | { kind: 'error'; code: string };
+  | { kind: 'partial'; text: string; confidence?: number; language?: string } | { kind: 'final'; text: string; confidence?: number; language?: string }
+  | { kind: 'error'; code: string };
 
 /**
  * MockStreamingSTT — deterministic streaming recogniser (no microphone). Tests push steps; the agent receives them
  * exactly like Web Speech callbacks. `startCount` proves the mic is only opened by explicit agent calls.
  */
+const meta = (st: { confidence?: number; language?: string }) => (st.confidence !== undefined || st.language ? { confidence: st.confidence, language: st.language } : undefined);
+
 export class MockStreamingSTT implements StreamingSTTProvider, SpeechInput {
   readonly providerId = 'mock-streaming-stt';
   readonly streaming = true as const;
@@ -55,8 +60,8 @@ export class MockStreamingSTT implements StreamingSTTProvider, SpeechInput {
       if (!this.active || !this.h) return;
       if (st.kind === 'speechStart') this.h.onSpeechStart();
       else if (st.kind === 'speechEnd') this.h.onSpeechEnd();
-      else if (st.kind === 'partial') this.h.onPartial(st.text);
-      else if (st.kind === 'final') this.h.onFinal(st.text);
+      else if (st.kind === 'partial') this.h.onPartial(st.text, meta(st));
+      else if (st.kind === 'final') this.h.onFinal(st.text, meta(st));
       else this.h.onError(st.code);
     }
   }

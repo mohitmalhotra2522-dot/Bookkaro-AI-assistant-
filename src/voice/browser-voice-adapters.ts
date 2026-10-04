@@ -32,7 +32,9 @@ export class BrowserSpeechInput implements SpeechInput {
         const r = event.results[i];
         const t = String(r[0]?.transcript || '').trim();
         if (!t) continue;
-        if (r.isFinal) h.onFinal(t); else h.onPartial(t);
+        // Prompt 34 (§2): recogniser metadata — confidence (0 = not reported) + language of this recognition session
+        const meta = { confidence: typeof r[0]?.confidence === 'number' ? r[0].confidence : undefined, language: rec.lang };
+        if (r.isFinal) h.onFinal(t, meta); else h.onPartial(t, meta);
       }
     };
     rec.onerror = (e: any) => {
@@ -63,15 +65,18 @@ export class BrowserSpeechOutput implements SpeechOutput {
     let settle: { res: () => void; rej: (e: any) => void } | null = null;
     const done = new Promise<void>((res, rej) => { settle = { res, rej }; });
     done.catch(() => undefined);
+    let markStarted: () => void = () => undefined;
+    const started = new Promise<void>((res) => { markStarted = res; });
     let cancelled = false;
     try {
       const u = new SpeechSynthesisUtterance(text);
       u.lang = o.lang || 'hi-IN';
       u.rate = 1.05;
-      u.onend = () => settle?.res();
+      u.onstart = () => markStarted();
+      u.onend = () => { markStarted(); settle?.res(); };
       u.onerror = (e: any) => { if (cancelled || e?.error === 'interrupted' || e?.error === 'canceled') settle?.res(); else settle?.rej(new Error('TTS_FAILED')); };
       window.speechSynthesis.speak(u);
     } catch { settle!.rej(new Error('TTS_FAILED')); }
-    return { done, cancel: () => { cancelled = true; try { window.speechSynthesis.cancel(); } catch { /* ignore */ } settle?.res(); } };
+    return { done, started, cancel: () => { cancelled = true; try { window.speechSynthesis.cancel(); } catch { /* ignore */ } settle?.res(); } };
   }
 }

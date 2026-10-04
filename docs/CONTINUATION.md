@@ -56,6 +56,11 @@ Env:
 | Search commit | `server/railway/orchestrator/search-orchestrator.ts` |
 | Booking prep / review / confirmation / execution boundary | `server/booking/` (`booking-preparation-service.ts`, `handoff/confirmation-policy.ts`, `execution/`) |
 | Authority split + audit | `docs/AGENT_AUTHORITY.md` |
+| Voice coordinator (turn detection, barge-in, stale, TTS queue, retrySpeech, voiceMetrics) (P21/P34) | `shared/voice/conversational-voice-agent.ts` |
+| Structured STT transcript boundary (P34) | `shared/voice/transcript.ts` (`checkTranscriptForTurn`, `sanitizeTranscriptInfo`, `VoiceTranscriptRejectedError`) |
+| End-of-turn detection (final + silence; INCOMPLETE, never submits interim) | `shared/voice/voice-turn-detector.ts` |
+| STT / TTS interfaces + deterministic mocks | `server/voice/stt/stt-provider.ts`, `server/voice/tts/tts-provider.ts`; browser adapters `src/voice/browser-voice-adapters.ts` |
+| Voice → engine wiring (same agent) | `server/voice/server-voice-agent.ts` (`createEngineVoiceAgent`, `engineTurnProcessor`) |
 
 ## 4. Milestone history
 
@@ -84,7 +89,8 @@ Env:
 | 30 | `36c0469` | contextual reference resolution + agent memory |
 | 31 | — | **no P31 commit exists in this workspace** (P32 was built on P30) |
 | 32 | `397ce32` | full LLM agent authority + honest provider outcomes |
-| 33 | see `git log` | AI-driven booking preparation + review + secure handoff readiness (this milestone) — see `docs/AGENT_AUTHORITY.md` §7 |
+| 33 | `6f71466`, `74063e1` | AI-driven booking preparation + review + secure handoff readiness — see `docs/AGENT_AUTHORITY.md` §7 |
+| 34 | see `git log` | voice production hardening (this milestone): structured STT boundary, no interim turns, TTS = final validated text only, barge-in/stale, TTS retry, voice observability — see `docs/AGENT_AUTHORITY.md` §8 |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -111,6 +117,7 @@ Env:
 - **G2 (booking domain / security, unit):** `tests/unit/p9-passenger-readiness`, `p10-execution-gateway`, `p11-handoff-session`, `p12-booking-provider`, `p13-execution-lifecycle`, `p15-lifecycle-actions`, `p19-passenger-collection`, `p20-passenger-workflow`, `p23-real-llm-adapter`, `p32-agent-authority`, `p33-booking-preparation`.
 - **G3 (NL / booking e2e):** `tests/integration/p8-booking-engine`, `p9-booking-preparation`, `p10-confirmation-boundary`, `p11-handoff-e2e`, `p12-provider-e2e`, `p13-lifecycle-e2e`, `p15-lifecycle-actions-e2e`, `p19-booking-preparation-e2e`, `p20-booking-review-e2e`, `p23-agentic-e2e`, `p32-agent-authority-e2e`, `p33-booking-e2e`.
 - (P32 definition, for railway-information work: G2 = p17 + p25–p30 + p32 unit; G3 = p17 + p25–p30 + p32 e2e.)
+- (P34 definition, for voice work: G2 = unit p34-voice-hardening, p21-voice-infrastructure, p22-architecture-hardening, p18-turn-engine, p25, p26, p29, p33; G3 = integration p34-voice-e2e, p21-natural-voice-e2e, p22-architecture-e2e, p23-agentic-e2e, p29-action-truth-e2e, p32-agent-authority-e2e, p33-booking-e2e.)
 
 Known pre-existing failures in older suites (they also fail at earlier HEADs; report, don't "fix" blindly):
 - p19 [13]/[14]/[20], p16 [2]/[6], p8 [19][H] + closed-tool-set, p17 e2e [14], p18 [11];
@@ -118,6 +125,10 @@ Known pre-existing failures in older suites (they also fail at earlier HEADs; re
 - found during P33 (verified failing at `397ce32` too): unit p12 [13] (pins 5 REGISTERED_TOOLS; CHECK_PNR / TRACK_TRAIN exist since P14), integration p8 [24] (expects the old "Pehle train select kar lete hain, phir fare…" wording).
 
 P33 final check (resolved): G3 p33 [2] now observes the FIRST decision request of the turn at the turn boundary (`sayObserved`: request index captured before the turn; asserted pre-application) for both the piecewise and the one-message count + details cases; the P33 G3 file passed 23/23.
+
+Found during P34 (verified failing at `74063e1`, before any P34 code): unit p21 [11] (expects reason `BOOKING_SUCCESS_CLAIM`, P33 renamed booking claims), unit p22 [9], integration p21 [2] / [12] / [17] and p22 [K+L] (P33 review/date wording: "Haan ya nahi boliye." suffix, "6 Oct" instead of "parso").
+
+**Known open gap (pre-existing, documented by P34 G3 [P] and the malformed-fare case of [Q/R/S]; reproduced at HEAD `74063e1` in TEXT mode):** a native agent's own ₹ amount with NO GET_FARE / verified review (or after GET_FARE = MALFORMED_DATA) survives. In native mode the agent text becomes `responseMessage` = composer `backendReply`, and `natural-response-composer.ts` treats any ₹ in `backendReply` as known (`fareKnown`, `fareNums`); the deterministic fallback is derived from that same message. Fix belongs in the orchestrator's native-reply construction (P25/P32 area — out of P34's additive voice scope). Not fixed in P34.
 
 ### Pinned invariants (must not break)
 
@@ -131,6 +142,11 @@ P33 final check (resolved): G3 p33 [2] now observes the FIRST decision request o
 - Entity, action, reference and outcome rejections go to `diagnostics.*`, never into the orchestrator's `extra.rejectedClaims`.
 - Never add fields to `provenance` entries. Keep new runtime counters out of `RailwayToolRuntime.validation`.
 - Tool-limit text: "Request bahut lambi ho gayi — thoda simple karke poochiye." LLM_UNAVAILABLE text: "Maaf kijiye, main abhi jawab nahi de paa raha. Aapki booking details safe hain — thodi der mein dobara boliye."
+
+- P34 voice: only a FINAL, non-empty transcript becomes a turn (`checkTranscriptForTurn`; engine throws `VoiceTranscriptRejectedError` BEFORE a turn exists; `/api/chat` → 422 `TRANSCRIPT_NOT_FINAL|TRANSCRIPT_EMPTY`). The detector never returns USER_FINISHED without a final (interim-only → USER_PAUSED `WAITING_FOR_FINAL`, then `INCOMPLETE` at `maxSilenceMs` 2000, nothing submitted). Low reported confidence (< `MIN_FINAL_CONFIDENCE` 0.35, 0 = unknown) = uncertain → treated as interim.
+- P34 §7: the composer emits `onSegment` ONLY for the final validated segments, once (`emitFinal`, declared before `fallback`); never streams an LLM sentence before all guarantees ran.
+- P34: TTS text passes `redactForSpeech` (masks `sk-|pk-|rk-|nvapi-|key-` + 8 chars, Bearer tokens). `retrySpeech()` re-speaks the CURRENT turn's validated outcome only (no turn / LLM / tool); refused for interrupted / stale turns. `snapshot().textFallback` = TTS output fallback; STT failure = `TEXT_FALLBACK` event + `lastError`. Do NOT add `snapshot()` keys (pinned by p21 e2e).
+- P34 observability: `turnLog.voiceTurn` (VOICE only; statuses / counts / timings, no text) and client `agent.voiceMetrics()` (≤ 20 records, no text).
 
 ### Mock data (today-relative; ASR → NDLS)
 
@@ -146,7 +162,7 @@ P33 final check (resolved): G3 p33 [2] now observes the FIRST decision request o
 - Native tool calling needs a tool message for every `tool_call_id`. Muse takes ~12–40 s per turn (timeout ≤ 60 s).
 - Use `rt.toolExecutions` / `turnLog.diagnostics.*` in tests. Voice tests need `agent.listen()` first.
 
-## 8. Next-step template (for P34+)
+## 8. Next-step template (for P35+)
 
 1. `git remote -v` (stop if it shows RailBook) → `git log --oneline | head` → `npm ci`.
 2. Read this file + `docs/AGENT_AUTHORITY.md`.

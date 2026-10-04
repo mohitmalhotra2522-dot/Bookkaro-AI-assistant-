@@ -146,3 +146,28 @@ Statuses only — no fare amounts / availability values (they come from this tur
 
 **Observability:** `turnLog.bookingPreparation.audit` = `{trainNumber, travelClass, journeyDate, availabilityRefresh, fareRefresh, reviewCreatedAt, confirmedAt, confirmationState, handoffSessionId, handoffState, invalidationReason}` plus the existing `sessionVersion`, `reviewVersion`, `confirmationVersion`, `handoffId`, `handoffStatus`. No passenger names, no secrets.
 
+## 8. Voice production hardening (Prompt 34)
+
+Voice is an input/output modality of the SAME agent — not a second brain:
+`speech → STT transcript → ConversationTurnEngine.processTurn(…, 'VOICE') → the same LLM agent / tools / validation → final validated text → TTS`.
+There is no voice intent router, command parser, keyword routing, voice state or voice-only fact.
+
+| Concern | Owner | Where |
+|---|---|---|
+| Meaning, tools, references, wording | LLM agent (unchanged) | orchestrator / runtime |
+| Transcript text, interim/final, confidence, language hint, timing | STT (information only — never intent, tools or state) | `shared/voice/transcript.ts`, STT adapters |
+| "Is the user done?" | detector: STT final + silence (adaptive); interim-only never submitted (`INCOMPLETE` at 2 s) | `voice-turn-detector.ts` |
+| Interim / empty transcript at the server | backend gate BEFORE a turn exists (422) | engine `processTurn`, `/api/chat` |
+| What is spoken | ONLY the final validated text (same as the UI); composer emits final segments once; credential-shaped tokens masked | composer `emitFinal`, `redactForSpeech` |
+| Acknowledgement | only after a tool really started (P29 `TOOL_PROGRESS` on `TOOL_STARTED`) | turn engine |
+| Barge-in | stop TTS on the user's partial (Conversation Mode only); old turn stale, never resumed; new speech = new turn; never a booking cancellation | voice agent `interrupt()`, engine supersede |
+| Stale protection | turn identity (engine sequence + agent local seq); superseded results DISCARDED, never spoken, never overwrite focus | engine + agent |
+| TTS / playback failure | text stays; no new turn / LLM / tool; `retrySpeech()` re-speaks the same validated outcome | voice agent |
+| STT failure | no transcript invented, no turn; `TEXT_FALLBACK`; typing always works | voice agent |
+| Conversation Mode | opt-in, visible; tap-to-talk default; mic opened only by user action; one tap stops; no background listening | voice agent |
+| Observability | `turnLog.voiceTurn` (server) + `voiceMetrics()` (client): ids, mode, STT duration, transcript status/confidence/language, LLM latency + calls, tools, TTS latency, interruption, stale, final status, failure category — no text, no secrets | engine / agent |
+
+Mocks (`MockStreamingSTT`, `MockStreamingTTS`) are deterministic test adapters and are never presented as real audio.
+Real STT/TTS plug in behind `SpeechInput` / `SpeechOutput` (browser Web Speech adapters exist; no external voice
+provider is hard-coded). Booking boundary unchanged: no booking, payment, OTP, CAPTCHA, IRCTC login or submission.
+

@@ -249,9 +249,12 @@ export class NaturalResponseComposer {
     // Part 17 — same style as the user; short / name-only replies keep the conversation's earlier style
     const language = detectLanguageStyle(i.userText, i.history.filter(h => h.role === 'user').map(h => h.content));
     const s = i.session;
+    // Prompt 34 (§7): ONLY the final validated segments reach TTS — emitted once, after every guard (declared before
+    // `fallback`, which can run before any LLM wording exists)
+    const emitFinal = (segs: string[]) => { if (i.onSegment) segs.forEach((t, k) => i.onSegment!(k, t)); };
     const fallback = (reason: string, rejected: NaturalComposeResult['rejected'] = []): NaturalComposeResult => {
       const segments = segmentForSpeech(i.deterministicSpeech);
-      segments.forEach((t, k) => i.onSegment?.(k, t));
+      emitFinal(segments);
       return { text: i.deterministicSpeech, segments, source: 'FALLBACK', language, rejected, fallbackReason: reason, streamed: segments.length };
     };
     if (!i.deterministicSpeech) return { text: '', segments: [], source: 'FALLBACK', language, rejected: [], fallbackReason: 'EMPTY', streamed: 0 };
@@ -297,7 +300,9 @@ export class NaturalResponseComposer {
     const reviewTurn = s.bookingState === BookingState.AWAITING_CONFIRMATION;
     const reviewBlocked = (i.error as any)?.code === 'BOOKING_NOT_READY' && ((i.error as any)?.details?.blockers || []).includes('REQUIRED_TOOL_DATA_MISSING');
     const newReviewTurn = reviewTurn && !!(s.review as any)?.valid && (s.review as any)?.reviewVersion !== i.reviewVersionBefore;
-    const streamable = !!i.onSegment && !confirmationTurn && !reviewTurn;
+    // Prompt 34 (§7): TTS receives ONLY the final validated text. Sentences are judged as they arrive, but nothing is
+    // handed to speech until every guarantee below has passed (or the deterministic fallback was chosen) — never
+    // "LLM → TTS → later validation". Segments are emitted exactly once, from the final result.
     const pendingType = String(s.pendingInteraction?.type || '');
     const question = !i.pendingQuestion ? null
       : language === 'ENGLISH' && SHORT_Q_EN[pendingType] ? SHORT_Q_EN[pendingType]
@@ -342,7 +347,6 @@ export class NaturalResponseComposer {
     const actionDiag: ActionClaimDiagnostic[] = [];
     const refDiag: ReferenceClaimDiagnostic[] = [];
     const outcomeDiag: OutcomeClaimDiagnostic[] = [];
-    let streamed = 0;
     const len = () => accepted.join(' ').length;
     const hasQ = () => accepted.some(a => a.includes('?')) || (!!accepted.length && ASKS_RE.test(accepted[accepted.length - 1]));
 
@@ -502,7 +506,6 @@ export class NaturalResponseComposer {
           verificationStatus: p.claimType === 'USER_PROVIDED' ? 'USER_PROVIDED' : (p.claimType === 'RAILWAY_LIVE_FACT' || p.claimType === 'TOOL_DERIVED_FACT') ? 'VERIFIED' : 'NOT_REQUIRED',
           claimBindingStatus: binding.status });
       }
-      if (streamable) { i.onSegment!(streamed, t); streamed++; }
     };
 
     // ---- generate (streaming deltas → complete sentences judged as they arrive) ----
@@ -553,11 +556,10 @@ export class NaturalResponseComposer {
     if (reviewBlocked && !FAILURE_ACK_RE.test(accepted.join(' '))) return fallback('REVIEW_BLOCK_REASON_MISSING', rejected);
     if (question && !hasQ()) {
       accepted.push(question);
-      if (streamable) { i.onSegment!(streamed, question); streamed++; }
     }
     const segments = [...accepted];
-    if (!streamable) segments.forEach((t, k) => i.onSegment?.(k, t));
-    return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),
+    emitFinal(segments);
+    return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),
       provenance, claimProvenance, repaired, wordingCall: !agentText,
       claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag, outcomeClaims: outcomeDiag };
   }
