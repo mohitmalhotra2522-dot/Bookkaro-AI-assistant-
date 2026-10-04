@@ -824,7 +824,7 @@ export class ConversationAgentOrchestrator {
       userInput: pii(a.userText), normalizedInput: pii(a.normalizedInput), inputMode: a.mode,
       intent: a.decision?.intent, action: a.decision?.action, confidence: a.decision?.confidence,
       detectedChanges: a.changes,
-      toolCalls: steps.map(st => ({ name: st.toolCall.name, arguments: maskPnrDeep(redact(st.toolCall.arguments)) })),
+      toolCalls: steps.map(st => ({ name: st.toolCall.name, ...(st.toolCall.provider ? { provider: st.toolCall.provider } : {}), ...(st.toolCall.toolName && st.toolCall.toolName !== st.toolCall.name ? { providerTool: st.toolCall.toolName } : {}), arguments: maskPnrDeep(redact(st.toolCall.arguments)) })),
       toolExecuted: steps.map(st => ({ name: st.result.toolName, ok: st.result.success, latencyMs: st.result.latencyMs, provider: st.result.provider })),
       toolResults,
       toolResultStatus: steps.length === 0 ? 'none' : steps.every(st => st.result.success) ? 'ok' : 'error',

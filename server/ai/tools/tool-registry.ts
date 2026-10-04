@@ -35,6 +35,12 @@ export interface ToolCall {
   callId: string;
   name: RegisteredToolName;
   arguments: Record<string, any>;
+  /** P37: provider connector the LLM selected via a provider-level tool (`railcore_search` → 'railcore'). */
+  provider?: string;
+  /** P37: the provider-level tool name exactly as the LLM called it. */
+  toolName?: string;
+  /** P37: the LLM called a provider tool with no implemented / exposed integration (→ PROVIDER_NOT_IMPLEMENTED). */
+  providerNotImplemented?: string;
 }
 
 export interface ToolResult {

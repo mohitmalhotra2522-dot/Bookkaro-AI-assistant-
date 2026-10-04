@@ -29,6 +29,7 @@ import { v4 as uuidv4 } from '../orchestrator/utils';
 import type { ToolExecutionPlanNode } from '@shared/turn-engine';
 import { DEFAULT_TOOL_RETRY_POLICY, shouldRetry, type ToolRetryPolicy } from './tool-retry-policy';
 import { buildToolExecutionPlan, unsatisfiedDependency } from './tool-execution-plan';
+import { inProviderScope, providerToolCatalog } from '../tools/provider-tools';
 
 /** Prompt 18: lifecycle observer (turn engine streaming events). Never receives raw arguments. */
 export interface ToolObserver {
@@ -36,10 +37,12 @@ export interface ToolObserver {
   onPlan?: (nodes: readonly ToolExecutionPlanNode[]) => void;
 }
 
-export const MAX_TOOL_CALLS_PER_TURN = 8;
+/** P37: configurable budgets (defaults unchanged). Invalid / non-positive env values fall back to the default. */
+const envInt = (k: string, d: number) => { const n = Number(process.env[k]); return Number.isInteger(n) && n > 0 && n <= 50 ? n : d; };
+export const MAX_TOOL_CALLS_PER_TURN = envInt('MAX_TOOL_CALLS_PER_TURN', 8);
 /** Prompt 27: the per-turn tool-step budget of a multi-step chain — the SAME budget (one constant, never silently raised). */
 export const MAX_TOOL_STEPS_PER_TURN = MAX_TOOL_CALLS_PER_TURN;
-export const MAX_TOOL_ROUNDS_PER_TURN = 5;
+export const MAX_TOOL_ROUNDS_PER_TURN = envInt('MAX_TOOL_ROUNDS_PER_TURN', 5);
 /** Same normalized call requested this many times in one turn → TOOL_LOOP_DETECTED. */
 export const TOOL_LOOP_THRESHOLD = 3;
 export const DEFAULT_TOOL_TIMEOUT_MS = Number(process.env.RAILWAY_TOOL_TIMEOUT_MS) > 0 ? Number(process.env.RAILWAY_TOOL_TIMEOUT_MS) : 9000;
@@ -169,11 +172,13 @@ export class ToolTurn {
 
   /** Loop signature on the RAW request (before dedup): same tool + same args + same selection context. */
   loopSignature(tc: ToolCall): string {
-    if (tc?.name === 'SEARCH_TRAINS') return `SEARCH_TRAINS|${stableJson(tc?.arguments || {})}`;
+    // P37: the provider is part of the request — railcore_search and railradar_search are different calls
+    const pv = tc?.provider ? `${tc.provider}:` : '';
+    if (tc?.name === 'SEARCH_TRAINS') return `${pv}SEARCH_TRAINS|${stableJson(tc?.arguments || {})}`;
     const s = this.ctx.getSession();
     // Prompt 27: + result-list version and booking state — after a fresh search (e.g. a date correction re-derived the
     // same train) a call that was invalid on the OLD state is a genuinely new call, not a blind repeat
-    return `${tc?.name}|${stableJson(tc?.arguments || {})}|${selectionKeyOf(s)}|${journeyKeyOf(s)}|${s.searchResultsVersion ?? ''}|${s.bookingState}`;
+    return `${pv}${tc?.name}|${stableJson(tc?.arguments || {})}|${selectionKeyOf(s)}|${journeyKeyOf(s)}|${s.searchResultsVersion ?? ''}|${s.bookingState}`;
   }
 
   private newRecord(tc: ToolCall): ToolExecutionRecord {
@@ -184,7 +189,9 @@ export class ToolTurn {
       argumentsHash: hashArguments(String(tc?.name ?? ''), tc?.arguments || {}), argumentsSummary: safeSummary(tc?.arguments || {}),
       provider: null, requestedAt: new Date().toISOString(), startedAt: null, completedAt: null,
       status: 'REQUESTED', fresh: false, latencyMs: null, resultCount: null, rejectionReason: null, parallelGroup: null,
-      attempt: 1, retryOf: null, planNodeId: null
+      attempt: 1, retryOf: null, planNodeId: null,
+      // P37: the provider tool the LLM named (railcore_search …) + the provider it selected — observability only
+      ...(tc?.toolName && tc.toolName !== tc.name ? { providerTool: tc.toolName } : {}), ...(tc?.provider ? { provider: tc.provider } : {})
     };
     this.records.push(rec);
     this.notify(rec, 'REQUESTED');
@@ -209,6 +216,16 @@ export class ToolTurn {
   prepare(tc: ToolCall, fromLLM: boolean, admitted = false): PreparedCall {
     if (fromLLM && !admitted) { const a = this.admit(tc); if (a) return a; }
     const rec = this.newRecord(tc);
+    // P37 gateway: a provider tool without an implemented / exposed integration never runs (no fake provider), and in
+    // provider-tool mode a railway call must name its provider — the backend never chooses one for the LLM.
+    if (tc?.providerNotImplemented) {
+      return this.reject(tc, rec, 'PROVIDER_NOT_IMPLEMENTED', `"${String(tc.toolName || tc.name).slice(0, 40)}" is not available: ${tc.providerNotImplemented} has no implemented integration here. Use one of the provider tools you were given.`,
+        false, { provider: tc.providerNotImplemented, available: providerToolCatalog.list().map(c => c.id) }, 'TOOL_NOT_IMPLEMENTED');
+    }
+    if (fromLLM && providerToolCatalog.enabled() && !tc?.provider && providerToolCatalog.toolName('x', tc?.name as any)) {
+      return this.reject(tc, rec, 'PROVIDER_TOOL_REQUIRED', `Call a provider tool (${providerToolCatalog.list().map(c => `${c.id}_…`).join(', ')}) — the backend does not pick a provider.`, false, undefined, 'INVALID_REQUEST');
+    }
+    if (tc?.provider) rec.provider = tc.provider;
     const res = resolveToolName(tc?.name);
     // Backend-controlled action: not a registered tool (step code UNKNOWN_TOOL, as before) and explicitly
     // classified FORBIDDEN_ACTION in the execution record / normalized result.
@@ -250,7 +267,7 @@ export class ToolTurn {
     // Prompt 27: an identical VALIDATED call that already failed at the provider this turn — a transient failure may be
     // retried ONCE by the LLM; a non-transient failure (or a second failure) is not re-sent: the LLM gets a structured
     // reason and answers / asks / tries a genuinely different step instead (bounded, never an endless retry).
-    const failSig = fromLLM ? `${res.name}|${rec.argumentsHash}|${journeyKeyOf(s)}` : undefined;
+    const failSig = fromLLM ? `${tc?.provider || ''}:${res.name}|${rec.argumentsHash}|${journeyKeyOf(s)}` : undefined;
     const prevFail = failSig ? this.failedSigs.get(failSig) : undefined;
     if (prevFail) {
       if (!TRANSIENT_FAILURES.has(prevFail.code) || prevFail.count >= 2) {
@@ -313,13 +330,14 @@ export class ToolTurn {
     let timer: any;
     try {
       raw = await Promise.race([
-        executor.execute(p.vt, guard),
+        // P37: executed on the LLM-selected provider connector ONLY (no failover chain, no hidden switch)
+        inProviderScope(p.tc?.provider, () => executor.execute(p.vt, guard)),
         new Promise(res => { timer = setTimeout(() => { timedOut = true; res({ __timeout: true }); }, this.timeoutMs); })
       ]);
     } catch (e) { thrown = e; } finally { clearTimeout(timer); }
     const latencyMs = Date.now() - t0;
     const provider = raw?.meta?.providerId || executor.providerLabel || null;
-    rec.provider = provider; rec.latencyMs = latencyMs; rec.completedAt = new Date().toISOString();
+    rec.provider = p.tc?.provider || provider; rec.latencyMs = latencyMs; rec.completedAt = new Date().toISOString();
 
     const done = (status: ToolExecutionStatus, x: Partial<ExecutedCall>): ExecutedCall => {
       rec.status = status;
@@ -382,7 +400,13 @@ export class ToolTurn {
     const out: ToolCall[][] = [];
     let cur: ToolCall[] = [];
     for (const c of calls) {
-      if (c?.name === 'SEARCH_TRAINS') { if (cur.length) out.push(cur); out.push([c]); cur = []; }
+      if (c?.name === 'SEARCH_TRAINS') {
+        // P37: the SAME search on DIFFERENT providers (LLM-requested comparison) is independent → one parallel segment
+        const last = out[out.length - 1];
+        if (!cur.length && last && c.provider && last.every(x => x?.name === 'SEARCH_TRAINS' && x.provider && x.provider !== c.provider
+          && stableJson(x.arguments || {}) === stableJson(c.arguments || {}))) { last.push(c); continue; }
+        if (cur.length) out.push(cur); out.push([c]); cur = [];
+      }
       else cur.push(c);
     }
     if (cur.length) out.push(cur);
@@ -424,7 +448,7 @@ export class ToolTurn {
         const node = nodeByCall.get(tc);
         if (h.fromLLM) { const a = this.admit(tc); if (a) { if (node) { node.status = 'REJECTED'; node.toolExecutionId = a.record.toolExecutionId; } prepared.push(a); stop = true; continue; } }
         if (h.skip?.(tc)) { if (node) node.status = 'SKIPPED_DUPLICATE'; prepared.push(null); continue; }
-        const key = `${tc?.name}|${stableJson(tc?.arguments || {})}`;
+        const key = `${tc?.provider || ''}:${tc?.name}|${stableJson(tc?.arguments || {})}`;   // P37: per-provider identity
         const prev = inSeg.get(key);
         if (prev !== undefined && (prepared[prev] as any)?.ok) { if (node) node.status = 'SKIPPED_DUPLICATE'; prepared.push({ alias: prev, tc }); continue; }
         // a dependent call never runs before its dependency succeeded with usable results
