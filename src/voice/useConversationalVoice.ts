@@ -5,11 +5,18 @@
  * P36-C: tap-to-talk uses ElevenLabs Scribe v2 BATCH STT (server-side key) when GET /api/voice/config reports it
  * enabled: tap = record, tap again = submit ONCE → FINAL transcript → this SAME agent → turn detector → /api/chat.
  * Otherwise (and for the opt-in hands-free conversation mode) the existing browser recogniser is used.
+ *
+ * P36-C.1.1: enhanced (server) recognition stays primary; a user setting can try device (browser) recognition first,
+ * automatically falling back to enhanced after a device-recognition failure. retrySpeech replays the SAME reply.
  */
+const STT_PREF_KEY = 'bookkaro.sttPreference';
+function loadSttPreference(): SttPreference {
+  try { return window.localStorage.getItem(STT_PREF_KEY) === 'DEVICE_FIRST' ? 'DEVICE_FIRST' : 'ENHANCED_FIRST'; } catch { return 'ENHANCED_FIRST'; }
+}
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConversationalVoiceAgent, type TurnProcessor, type VoiceAgentSnapshot } from '@shared/voice/conversational-voice-agent';
 import { BrowserSpeechInput, BrowserSpeechOutput } from './browser-voice-adapters';
-import { BatchSttSpeechInput, HybridSpeechInput, sttErrorMessage, type BatchSttPhase } from './batch-speech-input';
+import { BatchSttSpeechInput, HybridSpeechInput, detectBrowserStt, sttErrorMessage, type BatchSttPhase, type SttPreference, type SttSource } from './batch-speech-input';
 import { createPcmRecorder, pcmRecorderSupported } from './pcm-recorder';
 import { fetchVoiceConfig, transcribeSpeech } from '../lib/api';
 
@@ -38,6 +45,10 @@ export function useConversationalVoice(o: { sessionId: string | null; processTur
   const [snap, setSnap] = useState<VoiceAgentSnapshot>(() => agent.snapshot());
   const [sttPhase, setSttPhase] = useState<BatchSttPhase>('IDLE');
   const [inputError, setInputError] = useState<string | null>(null);
+  const [sttPreference, setSttPreferenceState] = useState<SttPreference>(loadSttPreference);
+  const [sttSource, setSttSource] = useState<SttSource | null>(null);
+  const deviceSttSupported = useMemo(() => detectBrowserStt().supported, []);
+  useEffect(() => { input.setPreference(sttPreference); }, [input, sttPreference]);
   // server STT capability (safe fields only — the key never reaches the browser)
   useEffect(() => {
     let live = true;
@@ -54,9 +65,10 @@ export function useConversationalVoice(o: { sessionId: string | null; processTur
       setSnap(agent.snapshot());
     });
     const offPhase = input.batch.onPhase(p => { setSttPhase(p); setSnap(agent.snapshot()); });
+    const offSource = input.onSource(setSttSource);
     // end-of-turn detection runs only while the user-started mic session is open
     const iv = window.setInterval(() => { const st = agent.snapshot(); if (st.listening || st.state === 'USER_SPEAKING') { const p = agent.tick(); if (p) p.catch(() => undefined); } }, 100);
-    return () => { off(); offPhase(); window.clearInterval(iv); agent.cancel(); };
+    return () => { off(); offPhase(); offSource(); window.clearInterval(iv); agent.cancel(); };
   }, [agent, input]);
   return {
     agent, snapshot: snap,
@@ -65,6 +77,16 @@ export function useConversationalVoice(o: { sessionId: string | null; processTur
     /** Short, safe message for the last voice-input failure (never a raw provider error). */
     inputErrorMessage: sttErrorMessage(inputError),
     batchSttEnabled: batchEnabled,
+    /** P36-C.1.1: recogniser used for the current / last voice turn (never a provider name). */
+    sttSource,
+    sttPreference,
+    deviceSttSupported,
+    setSttPreference: useCallback((p: SttPreference) => {
+      try { window.localStorage.setItem(STT_PREF_KEY, p); } catch { /* ignore */ }
+      setSttPreferenceState(p);
+    }, []),
+    /** Replays the SAME last reply (no new turn, no LLM / tool call). */
+    retrySpeech: useCallback(() => agent.retrySpeech(), [agent]),
     listen: useCallback(() => agent.listen(), [agent]),
     stop: useCallback(() => agent.cancel(), [agent]),
     /** Mic button "stop": in batch tap-to-talk this is the release (submit once); otherwise the one-tap stop. */

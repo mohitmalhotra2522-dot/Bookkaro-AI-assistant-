@@ -7,6 +7,7 @@
  * form keeps the first sentence(s) and the pending question.
  */
 import type { AssistantResponse, ConversationErrorCode, PendingQuestion } from '@shared/conversation-context';
+import { conciseForVoice } from '@shared/voice/speech-renderer';
 
 /** Map project error codes onto the Part 46 recovery vocabulary (codes themselves are unchanged). */
 export function toRecoveryCode(code?: string | null): ConversationErrorCode | null {
@@ -28,7 +29,10 @@ const CLARIFY: ReadonlySet<PendingQuestion> = new Set(['ASK_STATION_ROLE', 'ASK_
 
 export function speechOf(text: string, mode: 'TEXT' | 'VOICE', question?: string): string {
   const flat = String(text || '').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
-  if (mode === 'VOICE' || flat.length <= 160) return flat;
+  // P36-C.1.1: VOICE speech = a SELECTION of whole sentences of the validated reply (boundary/safety sentences and the
+  // final question always kept, fact-free "details on screen" note when shortened). The screen keeps the full text.
+  if (mode === 'VOICE') return conciseForVoice(String(text || ''), { question, detailsNote: true }).text;
+  if (flat.length <= 160) return flat;
   const sentences = flat.split(/(?<=[.!?।])\s+/);
   let out = sentences[0];
   if (question && flat.includes(question) && !out.includes(question)) out = `${out} ${question}`;

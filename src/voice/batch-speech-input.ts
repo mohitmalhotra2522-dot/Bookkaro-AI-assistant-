@@ -120,16 +120,59 @@ export class BatchSttSpeechInput implements SpeechInput {
  *  - opt-in conversation mode (continuous=true, needs streaming speech activity for voice barge-in) → the existing
  *    browser recogniser; without one, the mode is reported unsupported (tap-to-talk keeps working).
  */
+/** P36-C.1.1 — which recogniser a tap-to-talk turn tries first (user setting; default = enhanced). */
+export type SttPreference = 'ENHANCED_FIRST' | 'DEVICE_FIRST';
+export type SttSource = 'DEVICE' | 'ENHANCED';
+
+/** Browser (Web Speech) STT capability — existence of the API only; it does NOT prove recognition works. */
+export function detectBrowserStt(w: any = typeof window !== 'undefined' ? window : undefined): { supported: boolean; api: 'SpeechRecognition' | 'webkitSpeechRecognition' | null; secureContext: boolean } {
+  if (!w) return { supported: false, api: null, secureContext: false };
+  const api = typeof w.SpeechRecognition === 'function' ? 'SpeechRecognition' : typeof w.webkitSpeechRecognition === 'function' ? 'webkitSpeechRecognition' : null;
+  const secureContext = w.isSecureContext !== false;
+  return { supported: !!api && secureContext, api, secureContext };
+}
+
+/**
+ * Pure transport choice. Hands-free (continuous) needs the browser recogniser. Tap-to-talk: enhanced (server) STT is
+ * primary unless the user chose device-first; device recognition that failed this session is skipped (→ enhanced).
+ */
+export function chooseSttTransport(o: { continuous: boolean; preference: SttPreference; batchAvailable: boolean; browserAvailable: boolean; browserHealthy: boolean }): 'BATCH' | 'BROWSER' | null {
+  if (o.continuous) return o.browserAvailable ? 'BROWSER' : null;
+  if (o.preference === 'DEVICE_FIRST' && o.browserAvailable && (o.browserHealthy || !o.batchAvailable)) return 'BROWSER';
+  if (o.batchAvailable) return 'BATCH';
+  return o.browserAvailable ? 'BROWSER' : null;
+}
+
+/** Errors after which device recognition is treated as unusable for the rest of the session (→ enhanced next turn). */
+const DEVICE_STT_BROKEN = new Set(['STT_ERROR', 'STT_START_FAILED', 'STT_UNAVAILABLE']);
+
 export class HybridSpeechInput implements SpeechInput {
   private activeInput: SpeechInput | null = null;
+  private pref: SttPreference = 'ENHANCED_FIRST';
+  private deviceHealthy = true;
+  private sourceListeners = new Set<(s: SttSource | null) => void>();
   constructor(readonly batch: BatchSttSpeechInput, readonly browser: SpeechInput) {}
   get available(): boolean { return this.batch.available || this.browser.available; }
   get usingBatch(): boolean { return this.activeInput === this.batch; }
+  get preference(): SttPreference { return this.pref; }
+  get browserHealthy(): boolean { return this.deviceHealthy; }
+  /** Source of the current / last-started recogniser (for the "Using … speech recognition" label). */
+  get source(): SttSource | null { return this.activeInput === this.batch ? 'ENHANCED' : this.activeInput === this.browser ? 'DEVICE' : null; }
+  setPreference(p: SttPreference): void { this.pref = p; this.deviceHealthy = true; }
+  onSource(cb: (s: SttSource | null) => void): () => void { this.sourceListeners.add(cb); return () => { this.sourceListeners.delete(cb); }; }
   start(h: SpeechInputHandlers, o: { continuous: boolean; lang: string }): void {
     this.stop();
-    if (!o.continuous && this.batch.available) this.activeInput = this.batch;
-    else if (this.browser.available) this.activeInput = this.browser;
-    else { h.onError(o.continuous ? 'CONVERSATION_MODE_UNSUPPORTED' : 'STT_UNAVAILABLE'); return; }
+    const pick = chooseSttTransport({ continuous: o.continuous, preference: this.pref, batchAvailable: this.batch.available, browserAvailable: this.browser.available, browserHealthy: this.deviceHealthy });
+    if (!pick) { h.onError(o.continuous ? 'CONVERSATION_MODE_UNSUPPORTED' : 'STT_UNAVAILABLE'); return; }
+    this.activeInput = pick === 'BATCH' ? this.batch : this.browser;
+    for (const cb of this.sourceListeners) cb(this.source);
+    if (pick === 'BROWSER') {
+      // device recognition failure → remember it so the NEXT tap uses enhanced recognition (no auto-resubmission of
+      // anything; the user simply speaks again)
+      const self = this;
+      this.browser.start({ ...h, onError(code) { if (DEVICE_STT_BROKEN.has(code) && self.batch.available) self.deviceHealthy = false; h.onError(code); } }, o);
+      return;
+    }
     this.activeInput.start(h, o);
   }
   /** Release in tap-to-talk batch mode → submit; true when a batch recording was submitted. */

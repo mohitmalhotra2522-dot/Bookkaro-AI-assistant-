@@ -26,7 +26,13 @@ interface Props {
   inputError?: string | null;
   /** Contextual progress label from real turn events (tool STARTED), when available. */
   progressLabel?: string | null;
+  /** P36-C.1.1: which recogniser is listening (never a provider name). */
+  sttSource?: 'DEVICE' | 'ENHANCED' | null;
+  /** P36-C.1.1: replay the same last reply after a playback failure (no new turn). */
+  onRetrySpeech?: () => void;
 }
+
+export const STT_SOURCE_LABEL = { DEVICE: 'Using device speech recognition', ENHANCED: 'Using enhanced speech recognition' } as const;
 
 export type VoiceVisual = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'interrupted';
 
@@ -54,7 +60,7 @@ const COPY: Record<VoiceVisual, { title: string; sub: string }> = {
 
 export const MicButton: React.FC<Props> = ({
   isRecording, isSupported, onStart, onStop, transcript, conversationMode, onToggleConversationMode,
-  agentState, textFallback, sttPhase, inputError, progressLabel
+  agentState, textFallback, sttPhase, inputError, progressLabel, sttSource, onRetrySpeech
 }) => {
   const v = voiceVisual({ isRecording, agentState, sttPhase });
   const copy = COPY[v];
@@ -83,7 +89,10 @@ export const MicButton: React.FC<Props> = ({
           ? <div className="bk-voice__transcript">“{transcript}”</div>
           : <div className="bk-voice__sub">{sttPhase === 'RECORDING' ? 'Tap again to send' : conversationMode && (v === 'listening' || v === 'speaking') ? (v === 'speaking' ? 'Speak anytime to interrupt' : 'Mic is on — speak naturally') : copy.sub}</div>}
         {inputError && <div className="bk-voice__error" role="status">{inputError}</div>}
-        {textFallback && <div className="bk-voice__sub">Voice replies unavailable — showing text</div>}
+        {sttSource && (v === 'listening' || v === 'transcribing') && <div className="bk-voice__source">{STT_SOURCE_LABEL[sttSource]}</div>}
+        {textFallback && (onRetrySpeech
+          ? <div className="bk-voice__sub bk-voice__sub--wrap">Couldn’t play the reply — it’s shown as text. <button type="button" className="bk-link" onClick={onRetrySpeech}>Play again</button></div>
+          : <div className="bk-voice__sub">Voice replies unavailable — showing text</div>)}
       </div>
       <div className="bk-voice__actions">
         {conversationMode && onToggleConversationMode ? (

@@ -292,7 +292,9 @@ const App: React.FC = () => {
   const voicePanelEl = voiceActive ? (
     <MicButton isRecording={snap.listening} isSupported={snap.sttAvailable} onStart={handleMicStart} onStop={handleMicStop} transcript={snap.partialTranscript}
       conversationMode={snap.conversationMode} onToggleConversationMode={conv.setConversationMode} agentState={snap.state} textFallback={snap.textFallback}
-      sttPhase={conv.sttPhase} inputError={conv.inputErrorMessage} progressLabel={progressLabel} />
+      sttPhase={conv.sttPhase} inputError={conv.inputErrorMessage} progressLabel={progressLabel}
+      sttSource={snap.listening || conv.sttPhase !== 'IDLE' ? conv.sttSource : null}
+      onRetrySpeech={snap.textFallback && snap.ttsAvailable ? () => { conv.retrySpeech(); } : undefined} />
   ) : null;
 
   const placeLabel = (code: string) => {
@@ -372,7 +374,10 @@ const App: React.FC = () => {
       {sheet === 'settings' && (
         <SettingsPanel
           conversationMode={snap.conversationMode} onConversationMode={conv.setConversationMode} voiceSupported={snap.sttAvailable}
-          sttLabel={snap.sttAvailable ? 'available' : 'unavailable in this browser — typing works'} ttsAvailable={snap.ttsAvailable && !snap.textFallback}
+          sttLabel={!snap.sttAvailable ? 'unavailable in this browser — typing works' : conv.sttPreference === 'DEVICE_FIRST' && conv.deviceSttSupported ? 'device first, enhanced as backup' : conv.batchSttEnabled ? 'enhanced' : 'device'}
+          ttsAvailable={snap.ttsAvailable && !snap.textFallback}
+          deviceSttSupported={conv.deviceSttSupported && conv.batchSttEnabled} deviceSttFirst={conv.sttPreference === 'DEVICE_FIRST'}
+          onDeviceSttFirst={(on) => conv.setSttPreference(on ? 'DEVICE_FIRST' : 'ENHANCED_FIRST')}
           dataLabel={appStatus.railwayKind === 'REAL' ? 'Live railway data' : appStatus.railwayKind === 'MOCK' ? 'Development data — not live' : appStatus.state === 'unavailable' ? 'Service unreachable' : 'Checking…'}
           showInspector={showInspector} onInspector={setShowInspector} />
       )}

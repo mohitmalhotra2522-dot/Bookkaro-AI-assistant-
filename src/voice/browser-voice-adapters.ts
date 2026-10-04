@@ -7,6 +7,7 @@
  * TTS is text → audio only. Failures surface as errors → the agent falls back to text (typing always works).
  */
 import type { SpeechInput, SpeechInputHandlers, SpeechOutput, SpeechPlayback } from '@shared/voice/conversational-voice-agent';
+import { renderForSpeech } from '@shared/voice/speech-renderer';
 
 export class BrowserSpeechInput implements SpeechInput {
   private rec: any = null;
@@ -61,7 +62,14 @@ export class BrowserSpeechInput implements SpeechInput {
 
 export class BrowserSpeechOutput implements SpeechOutput {
   get available(): boolean { return typeof window !== 'undefined' && 'speechSynthesis' in window; }
+  /** P36-C.1.1: the exact text last handed to the speech engine (after pronunciation rendering) — for tests/inspection. */
+  lastSpoken: string | null = null;
   speak(text: string, o: { lang: string }): SpeechPlayback {
+    // P36-C.1.1: pronunciation-only rendering of the validated text (same facts; never speaks ids / URLs / JSON /
+    // stack traces / provider names / credentials). Nothing speakable → nothing is spoken.
+    const spoken = renderForSpeech(text);
+    this.lastSpoken = spoken;
+    if (!spoken) return { done: Promise.resolve(), started: Promise.resolve(), cancel: () => undefined };
     let settle: { res: () => void; rej: (e: any) => void } | null = null;
     const done = new Promise<void>((res, rej) => { settle = { res, rej }; });
     done.catch(() => undefined);
@@ -69,7 +77,7 @@ export class BrowserSpeechOutput implements SpeechOutput {
     const started = new Promise<void>((res) => { markStarted = res; });
     let cancelled = false;
     try {
-      const u = new SpeechSynthesisUtterance(text);
+      const u = new SpeechSynthesisUtterance(spoken);
       u.lang = o.lang || 'hi-IN';
       u.rate = 1.05;
       u.onstart = () => markStarted();

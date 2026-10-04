@@ -104,7 +104,7 @@ export function isLikelyEcho(heard: string, speaking: string): boolean {
 // ------------------------------------------------------------------ TTS boundary secret mask (Prompt 34 §16)
 
 /** API-key / bearer-token shaped strings (provider secrets) — never handed to a TTS engine. */
-const SECRET_TOKEN = /\b(?:sk|pk|rk|nvapi|key)-[A-Za-z0-9_-]{8,}\b|\bBearer\s+[A-Za-z0-9._~+/-]{10,}=*/gi;
+const SECRET_TOKEN = /\b(?:sk|pk|rk|nvapi|key|xi|rnd)[-_][A-Za-z0-9_-]{8,}\b|\bgh[pousr]_[A-Za-z0-9]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b|\bBearer\s+[A-Za-z0-9._~+/-]{10,}=*/gi;  // P36-C.1.1: + GitHub / Render / xi-style keys
 
 /**
  * Defence in depth at the TTS boundary: the text is already the final VALIDATED reply (identical facts); this only

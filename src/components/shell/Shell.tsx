@@ -85,7 +85,9 @@ const Switch: React.FC<{ checked: boolean; onChange: (v: boolean) => void; label
 export const SettingsPanel: React.FC<{
   conversationMode: boolean; onConversationMode: (on: boolean) => void; voiceSupported: boolean;
   sttLabel: string; ttsAvailable: boolean; dataLabel: string; showInspector: boolean; onInspector: (on: boolean) => void;
-}> = ({ conversationMode, onConversationMode, voiceSupported, sttLabel, ttsAvailable, dataLabel, showInspector, onInspector }) => (
+  /** P36-C.1.1: try device speech recognition first (enhanced recognition is the backup). */
+  deviceSttSupported?: boolean; deviceSttFirst?: boolean; onDeviceSttFirst?: (on: boolean) => void;
+}> = ({ conversationMode, onConversationMode, voiceSupported, sttLabel, ttsAvailable, dataLabel, showInspector, onInspector, deviceSttSupported, deviceSttFirst, onDeviceSttFirst }) => (
   <div>
     <div className="bk-setting">
       <div>
@@ -100,6 +102,15 @@ export const SettingsPanel: React.FC<{
         <div className="bk-setting__desc">Speech recognition: {sttLabel}<br />Spoken replies: {ttsAvailable ? 'available' : 'unavailable — replies shown as text'}</div>
       </div>
     </div>
+    {onDeviceSttFirst && (
+      <div className="bk-setting">
+        <div>
+          <div className="bk-setting__label">Use device speech recognition</div>
+          <div className="bk-setting__desc">{deviceSttSupported ? 'Tries your browser’s own recognition first for tap-to-talk; switches to enhanced recognition if it fails.' : 'Not available in this browser — enhanced recognition is used.'}</div>
+        </div>
+        <Switch checked={!!deviceSttFirst && !!deviceSttSupported} onChange={onDeviceSttFirst} label="Use device speech recognition" disabled={!deviceSttSupported} />
+      </div>
+    )}
     <div className="bk-setting">
       <div>
         <div className="bk-setting__label">Railway data</div>
