@@ -27,6 +27,7 @@ import {
 import type { ToolExecutionRecord } from '@shared/railway-tool-runtime';
 import { TurnEventBus } from './turn-event-bus';
 import { toolProgressText, voiceAcknowledgement } from './progress-messages';
+import { actionExecutionOfRecord, acknowledgementMatchesDispatch, stripStaleActionClaims } from '../response/action-claims';
 import { normalizeTranscript } from '@shared/voice/stt-normalizer';
 import { validateAcknowledgement, type ResponsePriority } from '@shared/voice/voice-response-policy';
 import type { VoiceTurnOutcome } from '@shared/voice/conversational-voice-agent';
@@ -102,6 +103,8 @@ export class ConversationTurnEngine {
     const list = this.turns.get(sessionId) || [];
     const t = list[list.length - 1];
     if (!t) return { turnId: null, kind: null, providerCancellation: 'NOT_SUPPORTED' };
+    // Prompt 29: every progress statement of the interrupted turn is STALE — never resumed, never re-spoken
+    for (const p of t.progress || []) p.stale = true;
     if (!TERMINAL_TURN_STATUSES.has(t.status)) {
       t.interrupted = true;
       this.setStatus(t, 'INTERRUPTED');
@@ -191,6 +194,8 @@ export class ConversationTurnEngine {
     let longTimer: ReturnType<typeof setTimeout> | undefined;
     let statusSent = false;
     const progress = (text: string, speechText?: string, kind: 'ACK' | 'STATUS' = 'ACK') => {
+      // Prompt 29: an interrupted / superseded turn emits no further progress (its pending statements are stale)
+      if (!isCurrentTurn()) return;
       const r: AssistantTurnResponse = { type: 'TOOL_PROGRESS', text, ...(speechText ? { speechText } : {}), turnId: turn.turnId, sequence: turn.sequence };
       turn.progress.push(r);
       this.emit(turn, 'TOOL_PROGRESS', { text, ...(speechText ? { speechText, kind } : {}) });
@@ -225,8 +230,13 @@ export class ConversationTurnEngine {
             if (mode === 'VOICE' && !ackSpoken) {
               // Part 35 — ONE acknowledgement, then silence (an optional single status update if it runs long)
               ackSpoken = true;
-              ackSource = llmAck ? 'LLM' : 'DEFAULT';
-              progress(text, llmAck || voiceAcknowledgement(rec.tool));
+              // Prompt 29: the LLM's acknowledgement was written at PROPOSAL time — it is spoken only if what it says is
+              // being checked genuinely entered execution now (same tool / train / class / date; validated calls of this
+              // dispatch batch included). Otherwise the neutral acknowledgement of the tool actually dispatched is used.
+              const dispatched = records.filter(x => x.status === 'RUNNING' || x.status === 'VALIDATING').map(actionExecutionOfRecord);
+              const ack = llmAck && acknowledgementMatchesDispatch(llmAck, dispatched) ? llmAck : null;
+              ackSource = ack ? 'LLM' : 'DEFAULT';
+              progress(text, ack || voiceAcknowledgement(rec.tool));
               const wait = this.options.longWaitMs ?? 5000;
               if (wait > 0) longTimer = setTimeout(() => {
                 if (!statusSent && running.size && isCurrentTurn()) { statusSent = true; progress(toolProgressText([...running.values()]), LONG_WAIT_STATUS, 'STATUS'); }
@@ -295,8 +305,24 @@ export class ConversationTurnEngine {
       if (p && p.presentation === 'PRESENTED') { p.presentation = 'INTERRUPTED'; p.interrupted = true; this.emit(p, 'PRESENTATION_INTERRUPTED', { reason: 'BARGE_IN' }); }
     }
 
+    // Prompt 29: a turn the user interrupted (barge-in / new input) that still finishes: its pending action / progress
+    // statements are STALE — removed from the text AND the speech; nothing else left → not presented at all
+    let staleOnly = false;
+    if (turn.interrupted && newer && !r.stale && !irrelevant && r.responseMessage) {
+      const g = stripStaleActionClaims(r.responseMessage, turn.turnId);
+      if (g.removed.length) {
+        const clean = (x: any) => typeof x === 'string' && x ? stripStaleActionClaims(x, turn.turnId).text : x;
+        (r as any).responseMessage = g.text;
+        if ((r as any).assistantText) (r as any).assistantText = clean((r as any).assistantText);
+        if (r.assistantResponse?.speechText) (r.assistantResponse as any).speechText = clean(r.assistantResponse.speechText) || g.text;
+        if (r.speech?.segments?.length) (r.speech as any).segments = r.speech.segments.map(clean).filter(Boolean);
+        const d: any = r.turnLog.diagnostics;
+        if (d) d.actionClaims = [...(d.actionClaims || []), ...g.diagnostics];
+        staleOnly = !g.text;
+      }
+    }
     let response: AssistantTurnResponse | null = null;
-    if (r.stale || irrelevant) {
+    if (r.stale || irrelevant || staleOnly) {
       turn.superseded = true;
       turn.presentation = 'DISCARDED';
       this.finalize(turn, 'SUPERSEDED', t0);

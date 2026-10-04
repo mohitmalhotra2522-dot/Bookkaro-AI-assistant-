@@ -703,7 +703,9 @@ export class ContextualTurnApplier {
   /**
    * After a DATE-only correction the fresh search for the new date ran: if the
    * previously chosen train is in the NEW results (and offers the class), keep
-   * it — its availability/fare are re-verified by BookingPreparationService.
+   * it. Prompt 29: the note promises NOTHING — availability / fare for the new date are checked only if a tool
+   * actually runs (the LLM's choice, or the booking-preparation refresh before review); the final action-claim guard
+   * removes this "not checked yet" clause if such a check did succeed in the same turn.
    */
   applyCarryOver(sessionId: string, ctx: ApplyCtx): string[] {
     const s = this.state.getSession(sessionId);
@@ -716,7 +718,7 @@ export class ContextualTurnApplier {
     const notes = [...this.applyTrainSelection(sessionId, t, ctx, emit).notes];
     if (co.classCode && (t.classes || []).some(c => c.code === co.classCode)) {
       notes.push(...this.applyClassSelection(sessionId, co.classCode, ctx, emit).notes);
-      return [`Nayi date ki fresh list mein ${co.trainNumber} hai — wahi train aur ${co.classCode} rakhi hai; availability aur fare dobara verify kar raha hoon.`];
+      return [`Nayi date ki fresh list mein ${co.trainNumber} hai — wahi train aur ${co.classCode} rakhi hai; nayi date ki availability aur fare abhi check nahi hue.`];
     }
     return notes;
   }

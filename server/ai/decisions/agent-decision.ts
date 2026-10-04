@@ -376,6 +376,8 @@ export interface TurnRecord {
       validationFailures: number; duplicateCallPrevented: boolean; retryCount: number;
       stepLimitReached: boolean; stepLimitReason: string | null; secondCallReason: string | null; latencyMs: number;
     };
+    /** Prompt 29: action / progress claim validation (actionType, actionStatus, toolCallId, validationStatus, removalReason). */
+    actionClaims?: import('../response/action-claims').ActionClaimDiagnostic[];
   };
   // ---- Prompt 9 observability ----
   bookingReadiness?: { ready: boolean; blockers: string[]; warnings: string[] };

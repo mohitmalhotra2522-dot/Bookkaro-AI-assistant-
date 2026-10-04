@@ -68,6 +68,8 @@ export interface AssistantTurnResponse {
   speechText?: string;
   turnId: string;
   sequence: number;
+  /** Prompt 29: progress of an interrupted / superseded turn — stale, never resumed or re-spoken. */
+  stale?: boolean;
 }
 
 // ------------------------------------------------------------------ Part 23 / 57 — streaming events

@@ -67,6 +67,7 @@ import { preparationErrorTypeOf } from '@shared/booking-preparation';
 import { SAFE_ERROR_MESSAGE } from '../tool-runtime/tool-error-normalizer';
 import { naturalResponseComposer, type NaturalComposeResult } from '../response/natural-response-composer';
 import { speechOf } from '../conversation/assistant-response';
+import { actionLedgerFromSteps, guardActionClaims, type ActionExecution, type ActionClaimDiagnostic } from '../response/action-claims';
 
 export interface ProcessTurnOptions {
   /** Prompt 17: client-generated id of ONE user message. A duplicate DELIVERY (retry, reconnect,
@@ -155,6 +156,8 @@ interface TurnExtras {
   naturalSpeech?: NaturalComposeResult;
   /** Prompt 28: backend-reply sentences removed by claim ↔ entity binding (reasons only). */
   entityRejections?: Array<{ sentence: string; reason: string; binding: string }>;
+  /** Prompt 29: action / progress statements checked against this turn's actual executions (codes + ids only). */
+  actionClaims?: ActionClaimDiagnostic[];
 }
 
 const SENSITIVE_REPLY = 'Main kabhi password, OTP, CAPTCHA, CVV, card, UPI PIN ya IRCTC credentials nahi maangta. Kripya aisi jaankari share na karein.';
@@ -173,6 +176,8 @@ const ORDER_BEFORE_PREP = new Set<string>([BookingState.IDLE, BookingState.COLLE
 
 export class ConversationAgentOrchestrator {
   private history: Map<string, HistoryMsg[]> = new Map();
+  /** Prompt 29: the previous turn's executions per session — only to label a leaked progress claim STALE (never authority). */
+  private lastActions: Map<string, ActionExecution[]> = new Map();
   private turns: Map<string, TurnRecord[]> = new Map();
   private runtime: LLMToolCallingRuntime;
   private applier: ContextualTurnApplier;
@@ -521,7 +526,16 @@ export class ConversationAgentOrchestrator {
     extra.rejectedClaims = [];
     extra.entityRejections = [];
     try { opts.observer?.onStatus?.('GENERATING_RESPONSE'); } catch { /* observer only */ }
-    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims, extra.entityRejections);
+    const composed = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims, extra.entityRejections);
+    // ---- Prompt 29: final action-claim guard — "availability check kar raha hoon" / "fare check ho gaya" survive only
+    //      when THIS turn's execution records (LLM tool calls + backend preparation refreshes) support them. Runs on the
+    //      final backend reply, so the screen text, the composer's fallback and the TTS speech all derive from the same
+    //      validated text. It never calls a tool — it only removes the false clause.
+    const actionLedger = actionLedgerFromSteps([...rt.steps, ...(prep?.steps || [])], { turnId, session: sess, previous: this.lastActions.get(sessionId) });
+    const actionGuard = guardActionClaims(composed, actionLedger);
+    extra.actionClaims = actionGuard.diagnostics;
+    this.lastActions.set(sessionId, actionLedger.current);
+    const message = actionGuard.text || (actionGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : composed);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     // Prompt 23: a native agent may have answered after a rejected proposal — the rejection stays the turn's error
@@ -553,7 +567,7 @@ export class ConversationAgentOrchestrator {
     if (opts.naturalSpeech !== false && message && !(turnError?.code === 'LLM_UNAVAILABLE')) {
       try {
         extra.naturalSpeech = await naturalResponseComposer.compose({
-          agentText: agentFresh ? rt.finalMessage : null, general: generalTurn, allowWordingCall: agentFresh || !!secondCallReason,
+          agentText: agentFresh ? rt.finalMessage : null, general: generalTurn, allowWordingCall: agentFresh || !!secondCallReason, actionLedger,
           llm: this.llm, session: sess, userText: normalizedInput, backendReply: message, mode,
           deterministicSpeech: mode === 'VOICE' ? speechOf(message, 'VOICE', questionFor(sess.pendingInteraction, sess, 'VOICE')) : message,
           stateBefore, reviewVersionBefore: voiceBefore.reviewVersion, selectedTrainBefore: voiceBefore.train,
@@ -675,7 +689,8 @@ export class ConversationAgentOrchestrator {
       latencyMs: Date.now() - a.startedAt, llmLatencyMs: a.rt?.llmLatencyMs ?? 0,
       validation: { accepted: ns?.segments.length ?? 0, rejected: (ns?.rejected || []).map(r => r.reason), repaired: ns?.repaired ?? 0, claimTypes, source: ns?.source ?? null },
       ...(a.rt?.chain ? { chain: { ...a.rt.chain, sessionId: a.sessionId, turnId: a.turnId, stateBefore: String(a.stateBefore), stateAfter: String(this.state.getSession(a.sessionId).bookingState) } } : {}),
-      binding: this.bindingDiagnostics(a, x, wording)
+      binding: this.bindingDiagnostics(a, x, wording),
+      actionClaims: [...(x.actionClaims || []), ...(ns?.actionClaims || [])]
     };
   }
 

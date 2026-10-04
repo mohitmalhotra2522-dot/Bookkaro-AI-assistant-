@@ -31,6 +31,7 @@ import { collectAvailabilityEvidence, judgeAvailabilityClaim, type AvailabilityE
 import { ClaimEntityBinder, verifyBoundClaim, diagnoseCrossEntity, resultTrainsOf, isEntityClaim, type ClaimBinding, type ClaimBindingStatus, type CrossEntityDiagnosis } from './claim-entity-binding';
 import { explicitDates } from './claim-dates';
 import { RESULT_REF_RE } from '../tool-runtime/tool-result-identity';
+import { actionLedgerFromSteps, guardActionSentence, type ActionLedger, type ActionClaimDiagnostic } from './action-claims';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -65,6 +66,8 @@ export interface NaturalComposeInput {
    * the provider for a second wording call.
    */
   agentText?: string | null;
+  /** Prompt 29: this turn's execution ledger (built from `steps` when absent) — authority for action / progress claims. */
+  actionLedger?: ActionLedger;
   /**
    * Prompt 23: general railway-knowledge turn (no tool, no session change, no error). Judged for what it can falsely
    * claim (unknown train numbers, PNR-like numbers, fares, availability, counts, booking success, grounding) — not for
@@ -97,6 +100,8 @@ export interface NaturalComposeResult {
   wordingCall?: boolean;
   /** Prompt 28: claim ↔ entity binding summary (internal diagnostics only — never user-facing). */
   claimBinding?: ClaimBindingSummary;
+  /** Prompt 29: action / progress statements checked against this turn's executions (internal diagnostics only). */
+  actionClaims?: ActionClaimDiagnostic[];
   /** Prompt 28: extended provenance of every accepted sentence (claimId, entity, binding, verification) — internal only.
    *  `provenance` keeps the P25 / P26 shape unchanged. */
   claimProvenance?: ClaimProvenance[];
@@ -288,6 +293,8 @@ export class NaturalResponseComposer {
 
     const accepted: string[] = [];
     const rejected: NaturalComposeResult['rejected'] = [];
+    const actionLedger: ActionLedger = i.actionLedger ?? actionLedgerFromSteps(i.steps, { session: s });
+    const actionDiag: ActionClaimDiagnostic[] = [];
     let streamed = 0;
     const len = () => accepted.join(' ').length;
     const hasQ = () => accepted.some(a => a.includes('?')) || (!!accepted.length && ASKS_RE.test(accepted[accepted.length - 1]));
@@ -381,6 +388,17 @@ export class NaturalResponseComposer {
       // ("Aur …") loses the dangling conjunction instead of reading as a fragment
       if (isFragment(t)) { if (t.length > 1 || /\d/.test(t)) rejected.push({ sentence: t.slice(0, 120), reason: 'FRAGMENT' }); return; }
       if (prevRejected && LEAD_CONJ.test(t)) { const r = t.replace(LEAD_CONJ, ''); if (/[A-Za-zऀ-ॿ]{2,}/.test(r)) t = r.charAt(0).toUpperCase() + r.slice(1); }
+      // Prompt 29: a false action / progress clause ("availability bhi check kar raha hoon" when no such call ran this
+      // turn) is removed; the rest of the sentence is judged by the fact guards as usual
+      {
+        const ag = guardActionSentence(t, actionLedger);
+        actionDiag.push(...ag.diagnostics);
+        if (ag.removed.length) {
+          rejected.push({ sentence: (ag.text ? ag.removed[0].clause : t).slice(0, 120), reason: `ACTION_CLAIM:${ag.removed[0].verdict.removalReason}` });
+          if (!ag.text) { prevRejected = true; return; }
+          t = ag.text;
+        }
+      }
       const hits: Hits = {};
       // Prompt 28: bind BEFORE judging (the binder tracks the reply's antecedents from every sentence the LLM wrote)
       const binding: ClaimBinding = binder.bind(t);
@@ -461,7 +479,7 @@ export class NaturalResponseComposer {
     else if (buf.trim()) { take(buf); buf = ''; }
     const bindingSummary = (): ClaimBindingSummary => ({ counts: bindCounts, crossEntity,
       status: crossEntity.some(c => c.diagnosis !== 'AMBIGUOUS_REFERENCE') ? 'CROSS_ENTITY_REMOVED' : crossEntity.length ? 'AMBIGUOUS_REMOVED' : entityClaims ? 'BOUND' : 'NONE' });
-    if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary() };
+    if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary(), actionClaims: actionDiag };
 
     // ---- guarantees ----
     if (confirmationTurn && !NOT_BOOKED_RE.test(accepted.join(' '))) return fallback('MISSING_NOT_BOOKED_DISCLAIMER', rejected);
@@ -473,7 +491,7 @@ export class NaturalResponseComposer {
     if (!streamable) segments.forEach((t, k) => i.onSegment?.(k, t));
     return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),
       provenance, claimProvenance, repaired, wordingCall: !agentText,
-      claimBinding: bindingSummary() };
+      claimBinding: bindingSummary(), actionClaims: actionDiag };
   }
 }
 
