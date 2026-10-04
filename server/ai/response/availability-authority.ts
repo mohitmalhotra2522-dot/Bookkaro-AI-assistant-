@@ -18,6 +18,7 @@
  */
 import type { BookingSession } from '@shared/entities';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
+import { explicitDates } from './claim-dates';
 
 export const AVAILABILITY_TOOL = 'CHECK_AVAILABILITY';
 
@@ -137,6 +138,8 @@ const THIS_TRAIN_RE = /\b(is|iss|us|uss|yeh|ye|this|that)\s+(train|gaadi|gadi)\b
 const TRAIN_NUM_RE = /\b\d{5}\b/g;
 const DAY_RE = /\b(aaj|today|kal|tomorrow|parso|parson|day after tomorrow)\b/i;
 const SEAT_WORD_RE = /\b(seats?|berths?)\b/i;
+const HYPOTHETICAL_RE = /\b(jaise|example|for example|e\.g\.|maan\s+(lo|lijiye|lijie)|suppose|say|cancel\w*|cancellation|chart\s+ban\w*|upgrade|move\s+up|aage\s+badh\w*|kam\s+ho\w*)\b/i;
+const DEFINITE_PROMISE_RE = /\b(milega|milegi|milenge|you\s*'?ll\s+get|you\s+will\s+get|aapko\s+\w+\s+mil\s+(gaya|gayi)|abhi|currently|right\s+now)\b/i;
 
 const codesIn = (t: string) => [...new Set((t.match(CLASS_CODE_RE) || []).map(c => c.toUpperCase()))];
 const trainNumsIn = (t: string) => [...new Set(t.match(TRAIN_NUM_RE) || [])];
@@ -164,7 +167,10 @@ export function classifyAvailabilityClaim(t: string, origin: 'USER' | 'ASSISTANT
   if (origin === 'USER') return strong || (trainAnchor && AVAIL_WORD_RE.test(text)) ? 'USER_PROVIDED_FACT' : 'NONE';
   if (!code && !count && isClassEnumeration(text)) return 'CLASS_LIST';
   if (strong && USER_ATTRIB_RE.test(text) && !VERIFY_CLAIM_RE.test(text)) return 'USER_PROVIDED_FACT';
-  if (code || count) return 'LIVE_AVAILABILITY_CLAIM';
+  // Prompt 28: a status code inside an unanchored explanation / hypothetical ("agar RAC 1 wala cancel kare to berth mil
+  // jaati hai") is general knowledge; a definite promise to the user ("WL 8 milega") stays a live claim
+  if (code || count) return !anchored && (MODAL_GK_RE.test(text) || HYPOTHETICAL_RE.test(text)) && !DEFINITE_PROMISE_RE.test(text)
+    ? 'GENERAL_KNOWLEDGE_CLAIM' : 'LIVE_AVAILABILITY_CLAIM';
   if (strong) return !anchored && MODAL_GK_RE.test(text) ? 'GENERAL_KNOWLEDGE_CLAIM' : 'LIVE_AVAILABILITY_CLAIM';
   if (META_RE.test(text)) return 'NONE';
   // a specific train + seat vocabulary ("12014 mein waiting chal rahi hai") is about that train's live status
@@ -212,7 +218,8 @@ function statusMatches(c: ClaimedStatus, e: AvailabilityEvidence): boolean {
 function claimDate(t: string, s: any): string | undefined {
   const m = t.match(DAY_RE);
   if (m) { const r: any = resolveDate(m[1].toLowerCase()); if (r?.ok && r.date) return String(r.date); }
-  return str(s?.date);
+  // Prompt 28: an explicit calendar date ("5 Oct", "2026-10-06") binds the claim to that date too
+  return explicitDates(t)[0] ?? str(s?.date);
 }
 
 const mismatchReason = (c: ClaimedStatus) =>

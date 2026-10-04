@@ -1,3 +1,4 @@
+import type { ToolResultIdentity } from '../tool-runtime/tool-result-identity';
 import type { AgentDecision } from '../decisions/agent-decision';
 import type { BookingSession } from '@shared/entities';
 import { BookingState } from '@shared/states';
@@ -17,6 +18,12 @@ export interface TurnToolResultView {
   status?: string;
   /** Prompt 27: provider attempts behind this result (2 = the backend already retried it once). */
   attempts?: number;
+  /** Prompt 28: authoritative result identity (train / date / class / route / provider) — internal ids never user-facing. */
+  identity?: ToolResultIdentity;
+  /** Prompt 28: per-turn reference the LLM sees for this result (`fare-2`). */
+  resultRef?: string;
+  /** Prompt 28: facts that make a fresh search after a date change actionable (previous selection present or not). */
+  followUp?: { previousSelection: { trainNumber: string; travelClass?: string }; inFreshResults: boolean; classListed?: boolean; selectionKept: false; displayIndex?: number };
 }
 
 export interface LLMProviderConfig {

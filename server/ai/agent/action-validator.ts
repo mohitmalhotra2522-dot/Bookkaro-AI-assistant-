@@ -205,8 +205,11 @@ export class ActionValidator {
     if (!trains || trains.length === 0) return null;
     switch (ref.kind) {
       case 'TRAIN_NUMBER': {
-        const t = trains.find(x => x.trainNumber === ref.value || x.trainNumber.startsWith(ref.value));
-        return t ? { trainNumber: t.trainNumber } : null;
+        // Prompt 28: exact number, or a UNIQUE prefix — never the first of several (no silent substitution)
+        const exact = trains.find(x => x.trainNumber === String(ref.value));
+        if (exact) return { trainNumber: exact.trainNumber };
+        const pre = String(ref.value).length >= 3 ? trains.filter(x => x.trainNumber.startsWith(String(ref.value))) : [];
+        return pre.length === 1 ? { trainNumber: pre[0].trainNumber } : null;
       }
       case 'DISPLAY_INDEX': {
         const i = (ref.value as number) - 1;

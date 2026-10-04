@@ -15,6 +15,7 @@
  */
 import type { BookingSession } from '@shared/entities';
 import { isClassEnumeration, type AvailabilityEvidence } from './availability-authority';
+import { claimedDate } from './claim-dates';
 
 export type ClaimType =
   | 'GENERAL_KNOWLEDGE' | 'RAILWAY_LIVE_FACT' | 'SESSION_FACT' | 'TOOL_DERIVED_FACT'
@@ -33,10 +34,17 @@ export interface ClaimProvenance {
   date?: string;
   travelClass?: string;
   availability?: string;
+  // ---- Prompt 28 (internal only, never user-facing) ----
+  claimId?: string;
+  entityType?: 'TRAIN' | 'ROUTE' | 'BOOKING' | 'NONE';
+  sourceProvider?: string;
+  verificationStatus?: 'VERIFIED' | 'NOT_REQUIRED' | 'USER_PROVIDED';
+  /** how the sentence was bound to its entity (EXPLICIT / REFERENCE_RESOLVED / SESSION_FOCUS / SINGLE_RESULT / UNBOUND / NOT_APPLICABLE) */
+  claimBindingStatus?: string;
 }
 
 export interface TrainFact { num: string; name: string; dep?: string; arr?: string; durMin?: number; classes: string[]; source: string; resultId: string | null }
-export interface FareFact { train?: string; cls?: string; perPassenger?: number; total?: number; pax?: number; source: string; resultId: string | null }
+export interface FareFact { train?: string; cls?: string; perPassenger?: number; total?: number; pax?: number; source: string; resultId: string | null; date?: string; provider?: string }
 export interface FactIndex {
   trains: TrainFact[];
   /** Trains of the current SEARCH result set (count / comparison basis). */
@@ -72,19 +80,24 @@ function trainFact(t: any, source: string): TrainFact | null {
   };
 }
 
-function fareFact(f: any, source: string, resultId: string | null): FareFact | null {
+function fareFact(f: any, source: string, resultId: string | null, identity?: any): FareFact | null {
   if (!f || typeof f !== 'object') return null;
   const num = (x: any) => (typeof x === 'number' && Number.isFinite(x) ? x : (typeof x === 'string' && /^\d+(\.\d+)?$/.test(x) ? Number(x) : undefined));
   const perPassenger = num(f.perPassenger ?? f.perPassengerFare ?? f.farePerPassenger);
   const total = num(f.total ?? f.totalFare ?? f.amount);
   if (perPassenger === undefined && total === undefined) return null;
+  // Prompt 28: the fare's entity = the provider fields, else the result identity / fare basis (never guessed)
+  const train = f.trainNumber ?? identity?.trainNumber ?? f.fareBasis?.trainNumber;
+  const cls = f.travelClass ?? identity?.travelClass ?? f.fareBasis?.travelClass;
+  const date = f.date ?? identity?.date ?? f.fareBasis?.date;
   return {
-    train: f.trainNumber ? String(f.trainNumber) : undefined, cls: f.travelClass ? String(f.travelClass).toUpperCase() : undefined,
-    perPassenger, total, pax: num(f.passengersCount), source, resultId
+    train: train ? String(train) : undefined, cls: cls ? String(cls).toUpperCase() : undefined,
+    perPassenger, total, pax: num(f.passengersCount ?? f.fareBasis?.passengersCount), source, resultId,
+    ...(date ? { date: String(date) } : {}), ...(identity?.provider ? { provider: String(identity.provider) } : {})
   };
 }
 
-export interface FactView { toolName?: string; ok: boolean; data?: any; callId?: string }
+export interface FactView { toolName?: string; ok: boolean; data?: any; callId?: string; identity?: any }
 
 export function buildFactIndex(s: BookingSession, views: FactView[]): FactIndex {
   const sx: any = s;
@@ -101,7 +114,7 @@ export function buildFactIndex(s: BookingSession, views: FactView[]): FactIndex 
   const fares: FareFact[] = [];
   const pushFare = (f: FareFact | null) => { if (f) fares.push(f); };
   if (sx.fare) pushFare(fareFact(sx.fare, 'GET_FARE', sx.fare.toolExecutionId ? String(sx.fare.toolExecutionId) : null));
-  for (const v of views) if (v.ok && v.toolName === 'GET_FARE') pushFare(fareFact(v.data, 'GET_FARE', v.callId ? String(v.callId) : null));
+  for (const v of views) if (v.ok && v.toolName === 'GET_FARE') pushFare(fareFact(v.data, 'GET_FARE', v.identity?.resultId ? String(v.identity.resultId) : v.callId ? String(v.callId) : null, v.identity));
   const snap: any = sx.review?.snapshot;
   if (snap?.fare && (snap.fare.status === undefined || snap.fare.status === 'VERIFIED')) {
     pushFare(fareFact({ ...snap.fare, trainNumber: snap.fare.trainNumber ?? snap.trainNumber ?? snap.train?.number, travelClass: snap.fare.travelClass ?? snap.travelClass, passengersCount: snap.fare.passengersCount ?? snap.passengersCount }, 'REVIEW', null));
@@ -228,12 +241,16 @@ export function judgeFareScope(t: string, idx: FactIndex): { reason: string | nu
   if (!amounts.length || !idx.fares.length) return { reason: null };
   const trains = trainsIn(t, idx).map(f => f.num);
   const classes = [...new Set(t.match(CLASS_CODE_RE) || [])];
-  const scoped = idx.fares.filter(f => (!trains.length || !f.train || trains.includes(f.train)) && (!classes.length || !f.cls || classes.includes(f.cls)));
+  // Prompt 28: a date said in the claim must be the fare's date (a fare for another date never applies)
+  const cd = claimedDate(t);
+  const entityOk = (f: FareFact) => (!trains.length || !f.train || trains.includes(f.train)) && (!classes.length || !f.cls || classes.includes(f.cls));
+  const scoped = idx.fares.filter(f => entityOk(f) && (!cd || !f.date || f.date === cd));
   let fact: FareFact | undefined;
   for (const n of amounts) {
     const per = PER_PAX_RE.test(t); const tot = TOTAL_RE.test(t);
-    const hit = scoped.find(f => (per && !tot ? f.perPassenger === n : tot && !per ? f.total === n || (f.pax === 1 && f.perPassenger === n) : f.perPassenger === n || f.total === n));
-    if (!hit) return { reason: `FARE_MISMATCH:${n}` };
+    const amountOk = (f: FareFact) => (per && !tot ? f.perPassenger === n : tot && !per ? f.total === n || (f.pax === 1 && f.perPassenger === n) : f.perPassenger === n || f.total === n);
+    const hit = scoped.find(amountOk);
+    if (!hit) return { reason: cd && idx.fares.some(f => entityOk(f) && amountOk(f)) ? `CROSS_DATE_FACT:${cd}` : `FARE_MISMATCH:${n}` };
     fact = hit;
   }
   return { reason: null, fact };

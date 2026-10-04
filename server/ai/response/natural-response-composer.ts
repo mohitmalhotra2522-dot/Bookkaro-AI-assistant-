@@ -28,6 +28,9 @@ import {
   classifyPaxCount, isSessionish, derivedTrainCounts, isGeneralKnowledgeClaim, classifyClaim, type ClaimProvenance, type TimeVerdict, type FareFact, type PaxClass
 } from './claim-facts';
 import { collectAvailabilityEvidence, judgeAvailabilityClaim, type AvailabilityEvidence, type AvailabilityContext } from './availability-authority';
+import { ClaimEntityBinder, verifyBoundClaim, diagnoseCrossEntity, resultTrainsOf, isEntityClaim, type ClaimBinding, type ClaimBindingStatus, type CrossEntityDiagnosis } from './claim-entity-binding';
+import { explicitDates } from './claim-dates';
+import { RESULT_REF_RE } from '../tool-runtime/tool-result-identity';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -92,6 +95,20 @@ export interface NaturalComposeResult {
   repaired?: number;
   /** Prompt 25 Part 10: whether a second (wording) LLM call was made. */
   wordingCall?: boolean;
+  /** Prompt 28: claim ↔ entity binding summary (internal diagnostics only — never user-facing). */
+  claimBinding?: ClaimBindingSummary;
+  /** Prompt 28: extended provenance of every accepted sentence (claimId, entity, binding, verification) — internal only.
+   *  `provenance` keeps the P25 / P26 shape unchanged. */
+  claimProvenance?: ClaimProvenance[];
+}
+
+/** Prompt 28 — per-reply binding diagnostics: how every sentence was bound and which claims crossed entities. */
+export interface ClaimBindingSummary {
+  counts: Partial<Record<ClaimBindingStatus, number>>;
+  /** rejected sentences whose fact exists — for a different train / class / date (or an unresolvable reference) */
+  crossEntity: Array<{ reason: string; diagnosis: CrossEntityDiagnosis | 'AMBIGUOUS_REFERENCE'; binding: ClaimBindingStatus; trainNumber?: string }>;
+  /** BOUND = every entity claim bound to one entity; AMBIGUOUS_REMOVED / CROSS_ENTITY_REMOVED otherwise; NONE = no entity claims */
+  status: 'BOUND' | 'AMBIGUOUS_REMOVED' | 'CROSS_ENTITY_REMOVED' | 'NONE';
 }
 
 const SAFETY = new Set(['FORBIDDEN_ACTION', 'SENSITIVE_REQUEST_REJECTED', 'SENSITIVE_DATA_REJECTED', 'BOOKING_ACCESS_DENIED', 'INVALID_LLM_OUTPUT', 'SESSION_VERSION_CONFLICT']);
@@ -173,7 +190,7 @@ function collectNumbers(into: Set<number>, v: any, depth = 0, key = '') {
 
 function toolViews(steps: any[]): TurnToolResultView[] {
   return (steps || []).map(st => ({
-    toolName: st.toolCall?.name, callId: st.toolCall?.callId, ok: !!st.result?.success, data: st.result?.data,
+    toolName: st.toolCall?.name, callId: st.toolCall?.callId, ok: !!st.result?.success, data: st.result?.data, identity: st.result?.identity,
     error: st.result?.error ? { code: st.result.error.code, message: st.result.error.message } : undefined,
     status: st.execution?.status || (st.result?.success ? 'SUCCEEDED' : st.status === 'rejected' ? 'REJECTED' : 'FAILED')
   }));
@@ -263,6 +280,11 @@ export class NaturalResponseComposer {
     // Prompt 26: availability evidence = CHECK_AVAILABILITY only (this turn's validated step / the runtime-committed session entry)
     const availCtx: AvailabilityContext = { session: s, evidence: collectAvailabilityEvidence(s, (i.steps || []) as any[]), trains: idx.trains.map(f => ({ num: f.num, classes: f.classes })) };
     for (const m of `${i.backendReply} ${i.deterministicSpeech}`.matchAll(/₹\s?([\d,]+(?:\.\d+)?)/g)) fareNums.add(Number(m[1].replace(/,/g, '')));
+    // Prompt 28: every railway claim is bound to ONE entity (explicit / reply antecedent / session focus) before it counts
+    const binder = new ClaimEntityBinder({ idx, session: s, resultTrains: resultTrainsOf(idx, availCtx.evidence) });
+    const bindCounts: Partial<Record<ClaimBindingStatus, number>> = {};
+    const crossEntity: ClaimBindingSummary['crossEntity'] = [];
+    let entityClaims = 0;
 
     const accepted: string[] = [];
     const rejected: NaturalComposeResult['rejected'] = [];
@@ -276,6 +298,8 @@ export class NaturalResponseComposer {
       let t = sentence.trim();
       if (!t) return 'EMPTY';
       if (containsChainOfThought(t)) return 'CHAIN_OF_THOUGHT';
+      // Prompt 28: internal result references / ids never reach the user
+      if (RESULT_REF_RE.test(t) || /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(t)) return 'INTERNAL_ID';
       if (soundsRobotic(t)) return 'ROBOTIC_PHRASING';
       // Prompt 25 Part 1: a general explanation (no train / class / date / fare / session anchor) is general knowledge in
       // ANY turn — judged for what it can falsely claim, never for merely containing a number
@@ -316,6 +340,8 @@ export class NaturalResponseComposer {
         else if (!knownNames.some(k => k.name.includes(kw)) && !`${i.backendReply} ${i.deterministicSpeech}`.toLowerCase().includes(kw)) return `UNGROUNDED_TRAIN_NAME:${m[1]}`;
       }
       if (!gk && !NEGATION_RE.test(t)) for (const m of t.matchAll(DAY_RE)) { const r: any = resolveDate(m[1].toLowerCase()); if (!r?.ok || r.date !== s.date) return `UNGROUNDED_DATE:${m[1]}`; }
+      // Prompt 28: an explicit calendar date in a railway statement must be the journey date the results are for
+      if (!gk && s.date && !NEGATION_RE.test(t)) for (const d of explicitDates(t)) if (d !== s.date) return `CROSS_DATE_FACT:${d}`;
       // Prompt 25 Part 6: a count derived from the returned set (all / "subah ki" / "CC wali") is preserved
       for (const m of t.matchAll(TRAIN_COUNT_RE)) {
         const n = countOf(m[1]);
@@ -345,6 +371,7 @@ export class NaturalResponseComposer {
       return null;
     };
     const provenance: ClaimProvenance[] = [];
+    const claimProvenance: ClaimProvenance[] = [];
     let repaired = 0;
     let prevRejected = false;
     const take = (sentence: string) => {
@@ -355,7 +382,23 @@ export class NaturalResponseComposer {
       if (isFragment(t)) { if (t.length > 1 || /\d/.test(t)) rejected.push({ sentence: t.slice(0, 120), reason: 'FRAGMENT' }); return; }
       if (prevRejected && LEAD_CONJ.test(t)) { const r = t.replace(LEAD_CONJ, ''); if (/[A-Za-zऀ-ॿ]{2,}/.test(r)) t = r.charAt(0).toUpperCase() + r.slice(1); }
       const hits: Hits = {};
-      const why = judge(t, hits);
+      // Prompt 28: bind BEFORE judging (the binder tracks the reply's antecedents from every sentence the LLM wrote)
+      const binding: ClaimBinding = binder.bind(t);
+      bindCounts[binding.status] = (bindCounts[binding.status] || 0) + 1;
+      if (binding.status !== 'NOT_APPLICABLE' && isEntityClaim(t)) entityClaims++;
+      let why = judge(t, hits);
+      if (why && binding.status === 'EXPLICIT' && /^(FARE_MISMATCH|UNVERIFIED_AVAILABILITY|AVAILABILITY_MISMATCH|CLASS_NOT_LISTED|TIME_MISMATCH)/.test(why)) {
+        const d = diagnoseCrossEntity(t, binding, idx, availCtx.evidence, s.date);
+        if (d) crossEntity.push({ reason: why, diagnosis: d, binding: binding.status, trainNumber: binding.trainNumbers[0] });
+      }
+      if (!why) {
+        // …the sentence passed on its own; now its BOUND form must verify (same judges, the right train / class / date)
+        const bv = verifyBoundClaim(t, binding, idx, availCtx, { general });
+        if (bv.reason) {
+          why = bv.reason;
+          crossEntity.push({ reason: bv.reason, diagnosis: bv.reason === 'AMBIGUOUS_REFERENCE' ? 'AMBIGUOUS_REFERENCE' : (bv.diagnosis || 'CROSS_TRAIN_FACT'), binding: binding.status, trainNumber: binding.trainNumbers[0] });
+        }
+      } else if (/^CROSS_DATE_FACT/.test(why)) crossEntity.push({ reason: why, diagnosis: 'CROSS_DATE_FACT', binding: binding.status, trainNumber: binding.trainNumbers[0] });
       if (why) { rejected.push({ sentence: t.slice(0, 120), reason: why }); prevRejected = true; return; }
       prevRejected = false;
       if (hits.text && hits.text !== t) { t = hits.text; repaired++; }
@@ -365,7 +408,19 @@ export class NaturalResponseComposer {
       const reserve = question && !hasQ() && !t.includes('?') ? question.length + 1 : 0;
       if ((len() ? len() + 1 : 0) + t.length + reserve > maxLen) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       accepted.push(t);
-      provenance.push(classifyClaim(t, idx, hits, general));
+      {
+        const p = classifyClaim(t, idx, hits, general);
+        provenance.push(p);
+        const train = p.trainNumber ?? hits.fare?.train ?? (binding.trainNumbers.length === 1 ? binding.trainNumbers[0] : undefined);
+        claimProvenance.push({ ...p, claimId: `c${claimProvenance.length + 1}`,
+          entityType: train ? 'TRAIN' : p.claimType === 'SESSION_FACT' ? 'BOOKING' : 'NONE',
+          ...(train && !p.trainNumber ? { trainNumber: train } : {}),
+          ...(hits.fare?.cls && !p.travelClass ? { travelClass: hits.fare.cls } : {}),
+          ...(hits.fare?.date && !p.date ? { date: hits.fare.date } : {}),
+          ...(hits.fare?.provider ? { sourceProvider: hits.fare.provider } : {}),
+          verificationStatus: p.claimType === 'USER_PROVIDED' ? 'USER_PROVIDED' : (p.claimType === 'RAILWAY_LIVE_FACT' || p.claimType === 'TOOL_DERIVED_FACT') ? 'VERIFIED' : 'NOT_REQUIRED',
+          claimBindingStatus: binding.status });
+      }
       if (streamable) { i.onSegment!(streamed, t); streamed++; }
     };
 
@@ -404,7 +459,9 @@ export class NaturalResponseComposer {
     // non-streaming providers (or the tail of a stream)
     if (out?.text && !accepted.length && !rejected.length && !buf) for (const sn of toSentences(out.text)) take(sn);
     else if (buf.trim()) { take(buf); buf = ''; }
-    if (!accepted.length) return fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected);
+    const bindingSummary = (): ClaimBindingSummary => ({ counts: bindCounts, crossEntity,
+      status: crossEntity.some(c => c.diagnosis !== 'AMBIGUOUS_REFERENCE') ? 'CROSS_ENTITY_REMOVED' : crossEntity.length ? 'AMBIGUOUS_REMOVED' : entityClaims ? 'BOUND' : 'NONE' });
+    if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary() };
 
     // ---- guarantees ----
     if (confirmationTurn && !NOT_BOOKED_RE.test(accepted.join(' '))) return fallback('MISSING_NOT_BOOKED_DISCLAIMER', rejected);
@@ -415,7 +472,8 @@ export class NaturalResponseComposer {
     const segments = [...accepted];
     if (!streamable) segments.forEach((t, k) => i.onSegment?.(k, t));
     return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),
-      provenance, repaired, wordingCall: !agentText };
+      provenance, claimProvenance, repaired, wordingCall: !agentText,
+      claimBinding: bindingSummary() };
   }
 }
 

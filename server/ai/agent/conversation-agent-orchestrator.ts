@@ -26,6 +26,7 @@ import { RailwayToolService } from '../../railway/tools/railway-tool-service';
 import { LLMToolCallingRuntime, type ToolRuntimeResult, type ToolCallStep } from '../runtime/llm-tool-runtime';
 import { BookingState } from '@shared/states';
 import type { BookingSession, BookingEvent, PendingInteraction } from '@shared/entities';
+import { bindAndVerifyClaims } from '../response/claim-entity-binding';
 import { redactSensitive as redact } from '../../observability/tool-logger';
 import { NON_RAILWAY_PATTERNS, containsSensitiveRequest } from '../../security/validators/intent-validator';
 import { v4 as uuid } from '../orchestrator/utils';
@@ -152,6 +153,8 @@ interface TurnExtras {
   rejectedClaims?: string[];
   backendActions?: string[];
   naturalSpeech?: NaturalComposeResult;
+  /** Prompt 28: backend-reply sentences removed by claim ↔ entity binding (reasons only). */
+  entityRejections?: Array<{ sentence: string; reason: string; binding: string }>;
 }
 
 const SENSITIVE_REPLY = 'Main kabhi password, OTP, CAPTCHA, CVV, card, UPI PIN ya IRCTC credentials nahi maangta. Kripya aisi jaankari share na karein.';
@@ -516,8 +519,9 @@ export class ConversationAgentOrchestrator {
     sess.pendingInteraction = { ...((overrideValid && override) || derivePendingInteraction(sess)), setAtTurnId: turnId };
 
     extra.rejectedClaims = [];
+    extra.entityRejections = [];
     try { opts.observer?.onStatus?.('GENERATING_RESPONSE'); } catch { /* observer only */ }
-    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims);
+    const message = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims, extra.entityRejections);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     // Prompt 23: a native agent may have answered after a rejected proposal — the rejection stays the turn's error
@@ -573,7 +577,7 @@ export class ConversationAgentOrchestrator {
 
   // ---------------------------------------------------------------- composition
 
-  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = []): string {
+  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = [], entityRejections: Array<{ sentence: string; reason: string; binding: string }> = []): string {
     // Prompt 16: LLM wording may phrase authoritative facts only (invented train / fare / PNR / availability removed)
     const factCheck = (text: string): string => {
       // Prompt 17: RailwayResponseGroundingValidator — every fact needs RAILWAY_PROVIDER / BOOKING_RECORD / BOOKING_SESSION
@@ -623,9 +627,9 @@ export class ConversationAgentOrchestrator {
     // (or its validated error) — LLM wording can never add or upgrade a status.
     if (nonSearch.some(st => LIVE_TOOLS.has(st.result.toolName))) parts.push(liveToolMessage(nonSearch, mode));
     else if (llmFinalUseful) {
-      const guarded = factCheck(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode)));
+      const guarded = factCheck(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode, s, (r) => entityRejections.push(...r))));
       if (guarded) parts.push(guarded);
-      else if (rejectedClaims.length) parts.push(UNVERIFIED_FALLBACK);
+      else if (rejectedClaims.length || entityRejections.length) parts.push(UNVERIFIED_FALLBACK);
     }
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
@@ -670,7 +674,34 @@ export class ConversationAgentOrchestrator {
       toolValidationFailures: tv?.failures ?? 0, repeatedInvalidCalls: tv?.repeatedInvalid ?? 0, retryCount: tv?.correctedRetries ?? 0,
       latencyMs: Date.now() - a.startedAt, llmLatencyMs: a.rt?.llmLatencyMs ?? 0,
       validation: { accepted: ns?.segments.length ?? 0, rejected: (ns?.rejected || []).map(r => r.reason), repaired: ns?.repaired ?? 0, claimTypes, source: ns?.source ?? null },
-      ...(a.rt?.chain ? { chain: { ...a.rt.chain, sessionId: a.sessionId, turnId: a.turnId, stateBefore: String(a.stateBefore), stateAfter: String(this.state.getSession(a.sessionId).bookingState) } } : {})
+      ...(a.rt?.chain ? { chain: { ...a.rt.chain, sessionId: a.sessionId, turnId: a.turnId, stateBefore: String(a.stateBefore), stateAfter: String(this.state.getSession(a.sessionId).bookingState) } } : {}),
+      binding: this.bindingDiagnostics(a, x, wording)
+    };
+  }
+
+  /** Prompt 28: identity / binding / chain log fields (ids + codes only — never sentence text, PII or secrets). */
+  private bindingDiagnostics(a: { rt: ToolRuntimeResult | null; startedAt: number; sessionId: string; turnId: string }, x: TurnExtras, wording: boolean)
+    : NonNullable<NonNullable<TurnRecord['diagnostics']>['binding']> {
+    const ch = a.rt?.chain;
+    const ids = (a.rt?.steps || []).map(st => (st.result as any)?.identity).filter(Boolean);
+    const ns = x.naturalSpeech?.claimBinding;
+    const er = x.entityRejections || [];
+    const cross = [...(ns?.crossEntity || []).map(c => c.reason), ...er.map(r => r.reason)];
+    const agentCalls = a.rt?.llmCalls ?? 0;
+    const rejectedStep = (ch?.steps || []).some(st => st.decisionReason.startsWith('REJECTED'));
+    return {
+      sessionId: a.sessionId, turnId: a.turnId, llmCallCount: agentCalls + (wording ? 1 : 0), toolCallCount: (a.rt?.toolExecutions || []).length,
+      toolSequence: (ch?.steps || []).map(st => st.toolName), toolRequested: [...new Set((a.rt?.toolExecutions || []).map(r => r.tool))],
+      toolArgumentsValidated: (a.rt?.toolExecutions || []).filter(r => r.status !== 'REJECTED').length,
+      toolResultIds: (ch?.steps || []).map(st => st.toolResultId),
+      toolEntity: (ch?.steps || []).map(st => st.toolEntity || null),
+      entityBindingStatus: ids.some((i: any) => i.binding === 'MISMATCH') ? 'MISMATCH' : ids.some((i: any) => i.binding === 'BOUND') ? 'BOUND' : 'NONE',
+      claimBindingStatus: er.length ? (er.some(r => r.reason !== 'AMBIGUOUS_REFERENCE') ? 'CROSS_ENTITY_REMOVED' : 'AMBIGUOUS_REMOVED') : (ns?.status ?? 'NONE'),
+      claimBindingCounts: { ...(ns?.counts || {}) } as Record<string, number>, crossEntityRejections: cross,
+      validationFailures: a.rt?.toolValidation?.failures ?? 0, duplicateCallPrevented: !!ch?.duplicateCallPrevented,
+      retryCount: ch?.retryCount ?? 0, stepLimitReached: !!ch?.stepLimitReached, stepLimitReason: ch?.stepLimitReason ?? null,
+      secondCallReason: wording ? (x.secondCallReason ?? 'WORDING') : agentCalls > 1 ? (ch?.answeredAfterStop ? 'STEP_LIMIT_WRAP_UP' : rejectedStep ? 'TOOL_REJECTION_FEEDBACK' : 'TOOL_RESULTS') : null,
+      latencyMs: Date.now() - a.startedAt
     };
   }
 
@@ -894,8 +925,20 @@ export function lifecycleClaimGuard(text: string): string {
   return kept.join(' ');
 }
 
-export function factGuard(message: string, steps: ToolCallStep[], mode: 'TEXT' | 'VOICE'): string {
+export function factGuard(message: string, steps: ToolCallStep[], mode: 'TEXT' | 'VOICE', session?: BookingSession,
+  onRejected?: (r: Array<{ sentence: string; reason: string; binding: string }>) => void): string {
   const ok = steps.filter(st => st.status === 'ok' && st.result.toolName !== 'SEARCH_TRAINS');
+  // Prompt 28: claim ↔ entity binding — a fare / seat claim about the wrong train / class / date (or an unresolvable
+  // "is train") is removed sentence by sentence — also when the LLM answered WITHOUT a tool this turn (checked against
+  // the session's committed results); nothing left → the deterministic tool facts (or nothing → the caller's fallback)
+  if (session) {
+    const b = bindAndVerifyClaims(message, session, steps);
+    if (b.rejected.length) {
+      onRejected?.(b.rejected);
+      const kept = b.kept.join(' ').trim();
+      message = kept && /[A-Za-zऀ-ॿ]{3,}/.test(kept) ? kept : ok.map(st => factFromTool(st.result.toolName, st.result.data, mode)).filter(Boolean).join(' ');
+    }
+  }
   if (!ok.length) return message;
   const deterministic = () => ok.map(st => factFromTool(st.result.toolName, st.result.data, mode)).filter(Boolean).join(' ');
   const avail = ok.filter(st => st.result.toolName === 'CHECK_AVAILABILITY').map(st => String(st.result.data?.status || ''));

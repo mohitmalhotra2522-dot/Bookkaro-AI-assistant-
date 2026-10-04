@@ -73,6 +73,10 @@ export interface ToolChainStep {
   retryCount: number;
   latencyMs: number | null;
   parallelGroup: number | null;
+  /** Prompt 28: the entity this result is about ({ trainNumber, date, class, … }) — from the result identity */
+  toolEntity?: Record<string, string | number>;
+  /** Prompt 28: BOUND / MISMATCH / NO_ENTITY (MISMATCH = provider answered for another entity; result unused) */
+  entityBindingStatus?: string;
 }
 
 /** Prompt 27 — observability of one multi-step chain (one user turn). */
@@ -90,6 +94,11 @@ export interface ToolChainTrace {
   budget: { maxToolSteps: number; maxRounds: number; maxLlmIterations: number };
   latencyMs: number;
   steps: ToolChainStep[];
+  /** Prompt 28: a same-turn duplicate (same tool + validated args + entity + date, no new info) reused the result */
+  duplicateCallPrevented?: boolean;
+  /** Prompt 28: the step budget / loop guard stopped execution (results preserved) */
+  stepLimitReached?: boolean;
+  stepLimitReason?: string | null;
 }
 
 /** Part 4 — what the LLM may emit. Raw expressions ("kal", "Delhi") are allowed; the backend resolves them. */

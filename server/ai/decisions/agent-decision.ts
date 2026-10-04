@@ -367,6 +367,15 @@ export interface TurnRecord {
     validation: { accepted: number; rejected: string[]; repaired: number; claimTypes: Record<string, number>; source: 'LLM' | 'FALLBACK' | null };
     /** Prompt 27: multi-step chain observability (ids / counts / sanitized argument summaries only). */
     chain?: import('@shared/railway-tool-runtime').ToolChainTrace & { sessionId: string; turnId: string; stateBefore: string; stateAfter: string };
+    /** Prompt 28: tool-result identity + claim binding observability (no ids shown to users, no text, no secrets). */
+    binding?: {
+      sessionId: string; turnId: string; llmCallCount: number; toolCallCount: number;
+      toolSequence: string[]; toolRequested: string[]; toolArgumentsValidated: number; toolResultIds: string[];
+      toolEntity: Array<Record<string, string | number> | null>; entityBindingStatus: 'BOUND' | 'MISMATCH' | 'NONE';
+      claimBindingStatus: string; claimBindingCounts: Record<string, number>; crossEntityRejections: string[];
+      validationFailures: number; duplicateCallPrevented: boolean; retryCount: number;
+      stepLimitReached: boolean; stepLimitReason: string | null; secondCallReason: string | null; latencyMs: number;
+    };
   };
   // ---- Prompt 9 observability ----
   bookingReadiness?: { ready: boolean; blockers: string[]; warnings: string[] };

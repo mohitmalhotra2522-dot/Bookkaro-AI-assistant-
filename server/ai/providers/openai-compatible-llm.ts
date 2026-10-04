@@ -17,6 +17,7 @@ import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT
 import type { AgentTranscriptStep } from './llm-provider';
 import { v4 as uuid } from '../orchestrator/utils';
 import { detectLanguageStyle } from '@shared/voice/language-style';
+import { entityOf, structuredToolError } from '../tool-runtime/tool-result-identity';
 
 export type FetchLike = (url: string, init: { method: string; headers: Record<string, string>; body: string; signal?: AbortSignal }) => Promise<{
   ok: boolean; status: number; json(): Promise<any>; text(): Promise<string>; body?: any;
@@ -157,7 +158,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
         date: input.session.date, selectedTrain: (input.session.selectedTrain as any)?.number ?? null, selectedClass: input.session.selectedClass ?? null,
         passengersCount: input.session.passengersCount ?? null
       },
-      toolResults: input.toolResults.map(r => ({ tool: r.toolName, ok: r.ok, status: r.status, data: trim(r.data), error: r.error?.code })),
+      toolResults: input.toolResults.map(r => ({ tool: r.toolName, ...(entityOf(r.identity) ? { entity: entityOf(r.identity) } : {}), ok: r.ok, status: r.status, data: trim(r.data), error: r.error?.code })),
       changes: input.changes, appliedActions: input.appliedActions
     };
     const body = {
@@ -303,9 +304,13 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
     }
     for (const c of st.toolCalls) {
       const r = st.results.find(x => String(x.callId) === c.callId);
+      // Prompt 28: ToolResultIdentityBinding — every result names the entity it belongs to; errors are structured
       const content = r
-        ? { ok: r.ok, ...(r.ok ? { data: trimResult(r.data) } : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details) } }) }
-        : { ok: false, error: { code: 'NOT_EXECUTED', message: 'Not executed (the session changed first) — decide again from the current context.' } };
+        ? { ...(r.resultRef ? { toolResultId: r.resultRef } : {}), tool: r.toolName, ...(entityOf(r.identity) ? { entity: entityOf(r.identity) } : {}), ok: r.ok,
+            ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
+              : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details),
+                  ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)) } }) }
+        : { tool: c.name, ok: false, error: { code: 'NOT_EXECUTED', message: 'Not executed (the session changed first) — decide again from the current context.', errorType: 'STALE', tool: c.name, reason: 'NOT_EXECUTED', retryable: false } };
       messages.push({ role: 'tool', tool_call_id: c.callId, content: clip(JSON.stringify(content), MAX_TOOL_RESULT_CHARS) });
     }
   }
@@ -315,6 +320,11 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
 }
 
 /** Prompt 25 Part 8: the structured validation reason (argument / expected / received) — nothing else from details. */
+/** Prompt 28: { errorType, tool, argument, reason, retryable } — code / message are already present. */
+function pickStructured(e: ReturnType<typeof structuredToolError>): Record<string, any> {
+  return { errorType: e.errorType, tool: e.tool, ...(e.argument ? { argument: e.argument } : {}), reason: e.reason, retryable: e.retryable };
+}
+
 function argumentDetails(d: any): Record<string, string> {
   if (!d || typeof d !== 'object') return {};
   const out: Record<string, string> = {};
