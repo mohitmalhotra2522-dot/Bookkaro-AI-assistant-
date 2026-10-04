@@ -71,6 +71,7 @@ import { speechOf } from '../conversation/assistant-response';
 import { actionLedgerFromSteps, guardActionClaims, type ActionExecution, type ActionClaimDiagnostic } from '../response/action-claims';
 import { guardReferenceClaims, type ReferenceClaimDiagnostic } from '../response/reference-claims';
 import { guardOutcomeClaims, honestFailureFallback, type OutcomeClaimDiagnostic } from '../response/outcome-claims';
+import { guardBookingStateClaims } from '../response/booking-state-claims';
 import { recordToolArgReference, type ReferenceResolutionRecord } from '../context/reference-context';
 
 export interface ProcessTurnOptions {
@@ -478,7 +479,8 @@ export class ConversationAgentOrchestrator {
       else if (infoSelection && ORDER_BEFORE_PREP.has(stateBefore)) sp.selectionPurpose = 'INFORMATION';
       const holdAtSelection = sp.selectionPurpose === 'INFORMATION';
       try {
-        prep = await this.preparation.advance(sessionId, ctx, calls => bound.runTools(calls), { confirm, reviewVersion: opts.reviewVersion, approveReview: rt.applyOutcomes.some(o => o.applied.includes('REVIEW_APPROVED')), holdAtSelection });
+        prep = await this.preparation.advance(sessionId, ctx, calls => bound.runTools(calls), { confirm, reviewVersion: opts.reviewVersion, approveReview: rt.applyOutcomes.some(o => o.applied.includes('REVIEW_APPROVED')), holdAtSelection, freshSince: startedAt,
+          turnExecutionIds: rt.steps.map(st => st.execution?.toolExecutionId).filter((x): x is string => !!x) });
       } catch (e: any) {
         const err: OrchestratorError = { code: e?.code === 'INVALID_STATE_TRANSITION' ? 'INVALID_STATE_TRANSITION' : 'TOOL_FAILED', message: 'Maaf kijiye, ye step abhi complete nahi ho paaya. Kripya dobara try karein.' };
         return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
@@ -601,7 +603,7 @@ export class ConversationAgentOrchestrator {
           selectedClassBefore: voiceBefore.cls, passengersCountBefore: voiceBefore.count,
           steps: [...rt.steps, ...(prep?.steps || [])], appliedActions: extra.backendActions || [],
           changes: (extra.patches || []).map(p => ({ field: String(p.field), corrected: p.kind === 'CORRECTION' })),
-          error: turnError ? { code: turnError.code, message: turnError.message }
+          error: turnError ? { code: turnError.code, message: turnError.message, ...((turnError as any).details?.blockers ? { details: { blockers: (turnError as any).details.blockers } } : {}) }
             : forbiddenAttempted(rt) ? { code: 'FORBIDDEN_ACTION', message: SAFE_ERROR_MESSAGE.FORBIDDEN_ACTION } : null,
           pendingQuestionCode: pendingQuestionCode(sess.pendingInteraction),
           pendingQuestion: pendingQuestionCode(sess.pendingInteraction) ? questionFor(sess.pendingInteraction, sess, 'VOICE') || null : null,
@@ -668,9 +670,14 @@ export class ConversationAgentOrchestrator {
     // (or its validated error) — LLM wording can never add or upgrade a status.
     if (nonSearch.some(st => LIVE_TOOLS.has(st.result.toolName))) parts.push(liveToolMessage(nonSearch, mode));
     else if (llmFinalUseful) {
-      const guarded = factCheck(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode, s, (r) => entityRejections.push(...r))));
+      const prepChange = !s.bookingExecution && rt.applyOutcomes.some(o => o.applied.some(a => PREPARATION_CHANGE_ACTIONS.has(a)));
+      // Prompt 33: booking-state claims ("ticket book ho gayi", "handoff ready", "review ready") must match the session
+      const stateGuard = guardBookingStateClaims(rt.finalMessage, s);
+      entityRejections.push(...stateGuard.removed.map(r => ({ sentence: r.sentence, reason: `BOOKING_STATE_CLAIM:${r.reason}`, binding: 'NONE' })));
+      const guarded = stateGuard.text ? factCheck(lifecycleClaimGuard(factGuard(stateGuard.text, rt.steps, mode, s, (r) => entityRejections.push(...r)), prepChange)) : '';
       if (guarded) parts.push(guarded);
-      else if (rejectedClaims.length || entityRejections.length) parts.push(honestFailureFallback(rt.steps));
+      // (a removed booking-state claim is not a failed fact — the backend's own state message follows)
+      else if (rejectedClaims.length || entityRejections.some(r => !String(r.reason).startsWith('BOOKING_STATE_CLAIM:'))) parts.push(honestFailureFallback(rt.steps));
     }
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
@@ -862,7 +869,24 @@ export class ConversationAgentOrchestrator {
             toolRequested: steps.map(st => st.toolCall.name),
             toolExecuted: steps.filter(st => !!st.execution && st.execution.status !== 'REJECTED').map(st => st.toolCall.name),
             errorType: preparationErrorTypeOf(a.error?.code) ?? toolErrors.find(t => t.type)?.type ?? null,
-            toolErrors
+            toolErrors,
+            // Prompt 33 (§38): booking audit — ids / versions / statuses / times only (no passenger data, no secrets)
+            audit: (() => {
+              const t: any = s.selectedTrain;
+              const last = (tool: string) => { const st = [...steps].reverse().find(x => x.toolCall.name === tool && !!x.execution);
+                return st ? toolOutcomeOf({ ok: !!st.result.success, status: st.execution?.status, code: st.result.error?.code }) : null; };
+              const hs: any = s.handoffSession;
+              return {
+                trainNumber: t ? String(t.number || t.trainNumber) : null, travelClass: s.selectedClass ?? null, journeyDate: s.date ?? null,
+                availabilityRefresh: last('CHECK_AVAILABILITY'), fareRefresh: last('GET_FARE'),
+                reviewCreatedAt: (s.review as any)?.snapshot?.createdAt ?? (s.review as any)?.createdAt ?? null,
+                confirmedAt: s.confirmation?.confirmedAt ?? null, confirmationState: s.confirmation?.status ?? null,
+                handoffSessionId: hs?.handoffSessionId ?? null, handoffState: hs?.status ?? s.handoff?.status ?? null,
+                invalidationReason: (s.review && !s.review.valid ? (s.review as any).invalidatedReason : null)
+                  ?? (hs && hs.status !== 'READY' && hs.status !== 'CREATED' ? hs.statusReason ?? null : null)
+                  ?? (s.confirmation && s.confirmation.status !== 'VALID' ? s.confirmation.statusReason ?? null : null)
+              };
+            })()
           };
         })()
       }
@@ -981,9 +1005,23 @@ function joinParts(parts: string[]): string {
  * those facts are phrased only by BookingLifecycleActionService from provider results.
  */
 const LIFECYCLE_CLAIM_RE = /(cancel(?:led)?\s+(?:ho\s+(?:gay[ai]|chuk[ai])|kar\s+di(?:ya)?|kar\s+diya\s+gaya|confirm)|cancellation\s+(?:confirm|complete|successful|ho\s+gay)|booking\s+(?:is\s+)?cancelled|(?:date|class|passenger|naam|age|booking)\s+(?:change|update|modify|modified|upgrade)\s*(?:ho\s+(?:gay[ai]|chuk[ai])|kar\s+di(?:ya)?|successful|confirm)|refund\s+(?:mil\s+gaya|processed|credited|aa\s+gaya|ho\s+gaya|received|initiate\s+ho\s+gaya)|₹\s?\d+\s+(?:extra|refund))/i;
-export function lifecycleClaimGuard(text: string): string {
+/** Prompt 33: backend-applied pre-booking preparation changes (applier outcome labels). */
+const PREPARATION_CHANGE_ACTIONS = new Set(['PASSENGER_DETAILS_UPDATED', 'PASSENGERS_UPDATED', 'DATE_UPDATED', 'JOURNEY_UPDATED', 'TRAIN_SELECTED', 'CLASS_SELECTED']);
+/** Lifecycle MODIFICATION phrasing (date / class / passenger / naam / age … change / update … kar di). */
+const MODIFICATION_CLAIM_RE = /(?:date|class|passenger|naam|age|booking)\s+(?:change|update|modify|modified|upgrade)\s*(?:ho\s+(?:gay[ai]|chuk[ai])|kar\s+di(?:ya)?|successful|confirm)/i;
+/**
+ * Prompt 33: `preparationChangeApplied` — THIS turn the backend applied a pre-booking preparation change (passenger
+ * details / count, date, route, train, class) and no booking execution exists. Then "age update kar di" describes that
+ * applied change (P29 action-claim validation already ties it to real execution), not a post-booking modification:
+ * such a sentence is kept. Cancellation / refund claims are always removed.
+ */
+export function lifecycleClaimGuard(text: string, preparationChangeApplied = false): string {
   if (!text || !LIFECYCLE_CLAIM_RE.test(text)) return text;
-  const kept = text.split(/(?<=[.!?।])\s+/).filter(sn => !LIFECYCLE_CLAIM_RE.test(sn));
+  const claims = (sn: string) => LIFECYCLE_CLAIM_RE.test(sn)
+    && !(preparationChangeApplied && MODIFICATION_CLAIM_RE.test(sn) && !LIFECYCLE_CLAIM_RE.test(sn.replace(MODIFICATION_CLAIM_RE, ' ')));
+  const parts = text.split(/(?<=[.!?।])\s+/);
+  if (!parts.some(claims)) return text;
+  const kept = parts.filter(sn => !claims(sn));
   kept.push('Cancellation, modification ya refund ka status sirf booking provider confirm karta hai — main ise assume nahi karta.');
   return kept.join(' ');
 }

@@ -62,6 +62,16 @@ export interface BookingReadinessResult {
 }
 
 const trainNo = (t: any): string | undefined => t ? String(t.number || t.trainNumber) : undefined;
+/**
+ * Prompt 33: was this provider result obtained in the CURRENT turn? By execution identity (this turn's tool executions —
+ * robust to equal / frozen clocks); the retrieval time is only a fallback for an entry without an execution id.
+ * No turn context (freshSince undefined) → no current-turn requirement (TTL policy only, e.g. confirmation).
+ */
+function currentTurn(x: any, freshSince?: number, freshIds?: ReadonlySet<string>): boolean {
+  if (freshSince === undefined) return true;
+  if (x?.toolExecutionId && freshIds) return freshIds.has(String(x.toolExecutionId));
+  return Date.parse(x?.retrievedAt || x?.fetchedAt || '') >= freshSince;
+}
 const ageMs = (iso: string | undefined, now: number) => (iso ? now - Date.parse(iso) : Number.POSITIVE_INFINITY);
 
 export class BookingReadinessEvaluator {
@@ -69,17 +79,23 @@ export class BookingReadinessEvaluator {
 
   get preparationPolicy(): PreparationPolicy { return this.policy; }
 
-  availabilityFreshness(s: BookingSession, now = Date.now()): DataFreshness {
+  /**
+   * Prompt 33: `freshSince` (epoch ms, the current turn's start) — when given, data fetched BEFORE it is STALE. A NEW
+   * review version is only built from availability / fare obtained in the review-building turn (by the LLM's own tool
+   * call or the booking-review refresh boundary); a previous turn's fare / availability is never review authority.
+   */
+  availabilityFreshness(s: BookingSession, now = Date.now(), freshSince?: number, freshIds?: ReadonlySet<string>): DataFreshness {
     const t = trainNo(s.selectedTrain);
     const cls = s.selectedClass;
     const a: any = cls && s.availability ? (s.availability as any)[cls] : undefined;
     if (!a) return 'MISSING';
     const matches = (!a.trainNumber || a.trainNumber === t) && (!a.travelClass || a.travelClass === cls) && (!a.date || !s.date || a.date === s.date);
     if (!matches) return 'STALE';
+    if (!currentTurn(a, freshSince, freshIds)) return 'STALE';
     return ageMs(a.retrievedAt, now) <= this.policy.availabilityMaxAgeMs ? 'FRESH' : 'STALE';
   }
 
-  fareFreshness(s: BookingSession, now = Date.now()): DataFreshness {
+  fareFreshness(s: BookingSession, now = Date.now(), freshSince?: number, freshIds?: ReadonlySet<string>): DataFreshness {
     const f: any = s.fare;
     if (!f) return 'MISSING';
     const matches = (!f.trainNumber || f.trainNumber === trainNo(s.selectedTrain))
@@ -87,10 +103,11 @@ export class BookingReadinessEvaluator {
       && (!f.passengersCount || f.passengersCount === (s.passengersCount || 1))
       && (!f.origin || f.origin === s.origin) && (!f.destination || f.destination === s.destination);
     if (!matches) return 'STALE';
+    if (!currentTurn(f, freshSince, freshIds)) return 'STALE';
     return ageMs(f.retrievedAt, now) <= this.policy.fareMaxAgeMs ? 'FRESH' : 'STALE';
   }
 
-  evaluate(s: BookingSession, now = Date.now()): BookingReadinessResult {
+  evaluate(s: BookingSession, now = Date.now(), opts: { freshSince?: number; freshIds?: ReadonlySet<string> } = {}): BookingReadinessResult {
     const blockers: BookingBlocker[] = [];
     const missing: string[] = [];
     const warnings: string[] = [];
@@ -145,8 +162,8 @@ export class BookingReadinessEvaluator {
     // railway facts (only meaningful once train + class are valid)
     let availability: DataFreshness = 'MISSING', fare: DataFreshness = 'MISSING';
     if (trainReady && classReady) {
-      availability = this.availabilityFreshness(s, now);
-      fare = this.fareFreshness(s, now);
+      availability = this.availabilityFreshness(s, now, opts.freshSince, opts.freshIds);
+      fare = this.fareFreshness(s, now, opts.freshSince, opts.freshIds);
       if (availability !== 'FRESH') refresh.push('AVAILABILITY');
       if (fare !== 'FRESH') refresh.push('FARE');
       if (availability === 'STALE') add('STALE_AVAILABILITY');

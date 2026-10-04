@@ -102,10 +102,12 @@ describe('G3 — preparation → fresh data → review → confirmation', () => 
     expect(r.events).toEqual(expect.arrayContaining(['AVAILABILITY_REFRESHED', 'FARE_REFRESHED', 'REVIEW_CREATED']));
     const rv = state.getSession(sid).review!.data as any;
     expect(Date.parse(rv.fare.retrievedAt)).toBeGreaterThan(Date.now() - 60_000);
-    // fresh data is NOT re-fetched needlessly
+    // Prompt 33 (§12/§14 — supersedes the earlier "not re-fetched" expectation): a NEW review version is built only from
+    // availability / fare obtained in THAT turn — a previous turn's fare is never review authority
     CountingProvider.calls = [];
     await say(sid, 'Rahul ki age 32 hai');
-    expect(CountingProvider.calls).toEqual([]);
+    expect(CountingProvider.calls).toEqual(['availability:CC', 'fare:CC']);
+    expect(state.getSession(sid).review).toMatchObject({ reviewVersion: 2, valid: true });
   });
 
   it('[23] fare REQUIRED by policy but unavailable → REQUIRED_TOOL_DATA_MISSING / BOOKING_NOT_READY; no review, no handoff', async () => {
@@ -124,9 +126,9 @@ describe('G3 — preparation → fresh data → review → confirmation', () => 
     expect(r.newState).not.toBe(BookingState.IRCTC_HANDOFF_READY);
   });
 
-  it('[24] fare optional & unavailable → review labels it "Fare abhi verify nahi hua hai." (never estimated)', async () => {
+  it('[24] fare optional (explicit policy opt-in since Prompt 33) & unavailable → review labels it "Fare abhi verify nahi hua hai." (never estimated)', async () => {
     railwayRegistry.setActive('p9-nofare');
-    mk();
+    mk(new MockLLMProvider(), { preparationPolicy: { requireFare: false } });   // Prompt 33: the DEFAULT now requires fare
     const sid = state.createSession().sessionId;
     const r = await toAwaiting(sid);
     expect(r.newState).toBe(BookingState.AWAITING_CONFIRMATION);

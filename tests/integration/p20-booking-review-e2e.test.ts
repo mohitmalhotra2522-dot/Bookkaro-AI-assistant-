@@ -156,14 +156,17 @@ describe('P20 G3 — Part 54 scenarios A–F', () => {
     expect(h.s().review.snapshot.fare).toMatchObject({ status: 'VERIFIED', total: 1040 });
   });
 
-  it('[D] "Age 32 kar do" → field-only update, review rebuilt (version++) via READY_FOR_REVIEW, no provider call', async () => {
+  it('[D] "Age 32 kar do" → field-only update (state action), review rebuilt (version++) via READY_FOR_REVIEW from fresh availability + fare', async () => {
     const h = mk();
     await run(h, REVIEW_2);
     const before = rail.total();
     const r = await h.say('First passenger ki age 32 kar do');
-    expect(rail.total()).toBe(before);
+    // P33: a NEW review version is built only from THIS turn's availability + fare → the review-boundary refresh
+    // (exactly one availability + one fare call); no search, and the LLM itself requested no railway tool.
+    expect(rail.total()).toBe(before + 2);
+    expect(ran(r)).toEqual(['CHECK_AVAILABILITY', 'GET_FARE']);
     expect(pax(h)[0]).toBe('Mohit/32/MALE');
-    expect(prep(r)).toMatchObject({ reviewVersion: 2, reviewStatus: 'CURRENT', preparationPath: ['READY_FOR_REVIEW', 'REVIEW', 'AWAITING_CONFIRMATION'], actionKind: 'BOOKING_SESSION', toolRequested: [] });
+    expect(prep(r)).toMatchObject({ reviewVersion: 2, reviewStatus: 'CURRENT', preparationPath: ['READY_FOR_REVIEW', 'REVIEW', 'AWAITING_CONFIRMATION'], actionKind: 'BOOKING_SESSION', toolRequested: ['CHECK_AVAILABILITY', 'GET_FARE'] });
     expect(h.s().review.snapshot.reviewVersion).toBe(2);
   });
 
@@ -173,8 +176,9 @@ describe('P20 G3 — Part 54 scenarios A–F', () => {
     const f0 = rail.n.fare || 0;
     const r = await h.say('Abhi fare dobara check karo');
     expect(rail.n.fare).toBe(f0 + 1);
-    expect(ran(r)).toEqual(['GET_FARE']);
-    expect(prep(r)).toMatchObject({ reviewVersion: 2, actionKind: 'RAILWAY_INFORMATION', toolExecuted: ['GET_FARE'] });
+    // P33: the agent's own GET_FARE is current-turn evidence (not fetched twice); the boundary adds only availability
+    expect(ran(r)).toEqual(['CHECK_AVAILABILITY', 'GET_FARE']);
+    expect(prep(r)).toMatchObject({ reviewVersion: 2, actionKind: 'RAILWAY_INFORMATION', toolExecuted: ['GET_FARE', 'CHECK_AVAILABILITY'] });
   });
 
   it('[F] "Confirm." with a CURRENT review → BOOKING_CONFIRMATION_REQUESTED; without one → no confirmation', async () => {

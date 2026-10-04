@@ -44,6 +44,9 @@ Env:
 | LLM chain loop (tool calls, dedup, step budget, chain trace) | `server/ai/runtime/llm-tool-runtime.ts` |
 | Provider execution, timeout, retry, malformed-data check | `server/ai/tool-runtime/railway-tool-runtime.ts` |
 | Outcome categories, data source, shape validation (P32) | `server/ai/tool-runtime/tool-outcome.ts` |
+| Booking preparation view for the LLM (P33) | `server/ai/context/context-builder.ts` → `bookingPreparationView` |
+| Review boundary / freshness / block reasons (P33) | `server/booking/booking-preparation-service.ts` (`freshSince`, `dependencyFailureReason`), `server/booking/booking-readiness.ts` |
+| Booking-state claim guard (P33) | `server/ai/response/booking-state-claims.ts`; review-facts + block-reason guarantees in `natural-response-composer.ts` |
 | Error vocabulary / retry policy | `server/ai/tool-runtime/tool-error-normalizer.ts`, `tool-retry-policy.ts` |
 | LLM adapter + native tool messages | `server/ai/providers/openai-compatible-llm.ts`; MockLLM `server/ai/providers/mock-llm.ts` |
 | System prompts | `server/ai/prompts/system-prompt.ts` |
@@ -80,7 +83,8 @@ Env:
 | 29 | `677b453` | truthful action state / progress-claim guard |
 | 30 | `36c0469` | contextual reference resolution + agent memory |
 | 31 | — | **no P31 commit exists in this workspace** (P32 was built on P30) |
-| 32 | see `git log` | full LLM agent authority + honest provider outcomes (this milestone) |
+| 32 | `397ce32` | full LLM agent authority + honest provider outcomes |
+| 33 | see `git log` | AI-driven booking preparation + review + secure handoff readiness (this milestone) — see `docs/AGENT_AUTHORITY.md` §7 |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -101,15 +105,19 @@ Env:
 11. Stop after each milestone. End the report with "P(N+1) NOT STARTED.". Don't redesign the premium UI.
 12. Live check (when asked): only with a configured real provider, max 3 requests, no reruns.
 
-## 6. Test groups (P32 definition)
+## 6. Test groups (P33 definition — booking milestone)
 
 - **G1:** `npm run build` (tsc -b + vite build).
-- **G2 (domain/provider/security, unit):** `tests/unit/p17-tool-runtime.test.ts`, `p25`–`p30` unit files, `tests/unit/p32-*.test.ts`.
-- **G3 (e2e):** `tests/integration/p17-tool-runtime-e2e.test.ts`, `p25`–`p30` e2e files, `tests/integration/p32-*-e2e.test.ts`.
+- **G2 (booking domain / security, unit):** `tests/unit/p9-passenger-readiness`, `p10-execution-gateway`, `p11-handoff-session`, `p12-booking-provider`, `p13-execution-lifecycle`, `p15-lifecycle-actions`, `p19-passenger-collection`, `p20-passenger-workflow`, `p23-real-llm-adapter`, `p32-agent-authority`, `p33-booking-preparation`.
+- **G3 (NL / booking e2e):** `tests/integration/p8-booking-engine`, `p9-booking-preparation`, `p10-confirmation-boundary`, `p11-handoff-e2e`, `p12-provider-e2e`, `p13-lifecycle-e2e`, `p15-lifecycle-actions-e2e`, `p19-booking-preparation-e2e`, `p20-booking-review-e2e`, `p23-agentic-e2e`, `p32-agent-authority-e2e`, `p33-booking-e2e`.
+- (P32 definition, for railway-information work: G2 = p17 + p25–p30 + p32 unit; G3 = p17 + p25–p30 + p32 e2e.)
 
 Known pre-existing failures in older suites (they also fail at earlier HEADs; report, don't "fix" blindly):
 - p19 [13]/[14]/[20], p16 [2]/[6], p8 [19][H] + closed-tool-set, p17 e2e [14], p18 [11];
-- p7-agent-loop Group 3, unit p18 [6][7][8], p23 [8], p7 unit SEARCH_TRAINS date.
+- p7-agent-loop Group 3, unit p18 [6][7][8], p23 [8], p7 unit SEARCH_TRAINS date;
+- found during P33 (verified failing at `397ce32` too): unit p12 [13] (pins 5 REGISTERED_TOOLS; CHECK_PNR / TRACK_TRAIN exist since P14), integration p8 [24] (expects the old "Pehle train select kar lete hain, phir fare…" wording).
+
+P33 open item: G3 p33 [2] failed in the confirming run because the test helper `ctxOf` read the turn's LAST LLM request (after the passenger was applied) instead of the FIRST decision request; the helper was fixed (`find` instead of `reverse().find`) but NOT re-run (once-only rule). Verify it first in the next workspace.
 
 ### Pinned invariants (must not break)
 
@@ -117,6 +125,9 @@ Known pre-existing failures in older suites (they also fail at earlier HEADs; re
 - P26 reasons: `UNVERIFIED_AVAILABILITY`, `CLASS_NOT_LISTED:<cls>`, `AVAILABILITY_MISMATCH`. P25: `FARE_MISMATCH:<n>`. P22: `UNGROUNDED_NUMBER:<n>`, `UNGROUNDED_FARE_AMOUNT:<n>`, `UNGROUNDED_COUNT:…`.
 - P30 reference reasons: `STALE_INDEX_REFERENCE`, `INVALID_INDEX_REFERENCE`, `INDEX_REFERENCE_MISMATCH`, `NOT_IN_CURRENT_RESULTS`, `IN_CURRENT_RESULTS`.
 - P32 outcome reasons: `NO_RESULTS_CLAIM_ON_<OUTCOME>`, `NO_RESULTS_CONTRADICTS_DATA`, `NO_RESULTS_CLAIM_WITHOUT_EMPTY_RESULT`, `SOURCE_CLAIM_*`, `MOCK_DATA_PRESENTED_AS_LIVE`, `LIVE_CLAIM_WITHOUT_LIVE_DATA`.
+- P33: a review is VALID only with current matching availability AND fare (`DEFAULT_PREPARATION_POLICY` = both required); a NEW review version needs data from that turn — by EXECUTION IDENTITY (`turnExecutionIds` = this turn's LLM tool executions + the boundary refresh; `freshSince` timestamp only as fallback for entries without `toolExecutionId`; robust to frozen clocks); confirmation keeps the TTL window (`FRESHNESS_POLICY`).
+- P33 booking-state reasons: `BOOKED_CLAIM_NEVER_VALID`, `HANDOFF_CLAIM_WITHOUT_HANDOFF`, `REVIEW_CLAIM_WITHOUT_CURRENT_REVIEW` (composer: `BOOKING_STATE_CLAIM:<r>`; outcomeClaims kind `BOOKING_STATE`). Composer fallbacks `REVIEW_FACTS_MISSING`, `REVIEW_BLOCK_REASON_MISSING`.
+- P33: `context.bookingPreparation` carries statuses only (no ids, fare amounts, availability values, credentials). No service fee exists — none is added.
 - Entity, action, reference and outcome rejections go to `diagnostics.*`, never into the orchestrator's `extra.rejectedClaims`.
 - Never add fields to `provenance` entries. Keep new runtime counters out of `RailwayToolRuntime.validation`.
 - Tool-limit text: "Request bahut lambi ho gayi — thoda simple karke poochiye." LLM_UNAVAILABLE text: "Maaf kijiye, main abhi jawab nahi de paa raha. Aapki booking details safe hain — thodi der mein dobara boliye."
@@ -135,7 +146,7 @@ Known pre-existing failures in older suites (they also fail at earlier HEADs; re
 - Native tool calling needs a tool message for every `tool_call_id`. Muse takes ~12–40 s per turn (timeout ≤ 60 s).
 - Use `rt.toolExecutions` / `turnLog.diagnostics.*` in tests. Voice tests need `agent.listen()` first.
 
-## 8. Next-step template (for P33+)
+## 8. Next-step template (for P34+)
 
 1. `git remote -v` (stop if it shows RailBook) → `git log --oneline | head` → `npm ci`.
 2. Read this file + `docs/AGENT_AUTHORITY.md`.

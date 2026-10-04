@@ -11,6 +11,7 @@
  * version reviews, guard confirmation. It NEVER books, logs in, submits,
  * pays, requests OTP/CAPTCHA or produces a PNR.
  */
+import { toolOutcomeOf } from '../ai/tool-runtime/tool-outcome';
 import { bookingPreparationGuard } from './preparation/booking-preparation-guard';
 import { confirmationGuard, recordDependencyOutcome } from './preparation/booking-preparation';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
@@ -66,6 +67,13 @@ export interface PrepOptions {
   approveReview?: boolean;
   /** Prompt 27: the selection only answers an information request — stay at CLASS_SELECTED (no booking preparation). */
   holdAtSelection?: boolean;
+  /**
+   * Prompt 33: the current turn's start (epoch ms). A NEW review version needs availability + fare obtained in THIS turn;
+   * older data is refreshed through the existing booking-review boundary (never an informational auto-call).
+   */
+  freshSince?: number;
+  /** Prompt 33: tool executions of THIS turn (the LLM's own calls); the review-boundary refresh adds its own. */
+  turnExecutionIds?: string[];
 }
 
 const idx = (s: BookingState) => STATE_ORDER.indexOf(s);
@@ -101,9 +109,9 @@ export class BookingPreparationService {
   now(): number { return this.clock(); }
 
   /** Deterministic readiness; snapshot stored on the session; event on change. */
-  evaluate(sessionId: string, ctx?: PrepCtx): BookingReadinessResult {
+  evaluate(sessionId: string, ctx?: PrepCtx, freshSince?: number, freshIds?: ReadonlySet<string>): BookingReadinessResult {
     const s = this.state.getSession(sessionId);
-    const r = this.readiness.evaluate(s, this.clock());
+    const r = this.readiness.evaluate(s, this.clock(), { freshSince, freshIds });
     const prev = s.readiness;
     s.readiness = { ready: r.ready, blockers: r.blockers, missingFields: r.missingFields, warnings: r.warnings, nextRequiredField: r.nextRequiredField as any, evaluatedAt: r.evaluatedAt };
     const changed = !prev || prev.ready !== r.ready || prev.blockers.join() !== r.blockers.join() || prev.missingFields.join() !== r.missingFields.join();
@@ -368,7 +376,7 @@ export class BookingPreparationService {
       }
     }
     if (S().bookingState === BookingState.PASSENGERS_READY) {
-      const r = await this.refreshAndReview(sessionId, ctx, runTools, out);
+      const r = await this.refreshAndReview(sessionId, ctx, runTools, out, opts.freshSince, opts.turnExecutionIds);
       if (r === 'stale') return { ...out, stale: true };
     } else if (S().bookingState === BookingState.REVIEW && S().review?.valid && opts.approveReview) {
       // Only an explicit approval moves an existing review back to confirmation
@@ -395,7 +403,7 @@ export class BookingPreparationService {
     if (this.state.getSession(sessionId).bookingState === BookingState.COLLECTING_PASSENGER_DETAILS && passengerCollection.allComplete(this.state.getSession(sessionId))) {
       this.state.transitionState(sessionId, BookingState.PASSENGERS_READY);
     }
-    out.error = { code: 'BOOKING_NOT_READY', message: this.blockerMessage(r), details: { blockers: r.blockers } };
+    out.error = { code: 'BOOKING_NOT_READY', message: this.blockerMessage(r, this.state.getSession(sessionId)), details: { blockers: r.blockers } };
     out.notes.push(out.error.message);
     out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', hint: 'Dobara check karun? Haan boliye.', data: { kind: 'RETRY_PREPARATION', blockers: r.blockers } };
     out.readiness = this.evaluate(sessionId, ctx);
@@ -403,7 +411,8 @@ export class BookingPreparationService {
   }
 
   /** PASSENGERS_READY → fresh railway data → REVIEW (new version) → AWAITING_CONFIRMATION. */
-  private async refreshAndReview(sessionId: string, ctx: PrepCtx, runTools: RunRequiredTools, out: PrepOutcome): Promise<'ok' | 'blocked' | 'stale'> {
+  private async refreshAndReview(sessionId: string, ctx: PrepCtx, runTools: RunRequiredTools, out: PrepOutcome, freshSince?: number, turnExecutionIds: string[] = []): Promise<'ok' | 'blocked' | 'stale'> {
+    const freshIds = new Set<string>(turnExecutionIds);
     // Prompt 19 (Part 15–17): journey + date + train ∈ CURRENT results + class ∈ that train's classes — checked
     // BEFORE any availability / fare call, so nothing is fetched or reviewed for a non-authoritative selection.
     const guard = bookingPreparationGuard.check(this.state.getSession(sessionId));
@@ -419,15 +428,16 @@ export class BookingPreparationService {
       out.pendingOverride = { type, hint: guard.question } as any;
       return 'blocked';
     }
-    let r = this.evaluate(sessionId, ctx);
+    let r = this.evaluate(sessionId, ctx, freshSince, freshIds);
     if (r.refreshNeeded.length) {
       const res = await this.refresh(sessionId, ctx, runTools, r.refreshNeeded);
       out.steps.push(...res.steps);
       if (res.stale) return 'stale';
-      r = this.evaluate(sessionId, ctx);
+      for (const st of res.steps) if (st.execution?.toolExecutionId) freshIds.add(String(st.execution.toolExecutionId));
+      r = this.evaluate(sessionId, ctx, freshSince, freshIds);
     }
     if (!r.ready) {
-      out.error = { code: 'BOOKING_NOT_READY', message: this.blockerMessage(r), details: { blockers: r.blockers } };
+      out.error = { code: 'BOOKING_NOT_READY', message: this.blockerMessage(r, this.state.getSession(sessionId)), details: { blockers: r.blockers } };
       out.notes.push(out.error.message);
       out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', hint: 'Dobara check karun? Haan boliye.', data: { kind: 'RETRY_PREPARATION', blockers: r.blockers } };
       return 'blocked';
@@ -700,11 +710,15 @@ export class BookingPreparationService {
     return out;
   }
 
-  blockerMessage(r: BookingReadinessResult): string {
+  blockerMessage(r: BookingReadinessResult, s?: BookingSession): string {
     if (r.blockers.includes('REQUIRED_TOOL_DATA_MISSING')) {
-      const what = [r.availability === 'MISSING' && this.readiness.preparationPolicy.requireAvailability ? 'availability' : null,
-        r.fare === 'MISSING' && this.readiness.preparationPolicy.requireFare ? 'fare' : null].filter(Boolean).join(' aur ');
-      return `Review ke liye ${what || 'zaroori railway data'} verify hona zaroori hai, par abhi provider se nahi mil paaya. Isliye review abhi nahi bana.`;
+      const need = [r.availability === 'MISSING' && this.readiness.preparationPolicy.requireAvailability ? 'availability' : null,
+        r.fare === 'MISSING' && this.readiness.preparationPolicy.requireFare ? 'fare' : null].filter(Boolean) as Array<'availability' | 'fare'>;
+      const what = need.join(' aur ');
+      // Prompt 33 (§34): the REAL reason per dependency (P32 outcome) — timeout ≠ provider failure ≠ malformed ≠ unsupported
+      const deps = (s as any)?.preparationDependencies || {};
+      const reasons = need.map(k => deps[k] ? `${k} check mein ${dependencyFailureReason(deps[k].errorCode)}` : null).filter(Boolean);
+      return `Review ke liye current ${what || 'zaroori railway data'} verify hona zaroori hai, par ${reasons.length ? reasons.join('; ') : 'abhi provider se nahi mil paaya'}. Isliye review abhi nahi bana — koi purana ya andaza data use nahi kiya.`;
     }
     if (r.blockers.includes('STALE_AVAILABILITY') || r.blockers.includes('STALE_FARE')) return 'Availability/fare purana ho gaya hai aur refresh nahi ho paaya. Review abhi nahi bana.';
     if (r.blockers.includes('MISSING_PASSENGER_DETAILS') || r.blockers.includes('INVALID_PASSENGER_DETAILS')) return 'Passenger details abhi poori nahi hain.';
@@ -721,3 +735,16 @@ export class BookingPreparationService {
 }
 
 export type { BookingSession };
+
+/** Prompt 33: P32 outcome category of a failed review dependency, in the user's words (never "ready"). */
+export function dependencyFailureReason(errorCode: string | null | undefined): string {
+  switch (toolOutcomeOf({ ok: false, code: errorCode ?? null, status: errorCode ? null : 'FAILED' })) {
+    case 'TIMEOUT': return 'railway provider ne time par jawab nahi diya';
+    case 'MALFORMED_DATA': return 'provider ka jawab sahi format mein nahi tha';
+    case 'UNSUPPORTED': return 'ye check abhi supported nahi hai';
+    case 'NO_RESULTS': return 'provider ke paas is train / class / date ka data nahi mila';
+    case 'STALE': return 'result purana pad gaya';
+    case 'PROVIDER_FAILURE': return 'railway provider abhi uplabdh nahi hai';
+    default: return 'result verify nahi ho paaya';
+  }
+}

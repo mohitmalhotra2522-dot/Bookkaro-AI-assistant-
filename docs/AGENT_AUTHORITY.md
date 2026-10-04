@@ -120,3 +120,29 @@ LLM verbatim and recorded in `diagnostics.tools[].outcome`.
 - `chain` (P27), `binding` (P28), `actionClaims` (P29), `references` (P30), `outcomeClaims` (P32), `validation.rejected`.
 
 These contain no arguments, PII or secrets.
+
+## 7. Booking preparation → review → confirmation → handoff (Prompt 33)
+
+**Flow:** user → LLM (decides) → info tools → authoritative data → booking preparation → passengers → review (fresh availability + fare) → explicit confirmation → `IRCTC_HANDOFF_READY` → execution DISABLED. No booking, payment, IRCTC, OTP or CAPTCHA tool exists; no PNR / transaction id is ever produced.
+
+**The LLM decides** what to ask and in which order. It sees `context.bookingPreparation` (built from the one authoritative BookingSession — no second state system):
+`{ origin, destination, journeyDate, train{number,name}, class, passengerCount, passengers[{passenger, name?, age?, gender?, berthPreference?, missing[]}], missing[], availabilityCheck, fareCheck, review{version,status}, confirmation, handoff }`.
+Statuses only — no fare amounts / availability values (they come from this turn's tool results or the review), no internal ids, no credentials (never collected). There is no `if missing → ask` engine.
+
+**The backend validates** every proposal (`update_booking_session`): train references against the CURRENT results, class against that train, passenger count (1–6), passenger fields (name / age / gender, optional berth) via `PassengerChangeValidator`. One message may carry train + class + count + every passenger — slots for the validated count are created before the passenger proposal is validated (the count is never inferred from names).
+
+**Review authority:** availability only from a matching CHECK_AVAILABILITY (train/class/date/route), fare only from a matching GET_FARE (train/class/route/pax). A NEW review version needs both obtained in the review-building turn (checked by execution identity — the stored `toolExecutionId` must be one of this turn's executions; `freshSince` is only a fallback): the LLM's own call, or the existing P11–P13 review-boundary refresh (the only backend-initiated railway calls — a safety boundary, never an informational follow-up). A previous turn's fare is never review authority. Default policy requires BOTH: a timeout / provider failure / malformed / unsupported / empty result leaves NO valid review, and the reply states the real P32 reason (`dependencyFailureReason`). No service fee exists, so the total is the fare total.
+
+**Changes:** train / class / date / route / passenger count / passenger details change the review fingerprint → review, confirmation and handoff are invalidated (`BOOKING_DETAILS_CHANGED:<fields>`). The LLM chooses fresh enquiries; a new review is only built through the boundary above. Count changes keep valid passengers.
+
+**Confirmation (policy unchanged):** haan / yes / confirm / continue / proceed = explicit; theek hai / hmm / achha / ok = ambiguous; "do it" is not a confirmation. Bound to reviewVersion + review fingerprint + session version. At confirmation the TTL window applies (availability 2 min, fare 10 min); stale data is refreshed and a changed result rebuilds the review (new version) instead of handing off.
+
+**Handoff:** existing `BookingHandoffSession` + validator, immutable snapshot of exactly what was confirmed, expiry, single READY session per confirmation (repeat confirmation → no new handoff), INVALIDATED on change, EXPIRED after TTL, consume always fails closed (execution disabled).
+
+**Language guards (LLM-authored text only):**
+- `booking-state-claims.ts`: "ticket book ho gayi" / "booking confirmed" never valid (handoff-ready ≠ booked); "details confirmed / handoff ready" only with a READY handoff; "review ready" only with a CURRENT review.
+- Composer: a newly presented review must carry train, class and — when verified — fare and availability (`REVIEW_FACTS_MISSING` → validated review text); a blocked review must acknowledge the failure (`REVIEW_BLOCK_REASON_MISSING`).
+- P15 lifecycle guard: a backend-applied preparation change ("age update kar di") is not a post-booking modification claim; cancellation / refund claims are always removed.
+
+**Observability:** `turnLog.bookingPreparation.audit` = `{trainNumber, travelClass, journeyDate, availabilityRefresh, fareRefresh, reviewCreatedAt, confirmedAt, confirmationState, handoffSessionId, handoffState, invalidationReason}` plus the existing `sessionVersion`, `reviewVersion`, `confirmationVersion`, `handoffId`, `handoffStatus`. No passenger names, no secrets.
+

@@ -189,6 +189,9 @@ describe('G3 — confirmation → gateway → Disabled → IRCTC_HANDOFF_READY',
 
   it('[14] fare cannot be verified at confirmation (refresh fails) → STALE_FARE, no handoff, nothing executed', async () => {
     railwayRegistry.setActive('p10-nofare');
+    // P33: the DEFAULT policy never builds a review without a verified fare (BOOKING_NOT_READY, no review). This
+    // pins the confirmation gateway's own defence, reachable only under the configurable lenient policy.
+    mk(new MockLLMProvider(), { preparationPolicy: { requireFare: false } });
     const sid = state.createSession().sessionId;
     await toAwaiting(sid);                                                     // review: fare "abhi verify nahi hua"
     const r = await say(sid, 'haan');

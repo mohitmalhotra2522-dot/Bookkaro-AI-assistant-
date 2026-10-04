@@ -436,6 +436,11 @@ export class ContextualTurnApplier {
     //     PassengerChangeValidator (index exists / field in contract / value valid / never a credential) and
     //     only then converted to an explicit update of that STABLE passenger id.
     if (e.passengerChanges?.length && S().selectedTrain && S().selectedClass) {
+      // Prompt 33: one natural message may carry train + class + count + every passenger ("Doosri wali 3A, do log:
+      // Rahul 31 male, Neha 28 female"). The count (validated above) defines the slots — create them now (idempotent,
+      // the same ensureSlots the preparation service runs) so the proposal is validated against them instead of
+      // being dropped. The count is never inferred from the details.
+      if ((S().passengersCount || 0) > (S().passengers?.length || 0) && passengerCollection.ensureSlots(S()).length) this.state.bump(sessionId);
       const conv: NonNullable<typeof e.passengerUpdates> = [];
       for (const pc of e.passengerChanges) {
         const v = passengerChangeValidator.validate(S(), pc);

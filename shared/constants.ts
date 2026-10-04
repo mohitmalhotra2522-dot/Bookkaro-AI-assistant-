@@ -68,14 +68,14 @@ export const FRESHNESS_POLICY = {
 } as const;
 
 /**
- * Booking preparation contract. The existing review contract (Prompt 8) allows
- * fare/availability to be shown as "abhi verify nahi hua/hui hai", so by
- * default they are NOT hard requirements — but a fresh fetch is ALWAYS attempted
- * before review. Deployments may make them mandatory (→ REQUIRED_TOOL_DATA_MISSING).
+ * Booking preparation contract. Prompt 33 (§14 / §34) supersedes the Prompt 8 default: a review is VALID only with
+ * current, matching availability AND fare (a fresh fetch is always attempted first). A timeout / provider failure /
+ * malformed / unsupported / empty result leaves NO valid review (→ REQUIRED_TOOL_DATA_MISSING with the real reason);
+ * an unverified fare / availability is never presented for confirmation. The flags stay configurable for unit tests.
  */
 export const DEFAULT_PREPARATION_POLICY = {
-  requireAvailability: false,
-  requireFare: false
+  requireAvailability: true,
+  requireFare: true
 };
 
 /** Passenger schema used for collection — ONLY fields of the existing Passenger contract. */

@@ -34,6 +34,7 @@ import { RESULT_REF_RE } from '../tool-runtime/tool-result-identity';
 import { actionLedgerFromSteps, guardActionSentence, type ActionLedger, type ActionClaimDiagnostic } from './action-claims';
 import { verifyReferenceClaims, type ReferenceClaimDiagnostic } from './reference-claims';
 import { verifyOutcomeClaims, type OutcomeClaimDiagnostic } from './outcome-claims';
+import { verifyBookingStateClaim } from './booking-state-claims';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -53,7 +54,7 @@ export interface NaturalComposeInput {
   steps: any[];
   appliedActions: string[];
   changes: Array<{ field: string; corrected: boolean }>;
-  error: { code: string; message: string } | null;
+  error: { code: string; message: string; details?: { blockers?: string[] } } | null;
   pendingQuestionCode: string | null;
   pendingQuestion: string | null;
   history: Array<{ role: 'user' | 'assistant' | 'tool'; content: string }>;
@@ -127,6 +128,42 @@ const CLASS_RE = /\b(1A|2A|3A|3E|CC|EC|SL|2S|FC)\b/g;
 const SUCCESS_RE = /\b(book ho (gaya|gayi|gyi|chuka|chuki)|booked|booking (ho gayi|confirm(ed)?|successful|safal)|ticket (confirm|ban|book) (ho )?(gaya|gayi|chuka)|payment (ho gaya|done|successful)|pnr (number )?(hai|is|mil))/i;
 const NEGATION_RE = /\b(nahi|nahin|na|not|no|never|abhi tak nahi)\b/i;
 const NOT_BOOKED_RE = /(book nahi|booked nahi|nahi hua|not (been )?booked|no ticket|ticket book nahi)/i;
+
+/**
+ * Prompt 33 — informed confirmation. On the turn a NEW review version is presented, the (LLM-worded) reply must carry
+ * the material facts the user is about to confirm: train number, class and — when verified — the fare amount and the
+ * availability status. The wording stays the LLM's; a reply that omits them falls back to the validated review text
+ * (never a confirmation of details the user did not hear). Returns the missing fact kinds (empty = covered).
+ */
+const CLASS_WORDS: Record<string, RegExp> = {
+  '1A': /\b1A\b|first ac/i, '2A': /\b2A\b|second ac|2 ?tier/i, '3A': /\b3A\b|third ac|3 ?tier/i, '3E': /\b3E\b|economy/i,
+  SL: /\bSL\b|sleeper/i, CC: /\bCC\b|chair ?car/i, EC: /\bEC\b|executive/i, '2S': /\b2S\b|second sitting/i
+};
+/** A sentence that acknowledges an unverifiable dependency (any language the LLM may use). */
+const FAILURE_ACK_RE = /verify nahi|nahi ho pa+y|nahi mil pa+y|time par jawab nahi|uplabdh nahi|available nahi|sahi format|supported nahi|data nahi mil|jawab nahi|couldn'?t|could not|unable|not (be )?verified|timed? ?out|unavailable|not available|नहीं/i;
+export function missingReviewFacts(text: string, snap: any): string[] {
+  if (!snap) return [];
+  const t = String(text || '');
+  const flat = t.replace(/(\d),(?=\d{3}\b)/g, '$1');
+  const miss: string[] = [];
+  const num = String(snap.train?.number || '');
+  if (num && !new RegExp(`\\b${num}\\b`).test(t)) miss.push('TRAIN');
+  const cls = String(snap.travelClass || '');
+  if (cls && !(CLASS_WORDS[cls] || new RegExp(`\\b${cls}\\b`, 'i')).test(t)) miss.push('CLASS');
+  if (snap.fare?.status === 'VERIFIED') {
+    const amounts = [snap.fare.total, snap.fare.perPassenger].filter((n: any) => typeof n === 'number').map(String);
+    if (amounts.length && !amounts.some((a: string) => new RegExp(`(^|[^\\d])${a}([^\\d]|$)`).test(flat))) miss.push('FARE');
+  }
+  if (snap.availability?.status === 'VERIFIED' && snap.availability.value) {
+    const v = String(snap.availability.value);
+    const m = v.match(/^(WL|RAC|GNWL|RLWL|PQWL)\s*\/?\s*(\d+)/i) || v.match(/^(?:waiting\s*list|waitlist)\s*(\d+)/i);
+    const ok = /^avail/i.test(v) ? /availab|uplabdh|उपलब्ध|seats? (hai|hain|khali)/i.test(t)
+      : m ? new RegExp(`(wl|rac|waiting ?list|waitlist|${m[1]})\\D{0,4}${m[2] ?? m[1]}\\b`, 'i').test(t)
+      : t.toLowerCase().includes(v.toLowerCase());
+    if (!ok) miss.push('AVAILABILITY');
+  }
+  return miss;
+}
 const LIVE_TOOLS = new Set(['CHECK_PNR', 'TRACK_TRAIN', 'GET_CANCELLED_TRAINS']);
 const TRAIN_NAME_RE = /\b(jan shatabdi|shatabdi|rajdhani|duronto|vande bharat|garib rath|humsafar|tejas|intercity|sampark kranti|superfast|express|mail|antyodaya|double decker)\b/gi;
 const CITY_RE = /\b(mumbai|bombay|kolkata|calcutta|howrah|chennai|madras|bangalore|bengaluru|hyderabad|secunderabad|pune|jaipur|lucknow|kanpur|patna|ahmedabad|surat|bhopal|indore|agra|varanasi|banaras|prayagraj|allahabad|jammu|katra|dehradun|haridwar|shimla|kalka|pathankot|firozpur|ferozpur|bathinda|bikaner|jodhpur|udaipur|gwalior|nagpur|goa|guwahati|bhubaneswar|puri|ranchi|raipur|moradabad|bareilly|meerut|saharanpur|ambala|panipat|sonipat|karnal|kurukshetra|phagwara|pune|kota|ajmer)\b/gi;
@@ -258,6 +295,8 @@ export class NaturalResponseComposer {
     // evidence; every availability sentence is judged by availability-authority against CHECK_AVAILABILITY results only
     const confirmationTurn = s.bookingState === BookingState.IRCTC_HANDOFF_READY && i.stateBefore !== BookingState.IRCTC_HANDOFF_READY;
     const reviewTurn = s.bookingState === BookingState.AWAITING_CONFIRMATION;
+    const reviewBlocked = (i.error as any)?.code === 'BOOKING_NOT_READY' && ((i.error as any)?.details?.blockers || []).includes('REQUIRED_TOOL_DATA_MISSING');
+    const newReviewTurn = reviewTurn && !!(s.review as any)?.valid && (s.review as any)?.reviewVersion !== i.reviewVersionBefore;
     const streamable = !!i.onSegment && !confirmationTurn && !reviewTurn;
     const pendingType = String(s.pendingInteraction?.type || '');
     const question = !i.pendingQuestion ? null
@@ -414,6 +453,12 @@ export class NaturalResponseComposer {
         outcomeDiag.push(...ov.diagnostics);
         if (ov.reason) { rejected.push({ sentence: t.slice(0, 120), reason: `OUTCOME_CLAIM:${ov.reason}` }); prevRejected = true; return; }
       }
+      // Prompt 33: a booking-state sentence must match the session (never "booked"; handoff / review only when real)
+      {
+        const bv = verifyBookingStateClaim(t, s);
+        outcomeDiag.push(...bv.diagnostics.map(d => ({ kind: 'BOOKING_STATE' as const, accepted: d.accepted, reason: d.reason, evidence: d.kind, sentence: d.sentence })));
+        if (bv.reason) { rejected.push({ sentence: t.slice(0, 120), reason: `BOOKING_STATE_CLAIM:${bv.reason}` }); prevRejected = true; return; }
+      }
       const hits: Hits = {};
       // Prompt 28: bind BEFORE judging (the binder tracks the reply's antecedents from every sentence the LLM wrote)
       const binding: ClaimBinding = binder.bind(t);
@@ -501,6 +546,11 @@ export class NaturalResponseComposer {
 
     // ---- guarantees ----
     if (confirmationTurn && !NOT_BOOKED_RE.test(accepted.join(' '))) return fallback('MISSING_NOT_BOOKED_DISCLAIMER', rejected);
+    // Prompt 33: a newly presented review must carry the facts being confirmed (informed confirmation)
+    if (newReviewTurn && missingReviewFacts(accepted.join(' '), (s.review as any)?.snapshot).length) return fallback('REVIEW_FACTS_MISSING', rejected);
+    // Prompt 33 (§34): review blocked because availability / fare could not be verified → the reply must say so
+    // (the backend message carries the real P32 reason); never a reply that hides the failure
+    if (reviewBlocked && !FAILURE_ACK_RE.test(accepted.join(' '))) return fallback('REVIEW_BLOCK_REASON_MISSING', rejected);
     if (question && !hasQ()) {
       accepted.push(question);
       if (streamable) { i.onSegment!(streamed, question); streamed++; }

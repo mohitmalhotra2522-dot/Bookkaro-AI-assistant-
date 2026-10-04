@@ -225,17 +225,21 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     expect(prep(r)).toMatchObject({ availabilityStatus: 'AVAILABLE', fareStatus: 'AVAILABLE', reviewStatus: 'CURRENT' });
   });
 
-  it('[12 fare dependency] provider fare failure → "Fare abhi verify nahi hua hai", fareStatus UNAVAILABLE, no invented amount', async () => {
+  it('[12 fare dependency] provider fare failure → NO valid review (Prompt 33 §34), real reason, fareStatus UNAVAILABLE, no invented amount', async () => {
     const h = mk();
     rail.failFare = 5;
     const r = await toReview(h);
-    expect(r.responseMessage).toMatch(/Fare abhi verify nahi hua hai/);
+    // Prompt 33 supersedes the Prompt 8/19 "review with unverified fare": an unverifiable fare leaves no review
+    expect(r.error?.code).toBe('BOOKING_NOT_READY');
+    expect(r.responseMessage).toMatch(/fare verify hona zaroori hai/);
+    expect(r.responseMessage).toMatch(/railway provider abhi uplabdh nahi hai/);
     expect(r.responseMessage).not.toMatch(/₹/);
     expect(prep(r).fareStatus).toBe('UNAVAILABLE');
     expect(h.s().preparationDependencies.fare).toMatchObject({ status: 'UNAVAILABLE', errorCode: 'PROVIDER_UNAVAILABLE' });
     expect(JSON.stringify(h.s().preparationDependencies)).not.toMatch(/total|amount/);
-    const card = r.cards.find((c: any) => c.type === 'review');
-    expect(card.data.fare).toMatchObject({ verified: false, fareStatus: 'UNAVAILABLE' });
+    expect(r.cards.find((c: any) => c.type === 'review')).toBeUndefined();
+    expect(h.s().review?.valid ?? false).toBe(false);
+    expect(h.s().bookingState).not.toBe('AWAITING_CONFIRMATION');
   });
 
   it('[13 review create] minimal review: route / date / train / class / pax / Fare ₹X / "Confirm karna hai?"', async () => {
@@ -396,15 +400,20 @@ describe('P19 G3 — LLM proposals, provider boundaries and observability (Parts
     expect(pax(h)[0]).toBe('Mohit/31/MALE');
   });
 
-  it('passenger / review / confirmation operations never call the railway provider', async () => {
+  it('passenger / review / confirmation operations are state actions: no search, only the review boundary refreshes availability + fare', async () => {
+    // P33: a new review version is built only from current-turn availability + fare (the P11–P13 review boundary);
+    // a passenger edit itself never searches, and confirmation ("haan") makes no provider call at all.
     const h = mk();
     await toReview(h);
     const before = { ...rail.n };
-    for (const t of ['Age 32 kar do', 'Second passenger female hai.', 'doosre wale ka naam Riya hai', 'haan']) {
+    for (const t of ['Age 32 kar do', 'Second passenger female hai.', 'doosre wale ka naam Riya hai']) {
       const r = await h.say(t);
-      expect(ran(r), t).toEqual([]);
+      for (const tool of ran(r)) expect(['CHECK_AVAILABILITY', 'GET_FARE'], t).toContain(tool);
     }
-    expect(rail.n).toEqual(before);
+    expect(rail.n.search || 0).toBe(before.search || 0);
+    const atConfirm = { ...rail.n };
+    expect(ran(await h.say('haan')), 'haan').toEqual([]);
+    expect(rail.n).toEqual(atConfirm);
   });
 
   it('observability carries statuses / counts only — no passenger names in turnLog, events or the preparation summary', async () => {

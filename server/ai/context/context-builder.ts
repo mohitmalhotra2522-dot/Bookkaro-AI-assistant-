@@ -16,6 +16,10 @@
 import { referenceContextView } from './reference-context';
 import type { BookingSession } from '@shared/entities';
 import { currentResults } from './train-reference-resolver';
+import { BookingState } from '@shared/states';
+import { STATE_ORDER } from '../state/state-transition-validator';
+import { availabilityStatus, fareStatus } from '../../booking/preparation/booking-preparation-guard';
+import { reviewStatusOf, confirmationStatusOf } from '../../booking/preparation/booking-preparation';
 import type { PostBookingContextView } from '../../booking/post-booking/post-booking-service';
 
 export interface HistoryMsg { role: 'user' | 'assistant' | 'tool'; content: string; toolCallId?: string; toolName?: string; /** Prompt 16: active journey the message belongs to */ journeyId?: string }
@@ -61,6 +65,46 @@ export interface LLMContext {
    * No internal ids.
    */
   referenceContext?: ReturnType<typeof referenceContextView>;
+  /** Prompt 33: structured booking preparation state (what is known / missing) — the LLM decides what to ask next. */
+  bookingPreparation?: ReturnType<typeof bookingPreparationView>;
+}
+
+const DEP_VIEW: Record<string, string> = { AVAILABLE: 'MATCHING_RESULT', STALE: 'STALE', UNAVAILABLE: 'LAST_CHECK_FAILED', NOT_REQUESTED: 'NOT_CHECKED' };
+
+/**
+ * Prompt 33 — the booking preparation state as the LLM sees it. Built from the authoritative BookingSession (no second
+ * state system): known journey / train / class / passengers, and `missing` = what review still needs. Statuses only —
+ * no fare amounts or availability values (those come from THIS turn's tool results or the review), no internal ids,
+ * no credentials (never collected). The LLM decides what to ask; the backend only validates what it proposes.
+ */
+export function bookingPreparationView(s: BookingSession) {
+  const t: any = s.selectedTrain;
+  const started = !!t || !!s.selectedClass || !!s.passengersCount || STATE_ORDER.indexOf(s.bookingState) >= STATE_ORDER.indexOf(BookingState.TRAIN_SELECTED);
+  if (!started) return undefined;
+  const count = s.passengersCount || 0;
+  const passengers = Array.from({ length: count }, (_, k) => {
+    const p: any = (s.passengers || [])[k] || {};
+    const miss = (['name', 'age', 'gender'] as const).filter(f => p[f] === undefined || p[f] === null || p[f] === '');
+    return { passenger: k + 1, ...(p.name ? { name: p.name } : {}), ...(p.age ? { age: p.age } : {}), ...(p.gender ? { gender: p.gender } : {}),
+      ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}), ...(p.foodPreference ? { foodPreference: p.foodPreference } : {}), missing: miss };
+  });
+  const missing: string[] = [];
+  if (!s.origin) missing.push('origin');
+  if (!s.destination) missing.push('destination');
+  if (!s.date) missing.push('journeyDate');
+  if (!t) missing.push('train');
+  if (!s.selectedClass) missing.push('class');
+  if (!count) missing.push('passengerCount');
+  passengers.forEach(p => p.missing.forEach(f => missing.push(`passenger${p.passenger}.${f}`)));
+  const review = s.review ? { version: s.review.reviewVersion, status: reviewStatusOf(s) } : null;
+  return {
+    origin: s.origin ?? null, destination: s.destination ?? null, journeyDate: s.date ?? null,
+    train: t ? { number: String(t.number || t.trainNumber), name: t.name || t.trainName } : null,
+    class: s.selectedClass ?? null, passengerCount: count || null, passengers, missing,
+    // matching provider result for the CURRENT train/class/date/route (not a value — never reuse an old fare/availability)
+    availabilityCheck: DEP_VIEW[availabilityStatus(s).status], fareCheck: DEP_VIEW[fareStatus(s).status],
+    review, confirmation: confirmationStatusOf(s), handoff: s.handoffSession?.status ?? s.handoff?.status ?? null
+  };
 }
 
 export const MAX_RECENT_MESSAGES = 12;
@@ -94,6 +138,7 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
       }))
     },
     referenceContext: referenceContextView(s),
+    ...((): { bookingPreparation?: ReturnType<typeof bookingPreparationView> } => { const v = bookingPreparationView(s); return v ? { bookingPreparation: v } : {}; })(),
     summary: compressed ? summarizeFromSession(s) : undefined,
     recentMessages: recent,
     ...(s.bookingExecution ? { bookingExecution: Object.freeze({

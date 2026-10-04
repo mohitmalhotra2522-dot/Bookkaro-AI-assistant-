@@ -16,7 +16,7 @@ import { toolOutcomeOf, type ToolOutcome } from '../tool-runtime/tool-outcome';
 import { SAFE_ERROR_MESSAGE } from '../tool-runtime/tool-error-normalizer';
 import { UNVERIFIED_FALLBACK } from '../tool-runtime/railway-response-grounding';
 
-export type OutcomeClaimKind = 'NO_RESULTS' | 'SOURCE' | 'LIVE';
+export type OutcomeClaimKind = 'NO_RESULTS' | 'SOURCE' | 'LIVE' | 'BOOKING_STATE';
 export interface OutcomeClaimDiagnostic { kind: OutcomeClaimKind; accepted: boolean; reason: string | null; evidence: string | null; sentence: string }
 
 const RAILWAY_TOOLS = new Set(['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE', 'TRACK_TRAIN', 'CHECK_PNR', 'GET_CANCELLED_TRAINS']);
