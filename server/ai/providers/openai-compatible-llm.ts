@@ -307,10 +307,12 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
       // Prompt 28: ToolResultIdentityBinding — every result names the entity it belongs to; errors are structured
       const content = r
         ? { ...(r.resultRef ? { toolResultId: r.resultRef } : {}), tool: r.toolName, ...(entityOf(r.identity) ? { entity: entityOf(r.identity) } : {}), ok: r.ok,
+            // Prompt 32: honest outcome category + provider identity (MOCK data is never live)
+            ...(r.outcome ? { outcome: r.outcome } : {}), ...(r.dataSource ? { dataSource: r.dataSource } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
               : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details),
                   ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)) } }) }
-        : { tool: c.name, ok: false, error: { code: 'NOT_EXECUTED', message: 'Not executed (the session changed first) — decide again from the current context.', errorType: 'STALE', tool: c.name, reason: 'NOT_EXECUTED', retryable: false } };
+        : { tool: c.name, ok: false, outcome: 'STALE', error: { code: 'NOT_EXECUTED', message: 'Not executed (the session changed first) — decide again from the current context.', errorType: 'STALE', tool: c.name, reason: 'NOT_EXECUTED', retryable: false } };
       messages.push({ role: 'tool', tool_call_id: c.callId, content: clip(JSON.stringify(content), MAX_TOOL_RESULT_CHARS) });
     }
   }

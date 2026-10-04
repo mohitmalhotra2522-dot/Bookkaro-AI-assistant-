@@ -16,6 +16,7 @@
  * requestVersion). Writes from an obsolete request are rejected
  * (STALE_TOOL_RESULT) and the obsolete loop stops.
  */
+import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { ReconciliationConfig } from '../../booking/lifecycle/reconciliation-config';
 import type { BookingProviderRegistry } from '../../booking/provider/booking-provider-registry';
 import type { BookingProviderConfig } from '../../booking/provider/booking-provider-config';
@@ -69,6 +70,7 @@ import { naturalResponseComposer, type NaturalComposeResult } from '../response/
 import { speechOf } from '../conversation/assistant-response';
 import { actionLedgerFromSteps, guardActionClaims, type ActionExecution, type ActionClaimDiagnostic } from '../response/action-claims';
 import { guardReferenceClaims, type ReferenceClaimDiagnostic } from '../response/reference-claims';
+import { guardOutcomeClaims, honestFailureFallback, type OutcomeClaimDiagnostic } from '../response/outcome-claims';
 import { recordToolArgReference, type ReferenceResolutionRecord } from '../context/reference-context';
 
 export interface ProcessTurnOptions {
@@ -162,6 +164,8 @@ interface TurnExtras {
   actionClaims?: ActionClaimDiagnostic[];
   /** Prompt 30 */
   referenceClaims?: ReferenceClaimDiagnostic[];
+  /** Prompt 32: outcome-claim guard diagnostics (zero-result / source / live claims). */
+  outcomeClaims?: OutcomeClaimDiagnostic[];
   referenceRecords?: ReferenceResolutionRecord[];
 }
 
@@ -540,7 +544,8 @@ export class ConversationAgentOrchestrator {
     const actionGuard = guardActionClaims(composed, actionLedger);
     extra.actionClaims = actionGuard.diagnostics;
     this.lastActions.set(sessionId, actionLedger.current);
-    const actionChecked = actionGuard.text || (actionGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : composed);
+    const turnSteps = [...rt.steps, ...(prep?.steps || [])];
+    const actionChecked = actionGuard.text || (actionGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || honestFailureFallback(turnSteps)]) : composed);
     // ---- Prompt 30 (guard step 7): position / list-membership claims ("doosri wali 12497 hai", "12497 parso ki list
     //      mein nahi hai") must hold for the CURRENT result set; only the false sentence is removed (text = TTS)
     const refGuard = guardReferenceClaims(actionChecked, sess);
@@ -551,7 +556,13 @@ export class ConversationAgentOrchestrator {
       ...[...rt.steps, ...(prep?.steps || [])].filter(st => st.status !== 'stale' && (st.validatedArguments?.trainNumber || (st.toolCall.arguments as any)?.trainNumber))
         .map(st => recordToolArgReference(st.toolCall.name, String(st.validatedArguments?.trainNumber || (st.toolCall.arguments as any)?.trainNumber), sess, st.status === 'ok' && !!st.result?.success))
     ];
-    const message = refGuard.text || (refGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : actionChecked);
+    const refChecked = refGuard.text || (refGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : actionChecked);
+    // ---- Prompt 32: honest outcomes — a zero-result claim survives only a real empty provider result (never a timeout /
+    //      failure / malformed data), a "railway data ke according" claim only real provider data, and MOCK data is never
+    //      "live". Only the false sentence is removed; an emptied reply states the real failure category instead.
+    const outcomeGuard = guardOutcomeClaims(refChecked, { steps: turnSteps, session: sess });
+    extra.outcomeClaims = outcomeGuard.diagnostics;
+    const message = outcomeGuard.text || (outcomeGuard.removed.length ? joinParts([honestFailureFallback(turnSteps), questionFor(sess.pendingInteraction, sess, mode)].filter(Boolean) as string[]) : refChecked);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     // Prompt 23: a native agent may have answered after a rejected proposal — the rejection stays the turn's error
@@ -659,7 +670,7 @@ export class ConversationAgentOrchestrator {
     else if (llmFinalUseful) {
       const guarded = factCheck(lifecycleClaimGuard(factGuard(rt.finalMessage, rt.steps, mode, s, (r) => entityRejections.push(...r))));
       if (guarded) parts.push(guarded);
-      else if (rejectedClaims.length || entityRejections.length) parts.push(UNVERIFIED_FALLBACK);
+      else if (rejectedClaims.length || entityRejections.length) parts.push(honestFailureFallback(rt.steps));
     }
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
@@ -707,8 +718,28 @@ export class ConversationAgentOrchestrator {
       ...(a.rt?.chain ? { chain: { ...a.rt.chain, sessionId: a.sessionId, turnId: a.turnId, stateBefore: String(a.stateBefore), stateAfter: String(this.state.getSession(a.sessionId).bookingState) } } : {}),
       binding: this.bindingDiagnostics(a, x, wording),
       actionClaims: [...(x.actionClaims || []), ...(ns?.actionClaims || [])],
-      references: { records: x.referenceRecords || [], claims: [...(ns?.referenceClaims || []), ...(x.referenceClaims || [])] }
+      references: { records: x.referenceRecords || [], claims: [...(ns?.referenceClaims || []), ...(x.referenceClaims || [])] },
+      outcomeClaims: [...(x.outcomeClaims || []), ...(ns?.outcomeClaims || [])],
+      tools: this.toolDiagnostics(recs, [...(a.rt?.steps || []), ...(a.prepSteps || [])]),
+      steps: {
+        count: (a.rt?.chain as any)?.steps?.length ?? (a.rt?.steps || []).length,
+        limitReached: !!(a.rt?.chain as any)?.stepLimitReached, limitReason: (a.rt?.chain as any)?.stepLimitReason ?? null,
+        stopReason: a.rt?.stopReason ?? null,
+        timeouts: recs.filter(r => r.status === 'TIMEOUT').length, retries: recs.filter(r => (r.attempt || 1) > 1).length
+      }
     };
+  }
+
+  /** Prompt 32: one entry per provider execution — status, honest outcome, latency, retry, provider identity. */
+  private toolDiagnostics(recs: any[], steps: ToolCallStep[]): NonNullable<NonNullable<TurnRecord['diagnostics']>['tools']> {
+    const kindOf = new Map<string, 'MOCK' | 'LIVE' | null>();
+    for (const st of steps) if (st.execution?.toolExecutionId) kindOf.set(st.execution.toolExecutionId, st.dataSource ?? null);
+    return recs.map(r => ({
+      tool: String(r.tool), status: String(r.status), latencyMs: typeof r.latencyMs === 'number' ? r.latencyMs : null,
+      outcome: toolOutcomeOf({ ok: r.status === 'SUCCEEDED', empty: r.status === 'SUCCEEDED' && r.tool === 'SEARCH_TRAINS' && r.resultCount === 0, status: r.status, code: r.rejectionReason }),
+      attempt: r.attempt || 1, retried: (r.attempt || 1) > 1, provider: r.provider ?? null, providerKind: kindOf.get(r.toolExecutionId) ?? null,
+      errorCode: r.status === 'SUCCEEDED' ? null : (r.rejectionReason ?? null), fresh: !!r.fresh, resultCount: r.resultCount ?? null
+    }));
   }
 
   /** Prompt 28: identity / binding / chain log fields (ids + codes only — never sentence text, PII or secrets). */

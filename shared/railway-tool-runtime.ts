@@ -45,7 +45,7 @@ export type ToolErrorCode =
   | 'AUTH_ERROR' | 'DATA_UNAVAILABLE' | 'UNKNOWN'
   // runtime-level (provider NOT called)
   | 'UNKNOWN_TOOL' | 'TOOL_NOT_IMPLEMENTED' | 'TOOL_CALL_REJECTED' | 'FORBIDDEN_ACTION' | 'FORBIDDEN_ARGUMENT'
-  | 'TOOL_CALL_LIMIT_EXCEEDED' | 'TOOL_LOOP_DETECTED' | 'STALE_TOOL_RESULT' | 'PROVIDER_DATA_CONFLICT'
+  | 'TOOL_CALL_LIMIT_EXCEEDED' | 'TOOL_LOOP_DETECTED' | 'STALE_TOOL_RESULT' | 'PROVIDER_DATA_CONFLICT' | 'PROVIDER_DATA_INVALID'
   // Prompt 18: a dependent call whose dependency (e.g. SEARCH_TRAINS) did not succeed
   | 'DEPENDENCY_NOT_SATISFIED'
   // Prompt 25: argument schema validation before execution (provider NOT called)

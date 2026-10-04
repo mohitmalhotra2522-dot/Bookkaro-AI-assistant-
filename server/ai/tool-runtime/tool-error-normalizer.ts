@@ -10,7 +10,7 @@ import type { ToolErrorCode, ToolExecutionStatus } from '@shared/railway-tool-ru
 
 const RUNTIME_CODES: ReadonlySet<string> = new Set([
   'UNKNOWN_TOOL', 'TOOL_NOT_IMPLEMENTED', 'TOOL_CALL_REJECTED', 'FORBIDDEN_ACTION', 'FORBIDDEN_ARGUMENT',
-  'TOOL_CALL_LIMIT_EXCEEDED', 'TOOL_LOOP_DETECTED', 'STALE_TOOL_RESULT', 'PROVIDER_DATA_CONFLICT',
+  'TOOL_CALL_LIMIT_EXCEEDED', 'TOOL_LOOP_DETECTED', 'STALE_TOOL_RESULT', 'PROVIDER_DATA_CONFLICT', 'PROVIDER_DATA_INVALID',
   'TOOL_FAILED', 'TOOL_TIMEOUT', 'INVALID_REQUEST', 'NO_RESULTS', 'PROVIDER_UNAVAILABLE', 'RATE_LIMITED',
   'AUTH_ERROR', 'DATA_UNAVAILABLE', 'UNKNOWN', 'DEPENDENCY_NOT_SATISFIED', 'REPEATED_FAILED_CALL'
 ]);
@@ -60,6 +60,8 @@ export const SAFE_ERROR_MESSAGE: Record<ToolErrorCode, string> = {
   STALE_TOOL_RESULT: 'Purana result ignore kiya gaya.',
   DEPENDENCY_NOT_SATISFIED: 'Pehle wala step verify nahi ho paaya, isliye ye check abhi nahi kiya.',
   PROVIDER_DATA_CONFLICT: 'Railway providers ki jaankari mel nahi kha rahi — abhi verified result available nahi hai.',
+  // Prompt 32: a provider "success" whose data has the wrong shape — never treated as empty or as a result
+  PROVIDER_DATA_INVALID: 'Railway provider ka jawab sahi format mein nahi tha — jaankari verify nahi ho paayi.',
   INVALID_ARGUMENT: 'Ek detail sahi format mein nahi thi — thoda clear karke bataiye.',
   INVALID_REPEATED_CALL: 'Wahi galat detail dobara aayi — sahi value bataiye.',
   REPEATED_FAILED_CALL: 'Ye jaankari abhi provider se nahi mil paa rahi — thodi der baad dobara try karein.'

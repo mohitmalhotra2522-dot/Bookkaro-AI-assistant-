@@ -40,6 +40,14 @@ export class RailwayProviderRegistry {
     return this.activeId;
   }
 
+  /**
+   * Prompt 32: explicit provider identity — MOCK (development fixtures, never presented as live) or REAL. Taken from
+   * the provider's own declared source; there is no fallback between kinds (an unknown id throws, never switches).
+   */
+  getActiveKind(): 'MOCK' | 'REAL' {
+    return this.getActive().source === 'mock' ? 'MOCK' : 'REAL';
+  }
+
   listAvailable(): string[] {
     return [...this.providers.keys()];
   }

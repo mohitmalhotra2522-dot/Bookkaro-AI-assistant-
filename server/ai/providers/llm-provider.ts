@@ -16,6 +16,10 @@ export interface TurnToolResultView {
   empty?: boolean;
   /** Prompt 17: tool execution status (SUCCEEDED / FAILED / TIMEOUT / REJECTED …). */
   status?: string;
+  /** Prompt 32: honest outcome category (DATA / NO_RESULTS / UNSUPPORTED / TIMEOUT / PROVIDER_FAILURE / MALFORMED_DATA / STALE / REJECTED). */
+  outcome?: string;
+  /** Prompt 32: provider identity of the data ('MOCK' development data is never live). */
+  dataSource?: 'MOCK' | 'LIVE' | null;
   /** Prompt 27: provider attempts behind this result (2 = the backend already retried it once). */
   attempts?: number;
   /** Prompt 28: authoritative result identity (train / date / class / route / provider) — internal ids never user-facing. */

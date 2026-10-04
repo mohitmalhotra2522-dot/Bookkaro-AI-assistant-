@@ -273,6 +273,8 @@ server.get('/api/health', async (_, reply) => {
     ok: true,
     provider: railwayRegistry.getActiveId(),
     providerLabel: railwayRegistry.getActive().label,
+    // Prompt 32: MOCK = development data (never live); no silent MOCK↔REAL switching
+    providerKind: railwayRegistry.getActiveKind(),
     orchestrator: 'ConversationTurnEngine + ConversationAgentOrchestrator (Prompt 18 conversation loop)',
     llm: llmSelection.info,
     executionCapability: executionCapability(),
@@ -285,7 +287,7 @@ server.get('/api/health', async (_, reply) => {
 const PORT = 3000;
 await server.listen({ port: PORT, host: '0.0.0.0' });
 console.log(`Railway AI Assistant server running on http://localhost:${PORT}`);
-console.log(`Active railway provider: ${railwayRegistry.getActiveId()} (${railwayRegistry.getActive().label})`);
+console.log(`Active railway provider: ${railwayRegistry.getActiveId()} (${railwayRegistry.getActive().label}) [${railwayRegistry.getActiveKind()}]`);
 console.log(`Active LLM provider: ${llmSelection.info.providerId}${llmSelection.info.model ? ` (${llmSelection.info.model})` : ''} — ${llmSelection.info.reason}`);
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

@@ -165,6 +165,16 @@ export class RailwaySearchOrchestrator {
       };
     }
 
+    // Prompt 32: a provider "success" with malformed data is NEVER committed and NEVER becomes "no trains"
+    if (!isWellFormedSearch(resp.data)) {
+      return {
+        ok: false,
+        error: { code: 'PROVIDER_DATA_INVALID' as any, message: 'Railway provider ka jawab sahi format mein nahi tha — jaankari verify nahi ho paayi.' },
+        targetState: this.getSession().bookingState,
+        meta: resp.meta
+      };
+    }
+
     // Store results on session, transition to SHOWING_TRAINS
     this.commitSession({
       availableTrains: resp.data.trains.map(t => ({
@@ -255,4 +265,10 @@ export class RailwaySearchOrchestrator {
       irctcHandoffReady: false
     });
   }
+}
+
+/** Prompt 32: shape check of a provider search payload (validation only — never a fallback or a repair). */
+export function isWellFormedSearch(data: any): boolean {
+  if (!data || typeof data !== 'object' || !Array.isArray(data.trains)) return false;
+  return data.trains.every((t: any) => t && typeof t === 'object' && String(t.trainNumber ?? '').trim() !== '' && Array.isArray(t.classes));
 }

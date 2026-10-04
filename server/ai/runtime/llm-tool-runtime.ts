@@ -19,6 +19,7 @@
  * invents railway facts. All railway data comes from RailwayProvider via
  * normalized tool results.
  */
+import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { LLMProvider } from '../providers/llm-provider';
 import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE, type AgentTranscriptStep, type SessionUpdateOutcomeView } from '../providers/llm-provider';
 import type { AgentDecision, OrchestratorError, TurnRecord } from '../decisions/agent-decision';
@@ -91,6 +92,8 @@ export interface ToolCallStep {
   /** Prompt 17: execution record (observability) + the exact LLMToolResult returned to the LLM. */
   execution?: ToolExecutionRecord;
   llmResult?: LLMToolResult;
+  /** Prompt 32: provider identity from the provider's own meta ('MOCK' | 'LIVE'; null = no provider response). */
+  dataSource?: 'MOCK' | 'LIVE' | null;
 }
 
 /**
@@ -548,7 +551,7 @@ export class BoundToolRuntime {
       toolExecutionId: p.record.toolExecutionId, status: 'REJECTED', fresh: false, normalizedErrorCode: p.error.normalized
     };
     steps.push({ toolCall: tc, result: errRes, iteration: iter, status: 'rejected', requestId: H.requestId, execution: p.record, llmResult: p.result });
-    turnResults.push({ toolName: tc?.name as any, callId: tc?.callId, ok: false, error: { ...error, details: p.error.details } as any, status: 'REJECTED' });
+    turnResults.push({ toolName: tc?.name as any, callId: tc?.callId, ok: false, error: { ...error, details: p.error.details } as any, status: 'REJECTED', outcome: 'REJECTED' });
     // Prompt 25 Part 8: the structured reason (argument / expected / received) reaches the LLM so it can correct itself
     // Prompt 28: …as { errorType, tool, argument, reason, retryable } (a validation rejection is never retryable as-is)
     localHistory.push({ role: 'tool', content: JSON.stringify({ ...p.result, ok: false, error: { ...error, ...(p.error.details ? { details: p.error.details } : {}), ...structuredToolError(String(tc?.name), { ...error, details: p.error.details }, 1) }, toolName: tc?.name }), toolCallId: tc?.callId, toolName: tc?.name });
@@ -588,14 +591,15 @@ export class BoundToolRuntime {
     const stale = x.stale || !!H.isStale?.() || (vt.name !== 'SEARCH_TRAINS' && !this.turn.isCurrent(x.prepared));
     if (stale) {
       x.record.status = 'CANCELLED'; x.record.fresh = false; x.record.rejectionReason = 'STALE_TOOL_RESULT';
-      steps.push({ toolCall: tc, result: { ...norm, success: false, status: 'CANCELLED', error: { code: 'STALE_TOOL_RESULT', message: 'Result belongs to an obsolete request/journey version.' } }, iteration: iter, status: 'stale', validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
+      steps.push({ toolCall: tc, result: { ...norm, success: false, status: 'CANCELLED', error: { code: 'STALE_TOOL_RESULT', message: 'Result belongs to an obsolete request/journey version.' } }, iteration: iter, status: 'stale', dataSource: x.dataSource ?? null, validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
       H.emit?.('STALE_RESULT_REJECTED', { toolName: vt.name, requestId: H.requestId, toolExecutionId: x.record.toolExecutionId, journeyVersionAtCall: x.prepared.journeyVersion, journeyVersionNow: s.journeyVersion });
       return { stale: true };
     }
-    steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
-    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status, attempts: x.record.attempt || 1,
+    steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', dataSource: x.dataSource ?? null, validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
+    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status,
+      outcome: toolOutcomeOf({ ok: norm.success, empty: x.empty, status: x.record.status, code: norm.error?.code, normalizedCode: x.error?.normalized }), dataSource: x.dataSource ?? null, attempts: x.record.attempt || 1,
       identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}) });
-    localHistory.push({ role: 'tool', content: JSON.stringify(this.serializeForLLM(norm, x.result, x.record.attempt || 1)), toolCallId: tc.callId, toolName: tc.name });
+    localHistory.push({ role: 'tool', content: JSON.stringify(this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null)), toolCallId: tc.callId, toolName: tc.name });
     this.syncToSession(vt, norm);
     if (!norm.success) {
       H.emit?.('TOOL_FAILED', { toolName: vt.name, code: norm.error?.code, stage: 'provider', status: x.record.status, toolExecutionId: x.record.toolExecutionId });
@@ -679,15 +683,17 @@ export class BoundToolRuntime {
    * We deliberately do NOT forward internal metadata (source timestamps,
    * raw provider fields) — only facts + success/error.
    */
-  private serializeForLLM(r: NormalizedToolResult, llm?: LLMToolResult, attempts = 1): any {
+  private serializeForLLM(r: NormalizedToolResult, llm?: LLMToolResult, attempts = 1, dataSource: 'MOCK' | 'LIVE' | null = null): any {
+    // Prompt 32: explicit honest outcome + provider identity (additive keys; the LLM words the answer from them)
+    const oc = { outcome: toolOutcomeOf({ ok: r.success, empty: r.empty, status: r.status, code: r.error?.code, normalizedCode: r.normalizedErrorCode }), dataSource };
     // Prompt 17: freshness / provenance metadata (no credentials, no raw provider payload)
     const meta = llm ? { toolExecutionId: llm.toolExecutionId, status: llm.status, fresh: llm.fresh, meta: llm.meta, ...(llm.empty ? { empty: true } : {}) } : {};
     // Prompt 14: the full PNR never goes back into LLM context
-    if (r.success && r.toolName === 'CHECK_PNR') return { ok: true, data: { ...r.data, pnr: maskPnr(r.data?.pnr) }, toolName: r.toolName, ...meta };
+    if (r.success && r.toolName === 'CHECK_PNR') return { ok: true, data: { ...r.data, pnr: maskPnr(r.data?.pnr) }, toolName: r.toolName, ...meta, ...oc };
     const ref = r.resultRef ? { toolResultId: r.resultRef } : {};
     const entity = r.identity && r.identity.binding !== 'NO_ENTITY' ? { entity: { trainNumber: r.identity.trainNumber, date: r.identity.date, class: r.identity.travelClass } } : {};
-    if (r.success) return { ok: true, ...ref, ...entity, data: r.data, toolName: r.toolName, ...meta };
-    return { ok: false, ...ref, error: { ...r.error, normalizedCode: r.normalizedErrorCode, ...structuredToolError(r.toolName, r.error, attempts) }, toolName: r.toolName, ...meta };
+    if (r.success) return { ok: true, ...ref, ...entity, data: r.data, toolName: r.toolName, ...meta, ...oc };
+    return { ok: false, ...ref, error: { ...r.error, normalizedCode: r.normalizedErrorCode, ...structuredToolError(r.toolName, r.error, attempts) }, toolName: r.toolName, ...meta, ...oc };
   }
 
   /**

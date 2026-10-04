@@ -381,6 +381,13 @@ export interface TurnRecord {
     /** Prompt 30: reference resolutions (LLM trainRefs / tool-argument trains vs the current result set) and the reply's
      *  position / list-membership claims. Codes + internal ids for logs only — never shown to the user. */
     references?: { records: import('../context/reference-context').ReferenceResolutionRecord[]; claims: import('../response/reference-claims').ReferenceClaimDiagnostic[] };
+    /** Prompt 32: zero-result / "railway data ke according" / "live" claims vs this turn's real tool outcomes. */
+    outcomeClaims?: import('../response/outcome-claims').OutcomeClaimDiagnostic[];
+    /** Prompt 32: per-tool observability (no arguments, ids, PII or secrets). providerKind MOCK = development data. */
+    tools?: Array<{ tool: string; status: string; outcome: string; latencyMs: number | null; attempt: number; retried: boolean;
+      provider: string | null; providerKind: 'MOCK' | 'LIVE' | null; errorCode: string | null; fresh: boolean; resultCount: number | null }>;
+    /** Prompt 32: agent loop bounds (MAX_TOOL_STEPS is never raised silently). */
+    steps?: { count: number; limitReached: boolean; limitReason: string | null; stopReason: string | null; timeouts: number; retries: number };
   };
   // ---- Prompt 9 observability ----
   bookingReadiness?: { ready: boolean; blockers: string[]; warnings: string[] };

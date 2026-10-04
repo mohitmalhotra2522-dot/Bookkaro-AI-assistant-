@@ -13,6 +13,7 @@
  *
  * The runtime never mutates BookingSession; callers own session sync behind their RequestGuard.
  */
+import { dataSourceOf, isWellFormedToolData, type DataSourceKind } from './tool-outcome';
 import type { BookingSession } from '@shared/entities';
 import type {
   LLMToolResult, ToolErrorCode, ToolExecutionRecord, ToolExecutionStatus, RailwayToolName
@@ -104,6 +105,8 @@ export interface ExecutedCall {
   /** Original (service-level) error code is kept for existing flows; `normalized` is the Part 47 code. */
   error?: { code: string; normalized: ToolErrorCode; message: string };
   provider: string | null;
+  /** Prompt 32: provider identity from the provider's own response meta ('MOCK' | 'LIVE'; null = no response). */
+  dataSource?: DataSourceKind | null;
   latencyMs: number;
   timedOut: boolean;
   /** The result guard dropped it (superseded journey / request) before any commit. */
@@ -322,7 +325,7 @@ export class ToolTurn {
       this.notify(rec, status === 'SUCCEEDED' ? 'COMPLETED' : 'FAILED');
       const out: ExecutedCall = {
         prepared: p, record: rec, success: !!x.success, empty: !!x.empty, data: x.data, error: x.error, provider,
-        latencyMs, timedOut, stale: !!x.stale, result: undefined as any
+        latencyMs, timedOut, stale: !!x.stale, result: undefined as any, dataSource: dataSourceOf(raw?.meta)
       };
       out.result = this.toLLMResult(rec, status, {
         result: x.success ? llmView(p.vt.name, x.data) : undefined, empty: x.empty || undefined,
@@ -351,7 +354,11 @@ export class ToolTurn {
       return done(statusForError(normalized), { error: { code, normalized, message: safeErrorMessage(normalized, raw.error?.message) } });
     }
     const data = raw.data;
-    const empty = p.vt.name === 'SEARCH_TRAINS' && (!data?.trains || data.trains.length === 0);
+    // Prompt 32: malformed provider "success" → PROVIDER_DATA_INVALID (FAILED, not retried) — never empty, never a result
+    if (!isWellFormedToolData(p.vt.name, data)) {
+      return done('FAILED', { error: { code: 'PROVIDER_DATA_INVALID', normalized: 'PROVIDER_DATA_INVALID', message: SAFE_ERROR_MESSAGE.PROVIDER_DATA_INVALID } });
+    }
+    const empty = p.vt.name === 'SEARCH_TRAINS' && data.trains.length === 0;
     return done('SUCCEEDED', { success: true, empty, data: empty ? { ...(data || {}), trains: [] } : data });
   }
 

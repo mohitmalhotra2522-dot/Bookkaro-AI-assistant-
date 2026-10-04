@@ -33,6 +33,7 @@ import { explicitDates } from './claim-dates';
 import { RESULT_REF_RE } from '../tool-runtime/tool-result-identity';
 import { actionLedgerFromSteps, guardActionSentence, type ActionLedger, type ActionClaimDiagnostic } from './action-claims';
 import { verifyReferenceClaims, type ReferenceClaimDiagnostic } from './reference-claims';
+import { verifyOutcomeClaims, type OutcomeClaimDiagnostic } from './outcome-claims';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -105,6 +106,8 @@ export interface NaturalComposeResult {
   actionClaims?: ActionClaimDiagnostic[];
   /** Prompt 30: position / list-membership claims checked against the current result set (codes only). */
   referenceClaims?: ReferenceClaimDiagnostic[];
+  /** Prompt 32: zero-result / source / live claims checked against this turn's real tool outcomes. */
+  outcomeClaims?: OutcomeClaimDiagnostic[];
   /** Prompt 28: extended provenance of every accepted sentence (claimId, entity, binding, verification) — internal only.
    *  `provenance` keeps the P25 / P26 shape unchanged. */
   claimProvenance?: ClaimProvenance[];
@@ -299,6 +302,7 @@ export class NaturalResponseComposer {
     const actionLedger: ActionLedger = i.actionLedger ?? actionLedgerFromSteps(i.steps, { session: s });
     const actionDiag: ActionClaimDiagnostic[] = [];
     const refDiag: ReferenceClaimDiagnostic[] = [];
+    const outcomeDiag: OutcomeClaimDiagnostic[] = [];
     let streamed = 0;
     const len = () => accepted.join(' ').length;
     const hasQ = () => accepted.some(a => a.includes('?')) || (!!accepted.length && ASKS_RE.test(accepted[accepted.length - 1]));
@@ -403,6 +407,13 @@ export class NaturalResponseComposer {
           t = ag.text;
         }
       }
+      // Prompt 32: "koi train nahi mili" only after a real empty result (never after a timeout / failure / malformed
+      // data); "railway data ke according" only with provider data; MOCK data is never "live"
+      {
+        const ov = verifyOutcomeClaims(t, { steps: i.steps, session: s });
+        outcomeDiag.push(...ov.diagnostics);
+        if (ov.reason) { rejected.push({ sentence: t.slice(0, 120), reason: `OUTCOME_CLAIM:${ov.reason}` }); prevRejected = true; return; }
+      }
       const hits: Hits = {};
       // Prompt 28: bind BEFORE judging (the binder tracks the reply's antecedents from every sentence the LLM wrote)
       const binding: ClaimBinding = binder.bind(t);
@@ -486,7 +497,7 @@ export class NaturalResponseComposer {
     else if (buf.trim()) { take(buf); buf = ''; }
     const bindingSummary = (): ClaimBindingSummary => ({ counts: bindCounts, crossEntity,
       status: crossEntity.some(c => c.diagnosis !== 'AMBIGUOUS_REFERENCE') ? 'CROSS_ENTITY_REMOVED' : crossEntity.length ? 'AMBIGUOUS_REMOVED' : entityClaims ? 'BOUND' : 'NONE' });
-    if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag };
+    if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag, outcomeClaims: outcomeDiag };
 
     // ---- guarantees ----
     if (confirmationTurn && !NOT_BOOKED_RE.test(accepted.join(' '))) return fallback('MISSING_NOT_BOOKED_DISCLAIMER', rejected);
@@ -498,7 +509,7 @@ export class NaturalResponseComposer {
     if (!streamable) segments.forEach((t, k) => i.onSegment?.(k, t));
     return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: streamable ? streamed : segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),
       provenance, claimProvenance, repaired, wordingCall: !agentText,
-      claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag };
+      claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag, outcomeClaims: outcomeDiag };
   }
 }
 

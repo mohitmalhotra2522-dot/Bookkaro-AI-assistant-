@@ -158,7 +158,7 @@ const ARGUMENT_OF: Record<string, string> = {
 export function errorTypeOf(code: string): ToolErrorType {
   const c = String(code || '');
   if (c === 'RESULT_IDENTITY_MISMATCH') return 'IDENTITY';
-  if (TRANSIENT.has(c)) return 'PROVIDER';
+  if (TRANSIENT.has(c) || c === 'PROVIDER_DATA_INVALID') return 'PROVIDER';
   if (/^(NO_RESULTS|DATA_UNAVAILABLE|NOT_FOUND|TRAIN_NOT_FOUND|PNR_NOT_FOUND)$/.test(c)) return 'NOT_FOUND';
   if (/^FORBIDDEN|SENSITIVE|^AUTH/.test(c)) return 'POLICY';
   if (/^(TOOL_NOT_IMPLEMENTED|UNKNOWN_TOOL)$/.test(c)) return 'UNAVAILABLE';
