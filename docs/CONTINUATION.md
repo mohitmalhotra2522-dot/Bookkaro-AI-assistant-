@@ -171,6 +171,27 @@ Found during P34 (verified failing at `74063e1`, before any P34 code): unit p21 
 - 12497 Shan-e-Punjab: 3A/CC/SL/2S, 06:35→13:50, 3A ₹650 available (display index 2 of 3).
 - 18238: 3A/SL, 19:35→04:10, SL Waitlist 8.
 
+## 6b. Post-P35 live voice test (configuration only — P35 frozen, no code changes)
+
+Status as of 2026-10-04:
+- **TTS live: PASS.**
+  - Config: `VOICE_TTS_PROVIDER=openai`, the RailBook Edge-TTS Render endpoint as `VOICE_TTS_BASE_URL`, `VOICE_TTS_MODEL=tts-1`, `VOICE_TTS_VOICE=hi-IN-SwaraNeural`, plus `VOICE_TTS_API_KEY`. All values are in `.env` only.
+  - It returned a 48.8 KB MP3 in 2.3 s once the service was awake.
+  - The first request timed out at the default `VOICE_TTS_TIMEOUT_MS=15000` because the free Render service was asleep. The timeout was left unchanged; optionally raise it with `VOICE_TTS_TIMEOUT_MS=60000`.
+  - The endpoint is only called as an API client; nothing on it is modified.
+- **Checks verified on the real server:**
+  - `/api/voice/speak` ignores client-supplied text and returns 404 `NO_RESPONSE_TO_SPEAK` when there is no validated reply.
+  - An INTERIM transcript on `/api/chat` returns 422 `TRANSCRIPT_NOT_FINAL`, creates no turn and makes no LLM call.
+  - `/api/voice/turn` without STT returns 503 `VOICE_NOT_CONFIGURED` with `fallback: TEXT`.
+  - `/api/health` voice status shows no key.
+- **STT live and the end-to-end voice test: NOT RUN yet.** `VOICE_STT_PROVIDER`, `VOICE_STT_BASE_URL`, `VOICE_STT_MODEL` and `VOICE_STT_API_KEY` must be present in the server's environment or in `.env`. An external secret store is not visible inside the sandbox.
+  - The STT endpoint must accept `POST {VOICE_STT_BASE_URL}/audio/transcriptions` (multipart: file, model, language, `response_format=json`) and return `{ text }`.
+- **Next steps:**
+  1. Run one live STT request.
+  2. Run one end-to-end test: audio → `/api/voice/turn` → `processTurn(VOICE)` → Muse → RailCore → validated text → `/api/voice/speak` → TTS.
+  3. Run focused parity and barge-in checks only (p34-voice-e2e, p34-voice-hardening, p21-voice-infrastructure).
+  4. Do NOT run the full suite. Do NOT start P36 without the user's prompt.
+
 ## 7. Practical gotchas
 
 - `.git/config` may not persist between workspaces. Set the identity again: `git config user.name "BookKaro Dev"; git config user.email dev@bookkaro.local`.
