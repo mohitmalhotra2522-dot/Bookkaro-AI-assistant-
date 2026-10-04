@@ -97,7 +97,10 @@ Env:
 | 33 | `6f71466`, `74063e1` | AI-driven booking preparation + review + secure handoff readiness — see `docs/AGENT_AUTHORITY.md` §7 |
 | 34 | `caa2ac4`, `8032d5c` (fare follow-up) | voice production hardening: structured STT boundary, no interim turns, TTS = final validated text only, barge-in/stale, TTS retry, voice observability — see `docs/AGENT_AUTHORITY.md` §8 |
 | 35 | see `git log` | real railway data (RailCore/RailKit/RailRadar adapters + failover), provenance, capability matrix, LLM-chosen web research, server STT/TTS routes, IRCTC handoff boundary wording — see `docs/P35-REAL-INTEGRATION.md` |
-| 36-C | **uncommitted** (working tree on `b535345`) | ElevenLabs Scribe v2 BATCH STT for tap-to-talk — see §6c |
+| 36-C | `773651a` | ElevenLabs Scribe v2 BATCH STT for tap-to-talk — see §6c |
+| UI | `b9d292a` | full mobile-first UI/UX rebuild (frontend only) |
+| 36-C.1.1 | `b2afeca` | voice layer: TTS renderer, concise fact-weighted speech, STT fallback setting |
+| 37 | see `git log` | LLM-native DIRECT multi-provider railway tools (`railcore_*`, `railradar_*`), no hidden failover — see §6d |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -242,6 +245,37 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
 **Tests:** `tests/unit/p36c-elevenlabs-stt.test.ts` (G2) and `tests/integration/p36c-voice-stt-e2e.test.ts` (G3). Both use a fake fetch only, with no real ElevenLabs call.
 
 **Live status:** a live ElevenLabs STT call through BookKaro has NOT been run (no credits spent). The key is not in BookKaro's `.env`; set `ELEVENLABS_API_KEY` in the server environment to enable it.
+
+## 6d. P37 — LLM-native direct multi-provider railway tools
+
+- **Tools the LLM sees (live mode):** `<provider>_<capability>` for every CONFIGURED real connector only, built in
+  `server/ai/tools/provider-tools.ts` (`providerToolCatalog`) and registered in
+  `server/railway/registry/provider-registry.ts` (`registerLiveProviderTools`, from `PROVIDER_CAPABILITY_MATRIX`).
+  - Suffixes: `search`, `train_info`, `timetable`, `availability`, `fare`, `live_status`, `pnr`.
+  - RailCore: no `pnr`. RailKit is listed only when its key is set.
+  - ConfirmTkt, RailYatri and eRail can NEVER be registered. Calling them returns PROVIDER_NOT_IMPLEMENTED.
+  - Generic `SEARCH_TRAINS` etc. are hidden in provider mode. A generic call from the LLM returns PROVIDER_TOOL_REQUIRED.
+- **Execution:**
+  - `mapProviderToolCall` (llm-tool-runtime) maps the call onto the canonical contract, with `provider` and `toolName`.
+  - The runtime runs `executor.execute` inside `inProviderScope` (AsyncLocalStorage, `provider-scope.ts`), so
+    `railwayRegistry.getActive()` returns exactly that connector. There is no failover chain.
+  - Provider is part of the loop, failure and duplicate signatures, so parallel same-args calls on two providers both run.
+- **Results to the LLM** carry `providerTool` plus `providerStatus` (SUCCESS / NO_RESULTS / PROVIDER_TIMEOUT / …). The
+  LLM decides on any fallback (prompt "RAILWAY PROVIDER TOOLS").
+- **Booking re-validation** (`BoundToolRuntime.runTools`, backend) reuses the provider the LLM used in this turn, else
+  the first configured connector. It also has no hidden chain.
+- **Stations and dates:** the LLM passes official codes and YYYY-MM-DD, and `ctx.today` (IST) is sent.
+  - `route-resolver` accepts any `^[A-Z]{2,5}$` code in provider mode.
+  - `context-patch` trusts LLM semantics for Indic-script user text, where the backend has no parser. Latin-script
+    grounding and ambiguity checks remain.
+- **Budget:** the native step is no longer silently cut to 6 calls (bound 32). `MAX_TOOL_CALLS_PER_TURN` and
+  `MAX_TOOL_ROUNDS_PER_TURN` (env, default 8 / 5) reject the excess with TOOL_CALL_LIMIT_EXCEEDED.
+- **Observability:** `ToolExecutionRecord.providerTool` + `provider`; `turnLog.toolCalls[].provider/providerTool`.
+- **Mocks** (tests only, labelled MOCK): `server/railway/providers/mock/mock-provider-connectors.ts`, for RailCore and
+  RailRadar only, with fault injection and fare override.
+- **Tests:** `tests/integration/p37-provider-tools.test.ts` (14 scenarios).
+- **Known limitation:** with parallel same-route searches, the session/cards show the list from the search that
+  completed LAST. The LLM still receives both results separately.
 
 ## 7. Practical gotchas
 
