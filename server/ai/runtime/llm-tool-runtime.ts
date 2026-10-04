@@ -38,12 +38,20 @@ import { PnrStatusService, LiveTrainStatusService } from '../../booking/post-boo
 import { maskPnr } from '../../booking/post-booking/pnr-validator';
 import { RailwayToolRuntime, ToolTurn, type ExecutedCall, type PreparedCall, type RailwayToolExecutor, type ToolObserver } from '../tool-runtime/railway-tool-runtime';
 import type { ToolExecutionPlanNode } from '@shared/turn-engine';
-import type { ToolExecutionRecord, LLMToolResult, ToolExecutionStatus } from '@shared/railway-tool-runtime';
+import type { ToolExecutionRecord, LLMToolResult, ToolExecutionStatus, ToolChainTrace, ToolChainStopReason } from '@shared/railway-tool-runtime';
+import { MAX_TOOL_STEPS_PER_TURN, MAX_TOOL_ROUNDS_PER_TURN } from '../tool-runtime/railway-tool-runtime';
 
 export const MAX_TOOL_CALL_ITERATIONS = 8; // deterministic hard cap (configurable via constructor)
 /** Prompt 23: rejected session-update proposals a native agent may react to within one turn. */
 const MAX_NATIVE_RECOVERIES = 2;
 /** Prompt 23: rejections that always end the turn with the backend's own wording (never agent recovery). */
+/** Prompt 27: rejections that are safety boundaries (chain stop reason SAFETY_BLOCKED). */
+const SAFETY_STOP_CODES = new Set(['FORBIDDEN_ACTION', 'SENSITIVE_DATA_REJECTED', 'SENSITIVE_REQUEST_REJECTED', 'BOOKING_ACCESS_DENIED',
+  'BOOKING_EXECUTION_DISABLED', 'BOOKING_EXECUTION_DUPLICATE', 'CONFIRMATION_REQUIRED', 'UNSUPPORTED_ACTION']);
+/** Prompt 27: the one tools-disabled call after a budget / loop stop. */
+const CHAIN_STOP_INSTRUCTION = 'The backend stopped the tool chain (step budget or repeated-call guard). Tools are disabled now. '
+  + 'Answer the user ONLY from the authoritative tool results already in this turn. If something the user asked for could not be checked, say so plainly. '
+  + 'Never guess or invent railway data. Do not request any tool.';
 const NATIVE_FINAL_ERRORS = new Set(['SENSITIVE_DATA_REJECTED', 'SENSITIVE_REQUEST_REJECTED', 'BOOKING_ACCESS_DENIED', 'SESSION_VERSION_CONFLICT', 'STALE_TOOL_RESULT', 'INVALID_LLM_OUTPUT']);
 
 export interface NormalizedToolResult {
@@ -143,6 +151,8 @@ export interface ToolRuntimeResult {
   toolRounds?: number;
   /** Prompt 18: ToolExecutionPlan nodes (dependency graph) of every round in this turn. */
   toolPlans?: ToolExecutionPlanNode[];
+  /** Prompt 27: chain observability (chainId, ordered tool steps with provenance ids, counts, stop reason). */
+  chain?: ToolChainTrace;
   /** Prompt 25 Part 17: agent decision calls made in this turn (each one is an LLM request). */
   llmCalls?: number;
   /** Prompt 25 Part 17: tool-argument validation failures / identical invalid repeats / corrected retries. */
@@ -278,12 +288,80 @@ export class BoundToolRuntime {
       const sx: any = this.getSession(); const t: any = sx.selectedTrain;
       return `${vt.name}|${stableJson(vt.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
     };
+    // ---- Prompt 27: chain observability — every tool step keeps its own provenance id (toolExecutionId) ----
+    const chainId = `ch_${uuidv4()}`;
+    const recLlmCall = new Map<string, number>();
+    const markRecords = (from: number) => { for (const r of this.turn.records.slice(from)) if (!recLlmCall.has(r.toolExecutionId)) recLlmCall.set(r.toolExecutionId, llmCalls); };
+    let stopOverride: ToolChainStopReason | null = null;
+    let answeredAfterStop = false;
+    const stopReasonOf = (stopReason: ToolRuntimeResult['stopReason'], error: OrchestratorError | undefined, finalMessage: string): ToolChainStopReason => {
+      if (stopOverride) return stopOverride;
+      const code = String(error?.code || '');
+      if (stopReason === 'stale') return 'STALE';
+      if (stopReason === 'tool_limit') return code === 'TOOL_LOOP_DETECTED' ? 'TOOL_LOOP_DETECTED' : 'TOOL_BUDGET_EXHAUSTED';
+      if (stopReason === 'blocked') return SAFETY_STOP_CODES.has(code) ? 'SAFETY_BLOCKED' : 'VALIDATION_BLOCKED';
+      if (stopReason === 'error') return code === 'LLM_UNAVAILABLE' ? ((error as any)?.details?.reason === 'LLM_BAD_RESPONSE' ? 'INVALID_DECISION' : 'LLM_UNAVAILABLE') : 'TOOL_FAILED';
+      const recs = this.turn.records.filter(r => recLlmCall.has(r.toolExecutionId));
+      if (recs.some(r => r.rejectionReason === 'FORBIDDEN_ACTION' || (r.rejectionReason === 'UNKNOWN_TOOL' && /forbid/i.test(String((r as any).normalizedError || ''))))) return 'SAFETY_BLOCKED';
+      const last = turnResults[turnResults.length - 1];
+      if (last && !last.ok && (last.error as any)?.code === 'TOOL_NOT_IMPLEMENTED') return 'TOOL_UNAVAILABLE';
+      if (!finalMessage && lastDecision?.clarification) return 'CLARIFICATION';
+      if (lastDecision?.clarification && !lastDecision.finalMessage) return 'CLARIFICATION';
+      return 'FINAL_RESPONSE';
+    };
+    const chainOf = (stopReason: ToolRuntimeResult['stopReason'], error: OrchestratorError | undefined, finalMessage: string): ToolChainTrace => {
+      const recs = this.turn.records.filter(r => recLlmCall.has(r.toolExecutionId));
+      const steps = recs.map((r, i) => ({
+        stepNumber: i + 1, llmCall: recLlmCall.get(r.toolExecutionId) || 0, toolName: r.tool, toolArgumentsSanitized: { ...(r.argumentsSummary || {}) },
+        toolResultStatus: String(r.status), toolResultId: r.toolExecutionId,
+        decisionReason: r.rejectionReason === 'DUPLICATE_CALL' ? 'DEDUPLICATED' : r.retryOf ? 'BACKEND_RETRY' : r.llmRetry ? 'LLM_RETRY'
+          : r.status === 'REJECTED' ? `REJECTED:${r.rejectionReason || 'INVALID'}` : 'LLM_TOOL_CALL',
+        retryCount: r.retryOf || r.llmRetry ? 1 : 0, latencyMs: r.latencyMs ?? null, parallelGroup: r.parallelGroup ?? null
+      }));
+      return {
+        chainId, llmCallCount: llmCalls, toolCallCount: this.turn.callsUsed, providerCallCount: recs.filter(r => !!r.startedAt).length,
+        redundantCallCount: deduplicated, retryCount: steps.filter(s => s.retryCount > 0).length, chainLength: this.turn.roundsUsed,
+        chainStopReason: stopReasonOf(stopReason, error, finalMessage), answeredAfterStop,
+        budget: { maxToolSteps: MAX_TOOL_STEPS_PER_TURN, maxRounds: MAX_TOOL_ROUNDS_PER_TURN, maxLlmIterations: this.maxIterations },
+        latencyMs: Date.now() - startedAt, steps
+      };
+    };
     const done = (finalMessage: string, stopReason: ToolRuntimeResult['stopReason'], error?: OrchestratorError): ToolRuntimeResult => ({
       finalMessage, finalDecision: lastDecision || dummyDecision(), steps, stopReason, error,
       latencyMs: Date.now() - startedAt, applyOutcomes, llmLatencyMs, deduplicated,
       toolExecutions: this.turn.records, toolRounds: this.turn.roundsUsed, toolPlans: this.turn.plans,
-      llmCalls, toolValidation: { ...this.turn.validation }
+      llmCalls, toolValidation: { ...this.turn.validation }, chain: chainOf(stopReason, error, finalMessage)
     });
+    /**
+     * Prompt 27: the step budget / loop guard stopped the chain. No more tools run. When this turn already holds verified
+     * results, the LLM gets ONE tools-disabled call with the structured stop reason and answers from those results only
+     * (its text is still grounded by the P25/P26 validators). Otherwise — or if it still asks for tools / fails — the
+     * existing deterministic path (verified facts + one limit notice) is kept. Never a fabricated answer.
+     */
+    const wrapUp = async (err: OrchestratorError, fallbackMsg: string, fallbackReason: ToolRuntimeResult['stopReason'] = 'tool_limit'): Promise<ToolRuntimeResult> => {
+      const reason = err.code === 'TOOL_LOOP_DETECTED' ? 'TOOL_LOOP_DETECTED' as const : 'TOOL_BUDGET_EXHAUSTED' as const;
+      stopOverride = reason;
+      H.emit?.('TOOL_CHAIN_STOPPED', { chainId, reason, code: err.code, toolCalls: this.turn.callsUsed, rounds: this.turn.roundsUsed });
+      if (!turnResults.some(r => r.ok) || H.isStale?.()) return done(fallbackMsg, fallbackReason, err);
+      const sess = this.getSession();
+      const t0 = Date.now();
+      llmCalls++;
+      let d: AgentDecision | undefined;
+      try {
+        d = (await this.llm.generateStructuredDecision({
+          userText, history: localHistory, state: sess.bookingState, session: sess, missingFields: computeMissing(sess), inputMode: mode,
+          tools: REGISTERED_TOOLS, context: H.buildContext?.(), currentTurnToolResults: [...turnResults],
+          agentTranscript: transcript.map(st => ({ ...st, toolCalls: [...st.toolCalls], results: [...st.results] })),
+          chainStop: { reason, code: String(err.code), instruction: CHAIN_STOP_INSTRUCTION }
+        })).decision;
+      } catch { d = undefined; }
+      llmLatencyMs += Date.now() - t0;
+      if (H.isStale?.()) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Obsolete request stopped.' });
+      const msg = d && typeof d === 'object' && !(d.toolCalls || []).length ? String(d.finalMessage || d.clarification || '').trim() : '';
+      if (!msg) return done(fallbackMsg, fallbackReason, err);
+      answeredAfterStop = true;
+      return done(msg, 'final');
+    };
 
     for (let iter = 0; iter < this.maxIterations; iter++) {
       if (H.isStale?.()) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Obsolete request stopped.' });
@@ -361,8 +439,9 @@ export class BoundToolRuntime {
       if (!this.turn.startRound()) {
         const lim: OrchestratorError = { code: 'TOOL_CALL_LIMIT_EXCEEDED', message: 'Request bahut lambi ho gayi — thoda simple karke poochiye.' };
         H.emit?.('TOOL_FAILED', { code: 'TOOL_CALL_LIMIT_EXCEEDED', stage: 'rounds', rounds: this.turn.roundsUsed - 1 });
-        return done('', 'tool_limit', lim);
+        return wrapUp(lim, '');
       }
+      const recordsBefore = this.turn.records.length;
       // Prompt 17: independent calls run in PARALLEL; SEARCH_TRAINS is a barrier (dependent calls are
       // validated only after its results are synced). Results are recorded in the original order.
       const sigs = new Map<string, string>();
@@ -411,13 +490,14 @@ export class BoundToolRuntime {
           return true;
         }
       });
+      markRecords(recordsBefore);
       { const ids = new Set(step.toolCalls.map(c => c.callId)); step.results = turnResults.filter(r => ids.has(String(r.callId))); }
       if (staleHit) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Late result from an obsolete request was ignored.' });
-      if (stopErr) return done('', 'tool_limit', stopErr);   // composer adds verified facts + the limit message once
+      if (stopErr) return wrapUp(stopErr, '');   // Prompt 27: answer from verified results (else: verified facts + the limit message once)
     }
 
     const limError: OrchestratorError = { code: 'TOOL_CALL_LIMIT_EXCEEDED', message: 'Request bahut lambi ho gayi — thoda simple karke poochiye.' };
-    return done(limError.message, lastError ? 'error' : 'tool_limit', limError);
+    return wrapUp(limError, limError.message, lastError ? 'error' : 'tool_limit');
   }
 
   /**
@@ -479,7 +559,7 @@ export class BoundToolRuntime {
       return { stale: true };
     }
     steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
-    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status });
+    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status, attempts: x.record.attempt || 1 });
     localHistory.push({ role: 'tool', content: JSON.stringify(this.serializeForLLM(norm, x.result)), toolCallId: tc.callId, toolName: tc.name });
     this.syncToSession(vt, norm);
     if (!norm.success) {

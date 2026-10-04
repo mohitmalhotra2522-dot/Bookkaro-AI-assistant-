@@ -1,3 +1,4 @@
+import { mockChainDecision, type MockChainScenarioId } from './mock-llm-chains';
 import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { classifyLifecycleIntent } from '../../booking/lifecycle-actions/lifecycle-action-intent';
 import type { LLMProvider, LLMTurnInput, LLMTurnResult, TurnToolResultView, SpokenResponseInput, SpokenResponseResult } from './llm-provider';
@@ -104,6 +105,8 @@ function parsedCount(t: string, pending: string): string | undefined {
 export class MockLLMProvider implements LLMProvider {
   readonly providerId = 'mock-llm';
   readonly modelName = 'mock-deterministic-v2';
+  /** Prompt 27: optional forced (misbehaving) chain scenario so tests can exercise the backend guards deterministically. */
+  constructor(private readonly opts: { chainScenario?: MockChainScenarioId } = {}) {}
 
   async init(_config: any): Promise<void> {}
 
@@ -142,6 +145,9 @@ export class MockLLMProvider implements LLMProvider {
       const sub = nb.remainder ? this.decide({ ...input, userText: nb.remainder }) : this.final('BOOK_TRAIN', '');
       return { ...sub, entities: { ...(sub.entities || {}), newJourney: true } };
     }
+    // Prompt 27: multi-step chains (search → compare → select → check → answer), general knowledge, chain-stop answers
+    const chain = mockChainDecision(input, this.opts.chainScenario);
+    if (chain) return chain;
     if (NON_RAILWAY_RE.test(t) && !/\b(train|railway|ticket|fare|kiraya)\b/.test(t)) return this.final('UNKNOWN', 'Main railway booking aur train information mein help kar sakta hoon.');
     // Prompt 17: "cancelled trains" is a LIVE provider fact → request the approved tool (never answer from memory)
     if (!turn.length && /\b(cancel(led)?|radd?) (hui |huyi |hue )?trains?\b|\btrains? (jo )?(cancel(led)?|radd?) (hui|huyi|hai|hain)\b/.test(t)) {

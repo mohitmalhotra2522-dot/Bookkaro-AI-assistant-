@@ -215,6 +215,7 @@ export class ActionValidator {
       case 'DEMONSTRATIVE': {
         if (ref.value === 'THIS') return { trainNumber: trains[0].trainNumber };
         if (ref.value === 'LAST') return { trainNumber: trains[trains.length - 1].trainNumber };
+        if (ref.value === 'MIDDLE' && trains.length >= 3 && trains.length % 2 === 1) return { trainNumber: trains[(trains.length - 1) / 2].trainNumber };
         return null;
       }
       case 'TIME_PREFERENCE': {

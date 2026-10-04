@@ -15,6 +15,8 @@ export interface TurnToolResultView {
   empty?: boolean;
   /** Prompt 17: tool execution status (SUCCEEDED / FAILED / TIMEOUT / REJECTED …). */
   status?: string;
+  /** Prompt 27: provider attempts behind this result (2 = the backend already retried it once). */
+  attempts?: number;
 }
 
 export interface LLMProviderConfig {
@@ -44,6 +46,11 @@ export interface LLMTurnInput {
    * of the proposal). Native tool-calling providers replay this as assistant tool_calls + tool messages.
    */
   agentTranscript?: AgentTranscriptStep[];
+  /**
+   * Prompt 27: the backend stopped the tool chain (step budget / loop guard). Tools are DISABLED for this one call:
+   * answer ONLY from the authoritative tool results already in this turn, and say plainly what could not be checked.
+   */
+  chainStop?: { reason: 'TOOL_BUDGET_EXHAUSTED' | 'TOOL_LOOP_DETECTED'; code: string; instruction: string };
 }
 
 /** Prompt 23: the backend's validated outcome of one update_booking_session proposal (never raw user secrets). */

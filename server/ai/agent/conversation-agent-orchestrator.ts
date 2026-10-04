@@ -162,6 +162,12 @@ const MAX_TURN_HISTORY = 100;
 /** Prompt 19: the bare-day month answer rewrote the input ("October" → "22 October") — not a count statement. */
 function llmInputChanged(llmInput: string, normalized: string): boolean { return llmInput !== normalized; }
 
+/** Prompt 27: decisions that mean the user wants to BOOK (ends an information-only selection). */
+const BOOKING_SIGNAL_INTENTS = new Set(['BOOK_TRAIN', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING']);
+/** Prompt 27: states before booking preparation (an informational selection may only be made from these). */
+const ORDER_BEFORE_PREP = new Set<string>([BookingState.IDLE, BookingState.COLLECTING_JOURNEY, BookingState.COLLECTING_DATE, BookingState.COLLECTING_PASSENGERS,
+  BookingState.SEARCHING_TRAINS, BookingState.SHOWING_TRAINS, BookingState.TRAIN_SELECTED, BookingState.CLASS_OPTIONS, BookingState.CLASS_SELECTED]);
+
 export class ConversationAgentOrchestrator {
   private history: Map<string, HistoryMsg[]> = new Map();
   private turns: Map<string, TurnRecord[]> = new Map();
@@ -322,6 +328,8 @@ export class ConversationAgentOrchestrator {
     //      regex. The backend only GROUNDS that proposal in the user's own words (Prompt 16 phrase set) and performs
     //      the validated journey reset (history store untouched); the LLM then decides again on the fresh journey.
     let newJourneyDone = false;
+    // ---- Prompt 27: the LLM's own interpretation of WHY it selects (information vs booking) — honoured, never inferred ----
+    let infoSelection = false, bookingSignal = false;
 
     // ---- Tool-calling loop with per-decision deterministic application ----
     const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges, rawText: llmInput, requestId, contextPatches: [], rejectedPatches: [] };
@@ -376,6 +384,9 @@ export class ConversationAgentOrchestrator {
             }
           }
         }
+        const purpose = (d as any)?.entities?.selectionPurpose;
+        if (purpose === 'INFORMATION') infoSelection = true;
+        if (purpose === 'BOOKING' || BOOKING_SIGNAL_INTENTS.has(String(d?.intent))) bookingSignal = true;
         const o = this.applier.apply(sessionId, d, ctx);
         if (o.pendingOverride) pendingOverride = o.pendingOverride;
         return o;
@@ -444,8 +455,13 @@ export class ConversationAgentOrchestrator {
       if (searchOk) progress.push(...this.applier.applyCarryOver(sessionId, ctx));
       else this.state.getSession(sessionId).carryOverSelection = undefined;
       const confirm = rt.applyOutcomes.some(o => o.confirmRequested);
+      // Prompt 27: an information-only selection stays at CLASS_SELECTED until the user shows booking intent
+      const sp = this.state.getSession(sessionId);
+      if (bookingSignal || !sp.selectedTrain || confirm) sp.selectionPurpose = undefined;
+      else if (infoSelection && ORDER_BEFORE_PREP.has(stateBefore)) sp.selectionPurpose = 'INFORMATION';
+      const holdAtSelection = sp.selectionPurpose === 'INFORMATION';
       try {
-        prep = await this.preparation.advance(sessionId, ctx, calls => bound.runTools(calls), { confirm, reviewVersion: opts.reviewVersion, approveReview: rt.applyOutcomes.some(o => o.applied.includes('REVIEW_APPROVED')) });
+        prep = await this.preparation.advance(sessionId, ctx, calls => bound.runTools(calls), { confirm, reviewVersion: opts.reviewVersion, approveReview: rt.applyOutcomes.some(o => o.applied.includes('REVIEW_APPROVED')), holdAtSelection });
       } catch (e: any) {
         const err: OrchestratorError = { code: e?.code === 'INVALID_STATE_TRANSITION' ? 'INVALID_STATE_TRANSITION' : 'TOOL_FAILED', message: 'Maaf kijiye, ye step abhi complete nahi ho paaya. Kripya dobara try karein.' };
         return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
@@ -596,7 +612,13 @@ export class ConversationAgentOrchestrator {
     // backend states the boundary itself (a fragment like "Ho gaya!" must not survive claim removal)
     const forbiddenAttempt = forbiddenAttempted(rt);
     if (forbiddenAttempt) parts.push(SAFE_ERROR_MESSAGE.FORBIDDEN_ACTION);
-    const llmFinalUseful = !forbiddenAttempt && !lifecycleTurn && !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
+    // Prompt 27: a mixed turn ("difference kya hai … aur trains dikhao") — the LLM labelled its final answer a general
+    // railway answer, so its (fact-guarded) general part is kept next to the authoritative search summary. Only a purely
+    // general text qualifies (no digits: no time / count / fare / train number) — a narration of the search results is
+    // never promoted into the backend reply (the search summary + cards stay the only authority for those facts)
+    const mixedGeneral = searchOk && !searchEmpty && rt.stopReason === 'final' && rt.finalDecision.intent === 'GENERAL_RAILWAY_QUERY'
+      && !!rt.finalDecision.finalMessage && !/\d/.test(String(rt.finalDecision.finalMessage));
+    const llmFinalUseful = !forbiddenAttempt && !lifecycleTurn && !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || mixedGeneral || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
     // Prompt 14: PNR / live status answers are ALWAYS deterministic phrasing of the provider result
     // (or its validated error) — LLM wording can never add or upgrade a status.
     if (nonSearch.some(st => LIVE_TOOLS.has(st.result.toolName))) parts.push(liveToolMessage(nonSearch, mode));
@@ -631,7 +653,7 @@ export class ConversationAgentOrchestrator {
 
   // ---------------------------------------------------------------- turn record
 
-  private diagnosticsOf(a: { rt: ToolRuntimeResult | null; startedAt: number; prepSteps?: ToolCallStep[] }, x: TurnExtras): NonNullable<TurnRecord['diagnostics']> {
+  private diagnosticsOf(a: { rt: ToolRuntimeResult | null; startedAt: number; prepSteps?: ToolCallStep[]; sessionId: string; turnId: string; stateBefore: BookingState }, x: TurnExtras): NonNullable<TurnRecord['diagnostics']> {
     const ns = x.naturalSpeech;
     const recs = a.rt?.toolExecutions || [];
     const claimTypes: Record<string, number> = {};
@@ -647,7 +669,8 @@ export class ConversationAgentOrchestrator {
       toolCalls: recs.length, toolNames: [...new Set(recs.map(r => r.tool))],
       toolValidationFailures: tv?.failures ?? 0, repeatedInvalidCalls: tv?.repeatedInvalid ?? 0, retryCount: tv?.correctedRetries ?? 0,
       latencyMs: Date.now() - a.startedAt, llmLatencyMs: a.rt?.llmLatencyMs ?? 0,
-      validation: { accepted: ns?.segments.length ?? 0, rejected: (ns?.rejected || []).map(r => r.reason), repaired: ns?.repaired ?? 0, claimTypes, source: ns?.source ?? null }
+      validation: { accepted: ns?.segments.length ?? 0, rejected: (ns?.rejected || []).map(r => r.reason), repaired: ns?.repaired ?? 0, claimTypes, source: ns?.source ?? null },
+      ...(a.rt?.chain ? { chain: { ...a.rt.chain, sessionId: a.sessionId, turnId: a.turnId, stateBefore: String(a.stateBefore), stateAfter: String(this.state.getSession(a.sessionId).bookingState) } } : {})
     };
   }
 

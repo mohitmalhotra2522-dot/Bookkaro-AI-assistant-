@@ -100,7 +100,8 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
     try {
       const res = await this.post({
         model: this.cfg.model, temperature: this.cfg.temperature ?? 0.3, max_tokens: MAX_TOKENS_AGENT,
-        messages: buildNativeMessages(input), tools: nativeToolDefs(input), tool_choice: 'auto'
+        // Prompt 27: after a backend chain stop the model may only answer (tools stay declared for the replayed transcript)
+        messages: buildNativeMessages(input), tools: nativeToolDefs(input), tool_choice: input.chainStop ? 'none' : 'auto'
       });
       let msg: any;
       try { msg = (await res.json())?.choices?.[0]?.message; } catch { throw new LLMProviderError('LLM_BAD_RESPONSE'); }
@@ -121,8 +122,10 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
         userText: input.userText, inputMode: input.inputMode, state: input.state, missingFields: input.missingFields,
         context: input.context ?? null, currentTurnToolResults: input.currentTurnToolResults ?? [],
         recentMessages: input.history.slice(-8).map(h => ({ role: h.role, content: String(h.content).slice(0, 400) })),
-        approvedTools: tools,
-        toolCallFormat: 'To request railway data add "toolCalls": [{"name": "<approved tool>", "arguments": {...}}]; omit it otherwise.'
+        approvedTools: input.chainStop ? [] : tools,
+        ...(input.chainStop
+          ? { chainStop: { reason: input.chainStop.reason, instruction: input.chainStop.instruction } }
+          : { toolCallFormat: 'To request railway data add "toolCalls": [{"name": "<approved tool>", "arguments": {...}}]; omit it otherwise.' })
       };
       const res = await this.post({
         model: this.cfg.model, temperature: this.cfg.temperature ?? 0.2, max_tokens: MAX_TOKENS_DECISION,
@@ -242,7 +245,7 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
   });
   const trainRef = { type: 'object', description: 'How the user referred to a train (a PROPOSAL resolved by the backend).', properties: {
     kind: { type: 'string', enum: ['TRAIN_NUMBER', 'DISPLAY_INDEX', 'TIME_PREFERENCE', 'CLASS_PREFERENCE', 'DEMONSTRATIVE', 'PREVIOUS', 'ALTERNATIVE'] },
-    value: { type: ['string', 'number'], description: 'e.g. "12014", 2, "MORNING", "AC", "THIS" | "FIRST" | "LAST"' },
+    value: { type: ['string', 'number'], description: 'e.g. "12014", 2, "MORNING", "AC", "THIS" | "FIRST" | "LAST" | "MIDDLE" ("beech wali")' },
     searchResultsVersion: { type: 'number' } }, required: ['kind'] };
   const session = { type: 'function', function: { name: SESSION_UPDATE_TOOL,
     description: 'Propose a change to the booking session (select train/class, change route/date, passengers, review, confirmation, new booking, cancel flow). The backend validates it and returns the outcome; nothing is booked or paid.',
@@ -258,6 +261,7 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
           name: { type: 'string' }, age: { type: 'number' }, gender: { type: 'string' }, berthPreference: { type: 'string' } } } } } },
         correctionTarget: STR('origin|destination|date|passengers|train|class'), correctionValueRaw: STR('corrected value as said'),
         affirmation: { type: 'boolean' }, newJourney: { type: 'boolean' },
+        selectionPurpose: { type: 'string', enum: ['INFORMATION', 'BOOKING'], description: 'Why a train/class is selected: INFORMATION = only to answer an availability / fare question (no booking started); BOOKING = the user wants to book.' },
         lifecycleAction: STR('optional booking lifecycle label'), bookingReference: STR('booking reference from context')
       } },
       clarification: STR('optional short question if you need to ask')
@@ -305,6 +309,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
       messages.push({ role: 'tool', tool_call_id: c.callId, content: clip(JSON.stringify(content), MAX_TOOL_RESULT_CHARS) });
     }
   }
+  // Prompt 27: the backend stopped the chain — a structured stop reason; the next message must be the answer
+  if (input.chainStop) messages.push({ role: 'system', content: `CHAIN_STOP ${JSON.stringify({ reason: input.chainStop.reason, code: input.chainStop.code })}: ${input.chainStop.instruction}` });
   return messages;
 }
 
@@ -312,7 +318,7 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
 function argumentDetails(d: any): Record<string, string> {
   if (!d || typeof d !== 'object') return {};
   const out: Record<string, string> = {};
-  for (const k of ['argument', 'expected', 'received', 'previousCode'] as const) if (typeof d[k] === 'string') out[k] = clip(d[k], 120);
+  for (const k of ['argument', 'expected', 'received', 'previousCode', 'attempts'] as const) if (typeof d[k] === 'string') out[k] = clip(d[k], 120);
   return out;
 }
 

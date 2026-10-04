@@ -64,6 +64,8 @@ export interface PrepOptions {
   reviewVersion?: number;
   /** The user explicitly approved an existing (valid) review while in REVIEW. */
   approveReview?: boolean;
+  /** Prompt 27: the selection only answers an information request — stay at CLASS_SELECTED (no booking preparation). */
+  holdAtSelection?: boolean;
 }
 
 const idx = (s: BookingState) => STATE_ORDER.indexOf(s);
@@ -342,6 +344,8 @@ export class BookingPreparationService {
 
     this.invalidateReviewIfChanged(sessionId, ctx);
 
+    // Prompt 27: an informational selection (availability / fare question) never starts booking preparation
+    if (opts.holdAtSelection && S().bookingState === BookingState.CLASS_SELECTED) { out.readiness = this.evaluate(sessionId, ctx); return out; }
     // CLASS_SELECTED → BOOKING_PREPARE (preparation begins only after train + class)
     if (S().bookingState === BookingState.CLASS_SELECTED) {
       this.state.transitionState(sessionId, BookingState.BOOKING_PREPARE);

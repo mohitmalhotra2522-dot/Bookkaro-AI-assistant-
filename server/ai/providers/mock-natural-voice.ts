@@ -11,6 +11,7 @@ import type { SpokenResponseInput, LLMTurnInput } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
 import type { BookingSession } from '@shared/entities';
 import { BookingState } from '@shared/states';
+import { searchSummary } from '../context/response-formatter';
 
 const ORD = ['Pehle', 'Doosre', 'Teesre', 'Chauthe', 'Paanchve', 'Chhathe'];
 const EN_ORD = ['first', 'second', 'third', 'fourth', 'fifth', 'sixth'];
@@ -172,6 +173,46 @@ export function mockSpokenResponse(i: SpokenResponseInput): string | null {
     const when = dw ? cap(dw) : 'Is date';
     const lead = corrected && dw ? `Achha, ${dw}. ` : '';
     const t: any = s.selectedTrain;
+    // Prompt 27 — a multi-step chain (search → select → availability/fare) or a mixed general + search turn: the answer
+    // the user asked for is what follows the train list in the backend reply (already fact-guarded) — speak THAT, not
+    // the list summary. The selection question is dropped when the chain already answered.
+    // anchor = the exact search summary the backend produced for this mode (TEXT: header + rows; VOICE: one sentence)
+    const summ = searchSummary(s, i.inputMode);
+    const at = summ ? i.backendReply.indexOf(summ) : -1;
+    let tailText = at >= 0 ? i.backendReply.slice(at + summ.length) : '';
+    if (at < 0) {
+      const lines = i.backendReply.split('\n');
+      let lastRow = -1;
+      lines.forEach((l, k) => { if (/^\s*\d+\.\s/.test(l)) lastRow = k; });
+      tailText = lastRow >= 0 ? lines.slice(lastRow + 1).join('\n') : '';
+    }
+    const answer = (tailText.match(/[^.!?\n]+[.!?]?/g) || []).map(x => x.trim()).filter(x => x && !/\?$/.test(x)).join(' ');
+    const chained = ok.some(r => r.toolName === 'CHECK_AVAILABILITY' || r.toolName === 'GET_FARE');
+    if (answer && chained) {
+      const kept = t && i.selectedTrainBefore && t.number === i.selectedTrainBefore && corrected
+        ? (en ? `${t.number} is in the fresh list too. ` : `${when} ki fresh list mein ${t.number} bhi hai. `) : '';
+      // VOICE stays short (≤ 3 sentences): keep the comparison lead, say availability + fare in ONE sentence from the
+      // authoritative tool results
+      const avR = ok.filter(r => r.toolName === 'CHECK_AVAILABILITY').slice(-1)[0];
+      const frR = ok.filter(r => r.toolName === 'GET_FARE').slice(-1)[0];
+      if (i.inputMode === 'VOICE' && !failed.length && t) {
+        const sentences = answer.match(/[^.!?]+[.!?]?/g)!.map(x => x.trim()).filter(Boolean);
+        const leadS = sentences.filter(x => !/available|waitlist|\brac\b|₹|fare|verify/i.test(x)).slice(-2);
+        const st = String(avR?.data?.status ?? '').trim();
+        const cls = String(avR?.data?.travelClass || frR?.data?.travelClass || s.selectedClass || '');
+        const pieces: string[] = [];
+        if (avR && st) pieces.push(en ? `${t.number} ${cls} is ${st.toLowerCase() === 'available' ? 'available' : st}` : `${t.number} mein ${cls} ${/^available$/i.test(st) ? 'available hai' : `${st} hai`}`);
+        if (frR && Number.isFinite(Number(frR.data?.perPassenger))) pieces.push(en ? `fare ₹${frR.data.perPassenger} per passenger` : `fare ₹${frR.data.perPassenger} per passenger`);
+        if (pieces.length) return `${lead}${kept}${[...leadS, `${pieces.join(', ')}.`].join(' ')}`.trim();
+      }
+      return `${lead}${kept}${answer}`;
+    }
+    // mixed general + search: only a purely general tail (no digits — backend carry-over / class notes always name a train)
+    if (answer && !chained && !corrected && !/\d/.test(answer)) {
+      const n0 = trains.length;
+      const summary = en ? `I found ${n0} train${n0 > 1 ? 's' : ''} — which one would you like?` : `${when} ke liye ${n0} train${n0 > 1 ? 'ein' : ''} mili hain — kaunsi chahiye?`;
+      return `${lead}${answer} ${summary}`;
+    }
     // Part 38 — the previously chosen train is NOT in the fresh list: say so plainly (never carry it over)
     const dropped = i.selectedTrainBefore && !t && !newJourney ? (en ? `${i.selectedTrainBefore} isn't in the new list. ` : `${i.selectedTrainBefore} ${dw || 'nayi date'} ki list mein nahi hai. `) : '';
     // Part 38 — carry-over: the same train was re-derived from the NEW results
@@ -228,6 +269,11 @@ export function mockSpokenResponse(i: SpokenResponseInput): string | null {
   // Part 20 — journey slot answers
   if (s.bookingState === BookingState.COLLECTING_DATE && i.changes.some(c => c.field === 'origin' || c.field === 'destination')) {
     return en ? 'Sure. When do you want to travel?' : pick(['Bilkul. Kab jaana hai?', 'Theek hai. Kis din jaana hai?'], seed);
+  }
+  // Prompt 27 — English user, backend follow-up question in Hinglish: keep the (already guarded) answer, ask in English
+  if (en && q && !i.toolResults.length) {
+    const m = i.backendReply.match(/^([\s\S]*?[.!])\s+([^.!?]*\b(kaunsi|kitne|karni|chahiye|karna|batao)\b[^.!?]*\?)\s*$/i);
+    if (m && !/^\s*\d+\.\s/m.test(m[1])) return `${m[1].trim()} ${q}`;
   }
   return null;
 }

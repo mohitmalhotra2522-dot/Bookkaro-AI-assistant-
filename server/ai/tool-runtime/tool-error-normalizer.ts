@@ -12,7 +12,7 @@ const RUNTIME_CODES: ReadonlySet<string> = new Set([
   'UNKNOWN_TOOL', 'TOOL_NOT_IMPLEMENTED', 'TOOL_CALL_REJECTED', 'FORBIDDEN_ACTION', 'FORBIDDEN_ARGUMENT',
   'TOOL_CALL_LIMIT_EXCEEDED', 'TOOL_LOOP_DETECTED', 'STALE_TOOL_RESULT', 'PROVIDER_DATA_CONFLICT',
   'TOOL_FAILED', 'TOOL_TIMEOUT', 'INVALID_REQUEST', 'NO_RESULTS', 'PROVIDER_UNAVAILABLE', 'RATE_LIMITED',
-  'AUTH_ERROR', 'DATA_UNAVAILABLE', 'UNKNOWN', 'DEPENDENCY_NOT_SATISFIED'
+  'AUTH_ERROR', 'DATA_UNAVAILABLE', 'UNKNOWN', 'DEPENDENCY_NOT_SATISFIED', 'REPEATED_FAILED_CALL'
 ]);
 
 export function normalizeToolErrorCode(raw: string | undefined | null): ToolErrorCode {
@@ -61,7 +61,8 @@ export const SAFE_ERROR_MESSAGE: Record<ToolErrorCode, string> = {
   DEPENDENCY_NOT_SATISFIED: 'Pehle wala step verify nahi ho paaya, isliye ye check abhi nahi kiya.',
   PROVIDER_DATA_CONFLICT: 'Railway providers ki jaankari mel nahi kha rahi — abhi verified result available nahi hai.',
   INVALID_ARGUMENT: 'Ek detail sahi format mein nahi thi — thoda clear karke bataiye.',
-  INVALID_REPEATED_CALL: 'Wahi galat detail dobara aayi — sahi value bataiye.'
+  INVALID_REPEATED_CALL: 'Wahi galat detail dobara aayi — sahi value bataiye.',
+  REPEATED_FAILED_CALL: 'Ye jaankari abhi provider se nahi mil paa rahi — thodi der baad dobara try karein.'
 };
 
 /** Strip anything that is not a short human message (stack traces, URLs with keys, JSON blobs). */

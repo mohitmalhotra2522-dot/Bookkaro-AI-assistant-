@@ -49,7 +49,48 @@ export type ToolErrorCode =
   // Prompt 18: a dependent call whose dependency (e.g. SEARCH_TRAINS) did not succeed
   | 'DEPENDENCY_NOT_SATISFIED'
   // Prompt 25: argument schema validation before execution (provider NOT called)
-  | 'INVALID_ARGUMENT' | 'INVALID_REPEATED_CALL';
+  | 'INVALID_ARGUMENT' | 'INVALID_REPEATED_CALL'
+  // Prompt 27: the same VALIDATED call already failed at the provider this turn — one retry for a transient failure, then no more
+  | 'REPEATED_FAILED_CALL';
+
+/** Prompt 27 — why a multi-step LLM ↔ tool chain ended (deterministic, one per turn). */
+export type ToolChainStopReason =
+  | 'FINAL_RESPONSE' | 'CLARIFICATION' | 'TOOL_BUDGET_EXHAUSTED' | 'TOOL_LOOP_DETECTED' | 'SAFETY_BLOCKED' | 'VALIDATION_BLOCKED'
+  | 'TOOL_UNAVAILABLE' | 'TOOL_FAILED' | 'LLM_UNAVAILABLE' | 'INVALID_DECISION' | 'STALE';
+
+/** Prompt 27 — one tool step of a chain (sanitized: whitelisted argument summary only, never text / secrets). */
+export interface ToolChainStep {
+  stepNumber: number;
+  /** 1-based LLM decision call that requested this step. */
+  llmCall: number;
+  toolName: string;
+  toolArgumentsSanitized: Record<string, string | number>;
+  toolResultStatus: string;
+  /** toolExecutionId of the authoritative result (provenance id). */
+  toolResultId: string;
+  /** LLM_TOOL_CALL | LLM_RETRY | BACKEND_RETRY | DEDUPLICATED | REJECTED:<code> */
+  decisionReason: string;
+  retryCount: number;
+  latencyMs: number | null;
+  parallelGroup: number | null;
+}
+
+/** Prompt 27 — observability of one multi-step chain (one user turn). */
+export interface ToolChainTrace {
+  chainId: string;
+  llmCallCount: number;
+  toolCallCount: number;
+  providerCallCount: number;
+  redundantCallCount: number;
+  retryCount: number;
+  chainLength: number;
+  chainStopReason: ToolChainStopReason;
+  /** the LLM answered from the results already obtained after the budget / loop stop (one tools-disabled call) */
+  answeredAfterStop: boolean;
+  budget: { maxToolSteps: number; maxRounds: number; maxLlmIterations: number };
+  latencyMs: number;
+  steps: ToolChainStep[];
+}
 
 /** Part 4 — what the LLM may emit. Raw expressions ("kal", "Delhi") are allowed; the backend resolves them. */
 export interface LLMToolCall {
@@ -106,6 +147,8 @@ export interface ToolExecutionRecord {
   /** Prompt 18: 1 = first attempt; a backend retry is a NEW record (new id) with retryOf → previous id. */
   attempt?: number;
   retryOf?: string | null;
+  /** Prompt 27: the LLM re-requested an identical call after a transient provider failure (its one bounded retry). */
+  llmRetry?: boolean;
   /** Prompt 18: ToolExecutionPlan node (dependency graph) this execution belongs to. */
   planNodeId?: string | null;
 }

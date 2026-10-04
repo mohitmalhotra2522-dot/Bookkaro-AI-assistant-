@@ -65,7 +65,8 @@ export type TrainReference = (
   | { kind: 'DISPLAY_INDEX'; value: number }
   | { kind: 'TIME_PREFERENCE'; value: 'MORNING' | 'AFTERNOON' | 'EVENING' | 'NIGHT' }
   | { kind: 'CLASS_PREFERENCE'; value: string }
-  | { kind: 'DEMONSTRATIVE'; value: 'FIRST' | 'LAST' | 'THIS' }
+  /** MIDDLE (Prompt 27, "beech wali") — only when the list has ONE middle train (odd count); otherwise ambiguous */
+  | { kind: 'DEMONSTRATIVE'; value: 'FIRST' | 'LAST' | 'THIS' | 'MIDDLE' }
   /** "jo pehle batayi thi" — the previously discussed/selected train */
   | { kind: 'PREVIOUS'; value: 'PREVIOUS' }
   /** "nahi, doosri train" — another train than the currently selected one */
@@ -104,6 +105,11 @@ export interface ExtractedEntities {
   /** Prompt 22: the LLM's interpretation that the user explicitly asked for a NEW / another booking.
    *  A proposal only — the backend grounds it in the user's own words before resetting the journey. */
   newJourney?: boolean;
+  /**
+   * Prompt 27: WHY a train/class is being selected — INFORMATION (answer an availability / fare question; no booking
+   * state is created) or BOOKING (the user wants to book). The LLM's interpretation; the backend only honours it.
+   */
+  selectionPurpose?: 'INFORMATION' | 'BOOKING';
   passengersCountRaw?: string;
   preferredTimeRaw?: string;
   preferredClassRaw?: string;
@@ -359,6 +365,8 @@ export interface TurnRecord {
     toolCalls: number; toolNames: string[]; toolValidationFailures: number; repeatedInvalidCalls: number; retryCount: number;
     latencyMs: number; llmLatencyMs: number;
     validation: { accepted: number; rejected: string[]; repaired: number; claimTypes: Record<string, number>; source: 'LLM' | 'FALLBACK' | null };
+    /** Prompt 27: multi-step chain observability (ids / counts / sanitized argument summaries only). */
+    chain?: import('@shared/railway-tool-runtime').ToolChainTrace & { sessionId: string; turnId: string; stateBefore: string; stateAfter: string };
   };
   // ---- Prompt 9 observability ----
   bookingReadiness?: { ready: boolean; blockers: string[]; warnings: string[] };

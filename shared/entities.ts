@@ -221,6 +221,11 @@ export interface BookingSession {
   preparationDependencies?: { fare?: { status: 'UNAVAILABLE'; basis: string; errorCode: string | null; at: string }; availability?: { status: 'UNAVAILABLE'; basis: string; errorCode: string | null; at: string } };
   /** Selection to carry over after a DATE-only correction (same train/class re-verified on new date). */
   carryOverSelection?: { trainNumber: string; classCode?: string };
+  /**
+   * Prompt 27: the current train/class was selected only to ANSWER an information request (availability / fare), as
+   * proposed by the LLM (entities.selectionPurpose). Booking preparation does not start until a booking signal.
+   */
+  selectionPurpose?: 'INFORMATION';
 
   // ---- Booking execution boundary (Prompt 10) ----
   /** Immutable handoff snapshot + status (READY / INVALIDATED / CONSUMED / EXPIRED). Backend-owned. */
@@ -356,6 +361,8 @@ export type BookingEventType =
   | 'CONTEXT_PATCH_REJECTED'
   | 'NEW_JOURNEY_STARTED'
   | 'TOOL_CALL_DEDUPLICATED'
+  // Prompt 27: the backend stopped a multi-step chain (step budget / repeated-call guard)
+  | 'TOOL_CHAIN_STOPPED'
   | 'STALE_RESULT_REJECTED'
   | 'CORRECTION_APPLIED'
   // ---- Prompt 9: booking preparation ----

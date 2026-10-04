@@ -119,6 +119,14 @@ export class TrainReferenceResolver {
       case 'DEMONSTRATIVE': {
         if (ref.value === 'FIRST') return one(trains[0]);
         if (ref.value === 'LAST') return one(trains[trains.length - 1]);
+        // Prompt 27: "beech wali" — exactly one middle train exists only for an odd-length list (never a guess)
+        if (ref.value === 'MIDDLE') {
+          if (trains.length >= 3 && trains.length % 2 === 1) return one(trains[(trains.length - 1) / 2]);
+          const mid = trains.length >= 2 ? trains.slice(Math.max(0, trains.length / 2 - 1), trains.length / 2 + 1) : trains;
+          return trains.length < 3
+            ? { ok: false, code: 'INVALID_TRAIN_REFERENCE', message: `List mein beech wali train nahi hai: ${listTrains(trains)}.`, candidates: trains }
+            : { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `Beech mein ${listTrains(mid)} hain — kaunsi chahiye?`, candidates: mid };
+        }
         // THIS — the train in focus (selected / last discussed), else the only result.
         const focus = selectedNum || session.focusTrainNumber;
         const f = focus ? trains.find(x => x.trainNumber === focus) : undefined;

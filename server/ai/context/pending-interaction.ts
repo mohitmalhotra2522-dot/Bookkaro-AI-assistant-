@@ -38,6 +38,9 @@ export function derivePendingInteraction(s: BookingSession): PendingInteraction 
     case BookingState.CLASS_OPTIONS:
       return { type: 'CLASS_SELECTION_REQUIRED' };
     case BookingState.CLASS_SELECTED:
+      // Prompt 27: an informational selection asks nothing booking-related (no "kitne passengers?")
+      if (s.selectionPurpose === 'INFORMATION') return { type: 'NONE' };
+      return s.passengersCount ? { type: 'NONE' } : { type: 'PASSENGERS_REQUIRED' };
     case BookingState.BOOKING_PREPARE:
       return s.passengersCount ? { type: 'NONE' } : { type: 'PASSENGERS_REQUIRED' };
     case BookingState.SHOWING_TRAINS:

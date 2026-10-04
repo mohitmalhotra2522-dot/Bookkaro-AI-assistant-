@@ -36,6 +36,8 @@ export interface ToolObserver {
 }
 
 export const MAX_TOOL_CALLS_PER_TURN = 8;
+/** Prompt 27: the per-turn tool-step budget of a multi-step chain — the SAME budget (one constant, never silently raised). */
+export const MAX_TOOL_STEPS_PER_TURN = MAX_TOOL_CALLS_PER_TURN;
 export const MAX_TOOL_ROUNDS_PER_TURN = 5;
 /** Same normalized call requested this many times in one turn → TOOL_LOOP_DETECTED. */
 export const TOOL_LOOP_THRESHOLD = 3;
@@ -62,6 +64,8 @@ function safeSummary(args: Record<string, any>): Record<string, string | number>
   return out;
 }
 const selectedTrainOf = (s: BookingSession): string => { const t: any = s.selectedTrain; return t ? String(t.number || t.trainNumber || '') : ''; };
+/** Prompt 27: provider failures where ONE identical retry by the LLM is meaningful. */
+const TRANSIENT_FAILURES: ReadonlySet<string> = new Set(['TOOL_FAILED', 'PROVIDER_UNAVAILABLE', 'RATE_LIMITED', 'TOOL_TIMEOUT']);
 const selectionKeyOf = (s: BookingSession) => `${selectedTrainOf(s)}|${s.selectedClass || ''}|${s.passengersCount || ''}`;
 
 /** Executes a VALIDATED call against the existing railway layer. `canApply` must be honoured before any commit. */
@@ -88,7 +92,7 @@ export interface ToolTurnContext {
 }
 
 export type PreparedCall =
-  | { ok: true; tc: ToolCall; vt: ValidatedToolCall; record: ToolExecutionRecord; journeyVersion: number; selectionKey: string; corrections: string[] }
+  | { ok: true; tc: ToolCall; vt: ValidatedToolCall; record: ToolExecutionRecord; journeyVersion: number; selectionKey: string; corrections: string[]; failSig?: string }
   | { ok: false; tc: ToolCall; record: ToolExecutionRecord; error: { code: string; normalized: ToolErrorCode; message: string; details?: any }; result: LLMToolResult; stop: boolean };
 
 export interface ExecutedCall {
@@ -126,6 +130,10 @@ export class ToolTurn {
   private readonly invalidTools = new Set<string>();
   /** Prompt 25 Part 17: validation failures / identical invalid repeats / corrected retries of this turn. */
   readonly validation = { failures: 0, repeatedInvalid: 0, correctedRetries: 0, coerced: 0 };
+  /** Prompt 27: bounded LLM retries of provider failures (kept apart from the P25 validation counters). */
+  readonly retryStats = { llmRetries: 0, repeatedFailed: 0 };
+  /** Prompt 27: provider failures of VALIDATED calls this turn (same tool + validated args + journey) → bounded LLM retry. */
+  private readonly failedSigs = new Map<string, { code: string; count: number }>();
   private parallelGroup = 0;
   readonly timeoutMs: number;
   readonly maxCalls: number;
@@ -156,7 +164,9 @@ export class ToolTurn {
   loopSignature(tc: ToolCall): string {
     if (tc?.name === 'SEARCH_TRAINS') return `SEARCH_TRAINS|${stableJson(tc?.arguments || {})}`;
     const s = this.ctx.getSession();
-    return `${tc?.name}|${stableJson(tc?.arguments || {})}|${selectionKeyOf(s)}|${journeyKeyOf(s)}`;
+    // Prompt 27: + result-list version and booking state — after a fresh search (e.g. a date correction re-derived the
+    // same train) a call that was invalid on the OLD state is a genuinely new call, not a blind repeat
+    return `${tc?.name}|${stableJson(tc?.arguments || {})}|${selectionKeyOf(s)}|${journeyKeyOf(s)}|${s.searchResultsVersion ?? ''}|${s.bookingState}`;
   }
 
   private newRecord(tc: ToolCall): ToolExecutionRecord {
@@ -230,7 +240,21 @@ export class ToolTurn {
     this.validation.coerced += norm.corrections.filter(c => c.startsWith('type:')).length;
     rec.argumentsHash = hashArguments(res.name, val.v.arguments);
     rec.argumentsSummary = safeSummary(val.v.arguments);
-    return { ok: true, tc, vt: val.v, record: rec, journeyVersion: syncJourneyVersion(s), selectionKey: selectionKeyOf(s), corrections: norm.corrections };
+    // Prompt 27: an identical VALIDATED call that already failed at the provider this turn — a transient failure may be
+    // retried ONCE by the LLM; a non-transient failure (or a second failure) is not re-sent: the LLM gets a structured
+    // reason and answers / asks / tries a genuinely different step instead (bounded, never an endless retry).
+    const failSig = fromLLM ? `${res.name}|${rec.argumentsHash}|${journeyKeyOf(s)}` : undefined;
+    const prevFail = failSig ? this.failedSigs.get(failSig) : undefined;
+    if (prevFail) {
+      if (!TRANSIENT_FAILURES.has(prevFail.code) || prevFail.count >= 2) {
+        this.retryStats.repeatedFailed++;
+        return this.reject(tc, rec, 'REPEATED_FAILED_CALL', `Identical ${res.name} call already failed (${prevFail.code}) ${prevFail.count}x this turn. Do not repeat it: answer from the results you have, tell the user it could not be checked, or try a different step.`,
+          false, { previousCode: prevFail.code, attempts: String(prevFail.count) });
+      }
+      this.retryStats.llmRetries++;
+      rec.llmRetry = true;
+    }
+    return { ok: true, tc, vt: val.v, record: rec, journeyVersion: syncJourneyVersion(s), selectionKey: selectionKeyOf(s), corrections: norm.corrections, ...(failSig ? { failSig } : {}) };
   }
 
   /** Result guard (Part 55): same request, same journeyVersion, same selection (quotes). */
@@ -420,6 +444,12 @@ export class ToolTurn {
         if (!p.ok) { h.onRejected(p); continue; }
         const x = executed[k++];
         byIndex.set(i, x);
+        // Prompt 27: remember a provider failure of this validated call (bounded LLM retry, see prepare)
+        if (h.fromLLM && p.failSig && !x.success && !x.stale) {
+          const prev = this.failedSigs.get(p.failSig);
+          // count provider ATTEMPTS (a backend retry already used the one meaningful retry → identical call not re-sent)
+          this.failedSigs.set(p.failSig, { code: String(x.error?.normalized || x.error?.code || 'TOOL_FAILED'), count: (prev?.count || 0) + Math.max(1, x.record.attempt || 1) });
+        }
         const node = nodeByCall.get(p.tc);
         if (node) {
           node.toolExecutionId = x.record.toolExecutionId;
