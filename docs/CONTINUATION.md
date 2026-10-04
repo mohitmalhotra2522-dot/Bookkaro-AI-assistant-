@@ -90,7 +90,7 @@ Env:
 | 31 | — | **no P31 commit exists in this workspace** (P32 was built on P30) |
 | 32 | `397ce32` | full LLM agent authority + honest provider outcomes |
 | 33 | `6f71466`, `74063e1` | AI-driven booking preparation + review + secure handoff readiness — see `docs/AGENT_AUTHORITY.md` §7 |
-| 34 | see `git log` | voice production hardening (this milestone): structured STT boundary, no interim turns, TTS = final validated text only, barge-in/stale, TTS retry, voice observability — see `docs/AGENT_AUTHORITY.md` §8 |
+| 34 | `caa2ac4` + fare follow-up (see `git log`) | voice production hardening: structured STT boundary, no interim turns, TTS = final validated text only, barge-in/stale, TTS retry, voice observability — see `docs/AGENT_AUTHORITY.md` §8 |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -117,6 +117,7 @@ Env:
 - **G2 (booking domain / security, unit):** `tests/unit/p9-passenger-readiness`, `p10-execution-gateway`, `p11-handoff-session`, `p12-booking-provider`, `p13-execution-lifecycle`, `p15-lifecycle-actions`, `p19-passenger-collection`, `p20-passenger-workflow`, `p23-real-llm-adapter`, `p32-agent-authority`, `p33-booking-preparation`.
 - **G3 (NL / booking e2e):** `tests/integration/p8-booking-engine`, `p9-booking-preparation`, `p10-confirmation-boundary`, `p11-handoff-e2e`, `p12-provider-e2e`, `p13-lifecycle-e2e`, `p15-lifecycle-actions-e2e`, `p19-booking-preparation-e2e`, `p20-booking-review-e2e`, `p23-agentic-e2e`, `p32-agent-authority-e2e`, `p33-booking-e2e`.
 - (P32 definition, for railway-information work: G2 = p17 + p25–p30 + p32 unit; G3 = p17 + p25–p30 + p32 e2e.)
+- (P34 fare follow-up, fact-validation work: G2 = unit p34-fare-authority, p34-voice-hardening, p21, p22, p25–p30, p32, p33; G3 = integration p34-voice-e2e, p8-booking-engine, p16, p17, p21–p23, p25–p30, p32, p33 e2e. Result: G2 177/179, G3 249/260 — all failures pre-existing.)
 - (P34 definition, for voice work: G2 = unit p34-voice-hardening, p21-voice-infrastructure, p22-architecture-hardening, p18-turn-engine, p25, p26, p29, p33; G3 = integration p34-voice-e2e, p21-natural-voice-e2e, p22-architecture-e2e, p23-agentic-e2e, p29-action-truth-e2e, p32-agent-authority-e2e, p33-booking-e2e.)
 
 Known pre-existing failures in older suites (they also fail at earlier HEADs; report, don't "fix" blindly):
@@ -128,11 +129,12 @@ P33 final check (resolved): G3 p33 [2] now observes the FIRST decision request o
 
 Found during P34 (verified failing at `74063e1`, before any P34 code): unit p21 [11] (expects reason `BOOKING_SUCCESS_CLAIM`, P33 renamed booking claims), unit p22 [9], integration p21 [2] / [12] / [17] and p22 [K+L] (P33 review/date wording: "Haan ya nahi boliye." suffix, "6 Oct" instead of "parso").
 
-**Known open gap (pre-existing, documented by P34 G3 [P] and the malformed-fare case of [Q/R/S]; reproduced at HEAD `74063e1` in TEXT mode):** a native agent's own ₹ amount with NO GET_FARE / verified review (or after GET_FARE = MALFORMED_DATA) survives. In native mode the agent text becomes `responseMessage` = composer `backendReply`, and `natural-response-composer.ts` treats any ₹ in `backendReply` as known (`fareKnown`, `fareNums`); the deterministic fallback is derived from that same message. Fix belongs in the orchestrator's native-reply construction (P25/P32 area — out of P34's additive voice scope). Not fixed in P34.
+**Fare-authority gap — FIXED (P34 final follow-up, see `git log`).** Previously a native agent's own ₹ amount with NO GET_FARE (or after GET_FARE = MALFORMED/TIMEOUT/failed) survived, because `factGuard` returned early when no tool step was ok, `judgeFareScope` returns null when the fact index has no fares, and the legacy P16 grounding validator accepts ₹ numbers found in search fixtures / any ok step. Fix (targeted, at the orchestration / fact-validation boundary): `judgeFareAuthority` (`server/ai/response/claim-facts.ts`) + `guardFareClaims` (`claim-entity-binding.ts`), applied in the orchestrator `factGuard` BEFORE the no-ok-tool early return and on the clarification path. Same code for TEXT and VOICE (the validated text feeds UI and TTS); no extra LLM call; composer, voice stack and P33 booking untouched. Regression: unit `p34-fare-authority`, integration `p34-voice-e2e` [P] (TEXT+VOICE × no-GET_FARE / malformed / correct). Newly seen in the follow-up's G3 (verified failing at `caa2ac4` too): integration p25 [J] (llmCalls count on the passengers turn).
 
 ### Pinned invariants (must not break)
 
 - A serialized turn result never contains the key `"sourceResultId"` (P25–P27 e2e afterEach).
+- **Fare authority (P34 follow-up):** a ₹/Rs/INR amount in any LLM-authored reply text is valid ONLY if the fact index holds a GET_FARE-derived fare (this turn's *successful* GET_FARE view, the session's committed quote, or the VERIFIED review snapshot) matching train / class / date / amount. No such fare → sentence removed, reason `UNVERIFIED_FARE:<n>` (diagnostics `binding.crossEntityRejections`) and `FARE:<n>` in `turnLog.rejectedClaims` (P16 invented-fact contract); mismatch → `FARE_MISMATCH:<n>` / `CROSS_DATE_FACT` (diagnostics only). Search-result fixture fares and malformed / failed / timed-out GET_FARE never authorize. Do not re-introduce an early return in `factGuard` ahead of the fare guard.
 - P26 reasons: `UNVERIFIED_AVAILABILITY`, `CLASS_NOT_LISTED:<cls>`, `AVAILABILITY_MISMATCH`. P25: `FARE_MISMATCH:<n>`. P22: `UNGROUNDED_NUMBER:<n>`, `UNGROUNDED_FARE_AMOUNT:<n>`, `UNGROUNDED_COUNT:…`.
 - P30 reference reasons: `STALE_INDEX_REFERENCE`, `INVALID_INDEX_REFERENCE`, `INDEX_REFERENCE_MISMATCH`, `NOT_IN_CURRENT_RESULTS`, `IN_CURRENT_RESULTS`.
 - P32 outcome reasons: `NO_RESULTS_CLAIM_ON_<OUTCOME>`, `NO_RESULTS_CONTRADICTS_DATA`, `NO_RESULTS_CLAIM_WITHOUT_EMPTY_RESULT`, `SOURCE_CLAIM_*`, `MOCK_DATA_PRESENTED_AS_LIVE`, `LIVE_CLAIM_WITHOUT_LIVE_DATA`.

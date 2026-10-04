@@ -299,6 +299,22 @@ export function isGeneralKnowledgeClaim(t: string, idx: FactIndex): boolean {
   return EXPLAIN_RE.test(t) || OPINION_RE.test(t);
 }
 
+/**
+ * Prompt 34 follow-up — FARE AUTHORITY (one rule for TEXT and VOICE). A ₹ / Rs / INR amount written by the LLM is a
+ * fare claim; it is valid ONLY when matching successful GET_FARE-derived data exists in the fact index (this turn's
+ * successful GET_FARE, the session's committed GET_FARE quote, or the verified review snapshot) for the claimed
+ * train / class / date. A failed / malformed / timed-out GET_FARE contributes nothing (only `ok` views are indexed),
+ * search-result fixture fares are never fare authority, and the LLM's own words can never ground themselves.
+ * Returns null (valid / no fare claim) or a rejection reason.
+ */
+const FARE_AMOUNT_RE = /(?:₹|\brs\.?\s?|\binr\s?)\s?([\d,]+(?:\.\d+)?)/gi;
+export function judgeFareAuthority(t: string, idx: FactIndex): string | null {
+  const amounts = [...String(t || '').matchAll(FARE_AMOUNT_RE)].map(m => Number(m[1].replace(/,/g, ''))).filter(n => Number.isFinite(n));
+  if (!amounts.length) return null;
+  if (!idx.fares.length) return `UNVERIFIED_FARE:${amounts[0]}`;
+  return judgeFareScope(t, idx).reason;
+}
+
 export function classifyClaim(t: string, idx: FactIndex, hits: { time?: TimeVerdict; fare?: FareFact; classList?: boolean; pax?: PaxClass; avail?: AvailabilityEvidence; userAvail?: boolean; count?: boolean }, general: boolean): ClaimProvenance {
   const prov = (claimType: ClaimType, sourceTool: string | null = null, sourceResultId: string | null = null, fields: string[] = []): ClaimProvenance => ({ claimType, sourceTool, sourceResultId, fields });
   if (hits.fare) return prov('TOOL_DERIVED_FACT', hits.fare.source, hits.fare.resultId, ['fare', ...(hits.fare.train ? ['trainNumber'] : []), ...(hits.fare.cls ? ['travelClass'] : [])]);

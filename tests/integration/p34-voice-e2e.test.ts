@@ -297,13 +297,37 @@ describe('P34 G3 — fact authority + truthful failures (N–T)', () => {
     expect(d.voice.speechText).toMatch(/650/);
   });
 
-  it('[P] a fare stated by the LLM with NO GET_FARE / verified review is never shown or spoken (KNOWN PRE-EXISTING GAP — reproduced at HEAD in TEXT mode)', async () => {
-    const h = native();
-    await h.say(START);
-    const c = await h.say('12497 3A ka fare kitna hai', 'VOICE');
-    expect(h.s().fare).toBeFalsy();
-    expect(c.turnLog.diagnostics.toolNames).toEqual([]);
-    expect(shown(c)).not.toMatch(/650/);
+  it('[P] fare authority (TEXT = VOICE): no GET_FARE / malformed GET_FARE → the LLM amount is removed; correct GET_FARE → the real fare survives; UI text = TTS; no second wording call', async () => {
+    for (const mode of ['TEXT', 'VOICE'] as const) {
+      for (const [label, user, fault] of [['NO_GET_FARE', '12497 3A ka fare kitna hai', null], ['MALFORMED', '12497 3A fare', 'malformed'], ['CORRECT', '12497 3A fare', null]] as const) {
+        const h = native(); const vo = voiceOf(h);
+        await h.say(START);
+        rail.mode = fault ? { fare: fault } : {};
+        const w0 = h.fake.wordingRequests.length;
+        if (mode === 'VOICE') await vo.utter(user); else await h.say(user, 'TEXT');
+        const r = h.last();
+        await vo.drain();
+        const tag = `${mode} ${label}`;
+        if (label === 'CORRECT') {
+          expect(h.s().fare, tag).toBeTruthy();
+          for (const t of [r.voice.assistantText, r.responseMessage]) expect(t, tag).toMatch(/12497[^.]*3A[^.]*₹650/);
+        } else {
+          expect(h.s().fare, tag).toBeFalsy();
+          expect(shown(r), tag).not.toMatch(/650|₹/);                                     // UI text, responseMessage, speech
+          expect(r.turnLog.diagnostics.binding.crossEntityRejections, tag).toContain('UNVERIFIED_FARE:650');
+          expect(r.turnLog.rejectedClaims, tag).toContain('FARE:650');                     // P16 invented-fact contract
+          expect(r.voice.assistantText, tag).toMatch(label === 'MALFORMED' ? /sahi format mein nahi tha/ : /verified result available nahi/);
+        }
+        if (mode === 'VOICE') {
+          expect(vo.spokenResponse(r).join(' '), tag).toBe(r.voice.speechText);           // TTS = the final validated text
+          if (label !== 'CORRECT') expect(vo.tts.spoken.map(x => x.text).join(' '), tag).not.toMatch(/₹/);
+          else expect(r.voice.speechText, tag).toMatch(/₹650/);
+        }
+        expect(h.fake.wordingRequests.length - w0, tag).toBe(0);                          // no second (wording) LLM call
+        expect(r.turnLog.diagnostics.secondLlmCall, tag).toBe(false);
+        rail.mode = {};
+      }
+    }
   });
 
   it('[Q/R/S] timeout / provider failure / malformed data are SPOKEN truthfully — never as "no seats" or a fare', async () => {

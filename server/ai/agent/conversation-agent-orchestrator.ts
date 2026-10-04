@@ -27,7 +27,7 @@ import { RailwayToolService } from '../../railway/tools/railway-tool-service';
 import { LLMToolCallingRuntime, type ToolRuntimeResult, type ToolCallStep } from '../runtime/llm-tool-runtime';
 import { BookingState } from '@shared/states';
 import type { BookingSession, BookingEvent, PendingInteraction } from '@shared/entities';
-import { bindAndVerifyClaims } from '../response/claim-entity-binding';
+import { bindAndVerifyClaims, guardFareClaims } from '../response/claim-entity-binding';
 import { redactSensitive as redact } from '../../observability/tool-logger';
 import { NON_RAILWAY_PATTERNS, containsSensitiveRequest } from '../../security/validators/intent-validator';
 import { v4 as uuid } from '../orchestrator/utils';
@@ -628,6 +628,13 @@ export class ConversationAgentOrchestrator {
       rejectedClaims.push(...g.rejected);
       return g.text;
     };
+    // Prompt 34 follow-up: an UNVERIFIED fare (no GET_FARE authority) is an invented fact — reported in the P16
+    // `rejectedClaims` contract as `FARE:<n>` (same vocabulary as the grounding validator); the detailed reason stays in
+    // diagnostics. Entity mismatches (FARE_MISMATCH: wrong train / class / date) remain diagnostics-only (P28).
+    const recordRejections = (r: Array<{ sentence: string; reason: string; binding: string }>) => {
+      entityRejections.push(...r);
+      for (const x of r) { const m = /^UNVERIFIED_FARE:(.+)$/.exec(String(x.reason)); if (m && !rejectedClaims.includes(`FARE:${m[1]}`)) rejectedClaims.push(`FARE:${m[1]}`); }
+    };
     const parts: string[] = [];
     const q = questionFor(s.pendingInteraction, s, mode);
     if (blockErr) {
@@ -674,7 +681,7 @@ export class ConversationAgentOrchestrator {
       // Prompt 33: booking-state claims ("ticket book ho gayi", "handoff ready", "review ready") must match the session
       const stateGuard = guardBookingStateClaims(rt.finalMessage, s);
       entityRejections.push(...stateGuard.removed.map(r => ({ sentence: r.sentence, reason: `BOOKING_STATE_CLAIM:${r.reason}`, binding: 'NONE' })));
-      const guarded = stateGuard.text ? factCheck(lifecycleClaimGuard(factGuard(stateGuard.text, rt.steps, mode, s, (r) => entityRejections.push(...r)), prepChange)) : '';
+      const guarded = stateGuard.text ? factCheck(lifecycleClaimGuard(factGuard(stateGuard.text, rt.steps, mode, s, recordRejections), prepChange)) : '';
       if (guarded) parts.push(guarded);
       // (a removed booking-state claim is not a failed fact — the backend's own state message follows)
       else if (rejectedClaims.length || entityRejections.some(r => !String(r.reason).startsWith('BOOKING_STATE_CLAIM:'))) parts.push(honestFailureFallback(rt.steps));
@@ -699,7 +706,7 @@ export class ConversationAgentOrchestrator {
     }
     const joined = parts.join(' ');
     if (q && !joined.includes(q)) parts.push(q);
-    if (!parts.length) parts.push((rt.finalDecision.clarification && factCheck(rt.finalDecision.clarification)) || 'Main train search, selection, availability aur fare mein madad kar sakta hoon.');
+    if (!parts.length) parts.push((rt.finalDecision.clarification && factCheck((() => { const g = guardFareClaims(rt.finalDecision.clarification, s, rt.steps); recordRejections(g.rejected); return g.kept.join(' '); })())) || 'Main train search, selection, availability aur fare mein madad kar sakta hoon.');
     return joinParts(parts);
   }
 
@@ -1037,6 +1044,18 @@ export function factGuard(message: string, steps: ToolCallStep[], mode: 'TEXT' |
     if (b.rejected.length) {
       onRejected?.(b.rejected);
       const kept = b.kept.join(' ').trim();
+      message = kept && /[A-Za-zऀ-ॿ]{3,}/.test(kept) ? kept : ok.map(st => factFromTool(st.result.toolName, st.result.data, mode)).filter(Boolean).join(' ');
+    }
+  }
+  // Prompt 34 follow-up — FARE AUTHORITY: a ₹ amount survives only with matching successful GET_FARE-derived data
+  // (this turn / committed quote / verified review) for its train / class / date. Runs BEFORE the "no successful tool"
+  // early return, so an amount with no GET_FARE — or after a failed / malformed / timed-out one — never reaches the
+  // reply (and therefore never grounds itself in the composer). Identical for TEXT and VOICE.
+  {
+    const fg = guardFareClaims(message, session, steps);
+    if (fg.rejected.length) {
+      onRejected?.(fg.rejected);
+      const kept = fg.kept.join(' ').trim();
       message = kept && /[A-Za-zऀ-ॿ]{3,}/.test(kept) ? kept : ok.map(st => factFromTool(st.result.toolName, st.result.data, mode)).filter(Boolean).join(' ');
     }
   }

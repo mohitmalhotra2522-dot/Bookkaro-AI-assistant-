@@ -18,7 +18,7 @@
  * intent, never picks a train for the user, never changes what the LLM may call.
  */
 import type { BookingSession } from '@shared/entities';
-import { trainsIn, judgeFareScope, judgeTimes, judgeClassList, isClassListClaim, buildFactIndex, type FactIndex, type FactView } from './claim-facts';
+import { trainsIn, judgeFareScope, judgeFareAuthority, judgeTimes, judgeClassList, isClassListClaim, buildFactIndex, type FactIndex, type FactView } from './claim-facts';
 import { classifyAvailabilityClaim, judgeAvailabilityClaim, collectAvailabilityEvidence, type AvailabilityContext, type AvailabilityEvidence } from './availability-authority';
 import { claimedDate } from './claim-dates';
 
@@ -181,6 +181,30 @@ const SPLIT_RE = /(?<=[.!?।])\s+/;
  * Sentence-level entity guard for an LLM final message that becomes part of the backend reply (non-native path).
  * Keeps every sentence whose train / class / date binding verifies; removes cross-entity and ambiguous claims.
  */
+/**
+ * Prompt 34 follow-up — sentence-level FARE AUTHORITY guard for LLM text that becomes the backend reply (native agent
+ * final message, clarification). Every sentence with a ₹ amount must pass `judgeFareAuthority`; failing sentences are
+ * removed (the caller substitutes deterministic tool facts / the honest fallback). Mode-independent: TEXT and VOICE
+ * get the identical result, and the composer then sees only validated text (no self-grounding).
+ */
+export function guardFareClaims(text: string, session: BookingSession | any, steps: any[] = [])
+  : { kept: string[]; rejected: Array<{ sentence: string; reason: string; binding: ClaimBindingStatus }> } {
+  const views: FactView[] = (steps || []).map((st: any) => ({
+    toolName: st?.result?.toolName ?? st?.toolCall?.name, ok: st?.status === 'ok' || st?.result?.success === true,
+    data: st?.result?.data, callId: st?.toolCall?.callId, identity: st?.result?.identity
+  }));
+  const idx = buildFactIndex(session || ({} as any), views);
+  const kept: string[] = []; const rejected: Array<{ sentence: string; reason: string; binding: ClaimBindingStatus }> = [];
+  for (const raw of String(text || '').split(SPLIT_RE)) {
+    const t = raw.trim();
+    if (!t) continue;
+    const reason = judgeFareAuthority(t, idx);
+    if (reason) rejected.push({ sentence: t.slice(0, 120), reason, binding: 'NOT_APPLICABLE' });
+    else kept.push(t);
+  }
+  return { kept, rejected };
+}
+
 export function bindAndVerifyClaims(text: string, session: BookingSession | any, steps: any[] = [])
   : { kept: string[]; rejected: Array<{ sentence: string; reason: string; binding: ClaimBindingStatus }>; bindings: ClaimBinding[] } {
   const views: FactView[] = (steps || []).map((st: any) => ({
