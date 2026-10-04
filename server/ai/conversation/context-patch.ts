@@ -13,6 +13,7 @@
  * applied only when the user's own words support it (named station / date expression / number,
  * or an answer to the pending clarification). Otherwise → CONTEXT_CONFLICT clarification.
  */
+import { providerToolCatalog } from '../tools/provider-tools';
 import type { BookingSession, PendingInteraction } from '@shared/entities';
 import type { ContextField, ContextPatch, ContextPatchKind, RejectedPatch } from '@shared/conversation-context';
 import type { ExtractedEntities } from '../decisions/agent-decision';
@@ -37,6 +38,15 @@ export const DEPENDENCY_RULES: Readonly<Record<ContextField, { scope: Invalidati
 export const ALLOWED_PATCH_FIELDS: ReadonlySet<string> = new Set(Object.keys(DEPENDENCY_RULES));
 
 /** Clarification that does not block the rest of the turn's valid slots (ambiguous station). */
+/**
+ * P37: in provider-tool mode the LLM is the semantic authority for stations/dates written in a script the backend does
+ * not parse (Devanagari, Gurmukhi … — "अमृतसर से दिल्ली कल"). The backend cannot verify an official code / ISO date
+ * against such words, so it does not reject them as ungrounded; Latin-script grounding + ambiguity checks stay.
+ */
+function llmSemanticAuthority(rawText: string): boolean {
+  return providerToolCatalog.enabled() && /[\u0900-\u0DFF]/.test(String(rawText || ''));
+}
+
 export interface DeferredClarification { code: 'AMBIGUOUS_STATION'; message: string; pending: PendingInteraction }
 
 export type PatchReview =
@@ -111,7 +121,7 @@ export class ContextPatchValidator {
       }
       if (r.kind === 'UNKNOWN') continue;                                   // existing RouteResolver path explains it
       const previous = (s as any)[field] ?? null;
-      const grounded = mentioned.has(r.code) || pendingCodes.has(r.code) || lc(rawText).includes(lc(proposed));
+      const grounded = mentioned.has(r.code) || pendingCodes.has(r.code) || lc(rawText).includes(lc(proposed)) || llmSemanticAuthority(rawText);
       if (previous && previous !== r.code && !grounded) {
         return this.conflict(field, proposed, r.code, r.name, previous, field === 'origin' ? s.originName : s.destinationName, patches, rejected);
       }
@@ -128,7 +138,7 @@ export class ContextPatchValidator {
       const proposed = String(e.dateRaw);
       const expr = extractDateExpression(rawText);
       const llmDate = resolveDate(proposed);
-      const literal = lc(rawText).includes(lc(proposed));
+      const literal = lc(rawText).includes(lc(proposed)) || (llmDate.ok && llmSemanticAuthority(rawText));
       const conflictPending = pk === 'CONTEXT_CONFLICT' && pend?.data?.field === 'date' && pend?.data?.proposedCode === (llmDate.ok ? llmDate.date : proposed);
       if (expr && (!llmDate.ok || llmDate.date !== expr.date) && !conflictPending) {
         // the user said something else → DateResolver on the user's expression wins

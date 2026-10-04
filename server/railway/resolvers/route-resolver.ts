@@ -4,6 +4,7 @@
  * and maps them to canonical station codes via a station dictionary.
  */
 import { STATION_ALIASES } from '@shared/constants';
+import { providerToolCatalog } from '../../ai/tools/provider-tools';
 import type { ResolvedStation, RailwayError } from '../types/railway-types';
 
 export interface RouteResolveResult {
@@ -28,6 +29,10 @@ export function resolveStationToken(raw: string): ResolvedStation | null {
   // Check codes
   const codeMatch = Object.entries(STATION_ALIASES).find(([_, v]) => v.code.toLowerCase() === key);
   if (codeMatch) return { code: codeMatch[1].code, name: codeMatch[1].name };
+  // P37: in provider-tool mode the LLM interprets the station (any language / script) and passes its official code;
+  // a well-formed code is accepted as-is and the selected provider validates it (no language-specific alias table)
+  const t = raw.trim();
+  if (providerToolCatalog.enabled() && /^[A-Z]{2,5}$/.test(t)) return { code: t, name: t };
   return null;
 }
 

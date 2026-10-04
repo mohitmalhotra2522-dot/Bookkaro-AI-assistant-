@@ -176,7 +176,7 @@ export class ToolCallValidator {
 
   private resolveStation(raw: string): { code: string; name: string } | null {
     if (!raw) return null;
-    if (/^[A-Z]{2,4}$/.test(raw)) return { code: raw, name: raw };
+    if (/^[A-Z]{2,5}$/.test(raw)) return resolveStationToken(raw) || { code: raw, name: raw };   // P37: LLM-supplied official code
     return resolveStationToken(raw);
   }
 

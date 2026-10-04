@@ -26,6 +26,25 @@ import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE, type AgentTranscriptStep, 
 import type { AgentDecision, OrchestratorError, TurnRecord } from '../decisions/agent-decision';
 import type { ToolCall, ToolDefinition } from '../tools/tool-registry';
 import { REGISTERED_TOOLS } from '../tools/tool-registry';
+import { providerToolCatalog } from '../tools/provider-tools';
+
+/** P37: the tool list the LLM sees — provider-level tools when connectors are registered, else the canonical set. */
+export function exposedTools(): ToolDefinition[] {
+  return providerToolCatalog.enabled() ? providerToolCatalog.definitions(REGISTERED_TOOLS) : REGISTERED_TOOLS;
+}
+
+/**
+ * P37: provider tool call (`railcore_search`) → the canonical validated contract (SEARCH_TRAINS) + the provider the LLM
+ * chose. Pure name mapping — the provider decision stays exactly as the LLM made it. Not-implemented providers are
+ * marked so the gateway answers PROVIDER_NOT_IMPLEMENTED (never a fabricated result).
+ */
+export function mapProviderToolCall(tc: ToolCall): ToolCall {
+  if (!tc || !providerToolCatalog.enabled()) return tc;
+  const r = providerToolCatalog.resolve(tc.name);
+  if (!r) return tc;
+  if (r.kind === 'PROVIDER_TOOL') return { ...tc, name: r.canonical, provider: r.provider, toolName: String(tc.name) };
+  return { ...tc, toolName: String(tc.name), providerNotImplemented: r.provider };
+}
 import { ToolCallValidator, type ValidatedToolCall } from '../tools/tool-call-validator';
 import { RailwayToolService } from '../../railway/tools/railway-tool-service';
 import { RailwaySearchOrchestrator } from '../../railway/orchestrator/search-orchestrator';
@@ -225,6 +244,8 @@ export class BoundToolRuntime {
   private readonly live: LiveTrainStatusService;
   /** The user's own words this turn (grounding for PNR / train values). */
   private userText = '';
+  /** P37: provider the LLM chose most recently in this turn (backend booking re-validation reuses it — no failover). */
+  private lastProvider?: string;
   /** Prompt 28: per-turn result sequence → `fare-2` style references for the LLM */
   private resultSeq = 0;
   /** Prompt 14: tools permitted by the latest applied decision (undefined = no restriction). */
@@ -297,16 +318,17 @@ export class BoundToolRuntime {
     const sigOf = (tc: ToolCall) => {
       // Prompt 17: a search is fully determined by its arguments (and SEARCH_TRAINS is a parallel barrier,
       // so the session changes between the original and its duplicate) → args-only signature
-      if (tc?.name === 'SEARCH_TRAINS') return `SEARCH_TRAINS|${stableJson(tc?.arguments || {})}`;
+      const pv = tc?.provider ? `${tc.provider}:` : '';   // P37: same request on another provider is a different call
+      if (tc?.name === 'SEARCH_TRAINS') return `${pv}SEARCH_TRAINS|${stableJson(tc?.arguments || {})}`;
       const sx: any = this.getSession();
       const t: any = sx.selectedTrain;
-      return `${tc?.name}|${stableJson(tc?.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
+      return `${pv}${tc?.name}|${stableJson(tc?.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
     };
     // Prompt 25 Part 9: same VALIDATED request (e.g. trainNumber 12497 vs "12497" + the selected class) → not re-fetched
     const doneValidated = new Map<string, TurnToolResultView>();
-    const vSig = (vt: { name: string; arguments: Record<string, any> }) => {
+    const vSig = (vt: { name: string; arguments: Record<string, any> }, provider?: string) => {
       const sx: any = this.getSession(); const t: any = sx.selectedTrain;
-      return `${vt.name}|${stableJson(vt.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
+      return `${provider || ''}:${vt.name}|${stableJson(vt.arguments || {})}|${t?.number || t?.trainNumber || ''}|${sx.selectedClass || ''}|${sx.origin || ''}|${sx.destination || ''}|${sx.date || ''}|${sx.passengersCount || ''}`;
     };
     // ---- Prompt 27: chain observability — every tool step keeps its own provenance id (toolExecutionId) ----
     const chainId = `ch_${uuidv4()}`;
@@ -374,7 +396,7 @@ export class BoundToolRuntime {
       try {
         d = (await this.llm.generateStructuredDecision({
           userText, history: localHistory, state: sess.bookingState, session: sess, missingFields: computeMissing(sess), inputMode: mode,
-          tools: REGISTERED_TOOLS, context: H.buildContext?.(), currentTurnToolResults: [...turnResults],
+          tools: exposedTools(), context: H.buildContext?.(), currentTurnToolResults: [...turnResults],
           agentTranscript: transcript.map(st => ({ ...st, toolCalls: [...st.toolCalls], results: [...st.results] })),
           chainStop: { reason, code: String(err.code), instruction: CHAIN_STOP_INSTRUCTION }
         })).decision;
@@ -405,7 +427,7 @@ export class BoundToolRuntime {
         session: sess,
         missingFields: missing,
         inputMode: mode,
-        tools: REGISTERED_TOOLS,
+        tools: exposedTools(),
         context: H.buildContext?.(),
         currentTurnToolResults: [...turnResults],
         agentTranscript: transcript.map(st => ({ ...st, toolCalls: [...st.toolCalls], results: [...st.results] }))
@@ -431,6 +453,12 @@ export class BoundToolRuntime {
         results: []
       };
       transcript.push(step);
+      // P37: provider tool names → canonical contract + LLM-chosen provider (the transcript keeps the names the LLM used)
+      if (Array.isArray(decision.toolCalls) && decision.toolCalls.length) {
+        decision = { ...decision, toolCalls: decision.toolCalls.map(mapProviderToolCall) };
+        const pc = decision.toolCalls.find(c => c.provider);
+        if (pc) this.lastProvider = pc.provider;
+      }
 
       // Deterministically apply this decision's entities/references BEFORE its tool calls.
       if (H.applyDecision) {
@@ -486,7 +514,7 @@ export class BoundToolRuntime {
           return true;
         },
         skipPrepared: (p) => {
-          const prior = doneValidated.get(vSig(p.vt));
+          const prior = doneValidated.get(vSig(p.vt, p.tc?.provider));
           if (!prior) return false;
           deduplicated++;
           turnResults.push({ ...prior, callId: p.tc.callId });
@@ -510,7 +538,7 @@ export class BoundToolRuntime {
           const r = this.recordExecuted(x, iter, turnResults, localHistory, steps);
           if (r.stale) { staleHit = true; return false; }
           if (r.error) lastError = r.error;
-          if (x.success) { doneCalls.set(sigs.get(x.prepared.tc.callId) || sigOf(x.prepared.tc), turnResults[turnResults.length - 1]); doneValidated.set(vSig(x.prepared.vt), turnResults[turnResults.length - 1]); }
+          if (x.success) { doneCalls.set(sigs.get(x.prepared.tc.callId) || sigOf(x.prepared.tc), turnResults[turnResults.length - 1]); doneValidated.set(vSig(x.prepared.vt, x.prepared.tc?.provider), turnResults[turnResults.length - 1]); }
           return true;
         }
       });
@@ -534,6 +562,12 @@ export class BoundToolRuntime {
     const steps: ToolCallStep[] = [];
     if (this.hooks.isStale?.()) return { steps, stale: true };
     let stale = false;
+    // P37: booking re-validation (fresh availability / fare before review) runs on ONE named provider — the one the LLM
+    // used in this turn, else the first configured connector — never on a hidden failover chain. A failure is reported.
+    if (providerToolCatalog.enabled()) {
+      const pv = this.lastProvider || providerToolCatalog.defaultProvider() || undefined;
+      calls = calls.map(c => (c.provider ? c : { ...c, provider: pv }));
+    }
     await this.turn.runRound(calls, this.executor, {
       fromLLM: false,
       onRejected: (p) => { this.recordRejected(p, -1, [], [], steps); },

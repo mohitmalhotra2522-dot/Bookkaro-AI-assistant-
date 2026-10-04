@@ -13,6 +13,7 @@
  */
 import { LLMProviderError, isLLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult, type SpokenResponseInput, type SpokenResponseResult } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
+import { providerToolCatalog, providerStatusOf } from '../tools/provider-tools';
 import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, NATIVE_AGENT_SYSTEM_PROMPT } from '../prompts/system-prompt';
 import type { AgentTranscriptStep } from './llm-provider';
 import { v4 as uuid } from '../orchestrator/utils';
@@ -229,6 +230,19 @@ export function toDecision(raw: any, input: LLMTurnInput): AgentDecision {
 
 const STR = (description: string) => ({ type: 'string', description });
 
+/** P37: canonical contract of a (provider-level) tool name — `railcore_search` → SEARCH_TRAINS. */
+export function canonicalToolOf(name: string): string {
+  const r = providerToolCatalog.resolve(name);
+  return r && r.kind === 'PROVIDER_TOOL' ? r.canonical : name;
+}
+
+/** P37: today's date in India (the LLM computes journey dates from it — "kal", "parso", "5 अक्टूबर", "next Monday"). */
+export function todayInIndia(now: Date = new Date()): { date: string; weekday: string; timezone: 'Asia/Kolkata' } {
+  const date = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', weekday: 'long' }).format(now);
+  return { date, weekday, timezone: 'Asia/Kolkata' };
+}
+
 /** Railway tools as OpenAI function definitions (the approved, implemented, LLM-callable set) + the session proposal. */
 export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
   const railway = input.tools.map(t => {
@@ -240,7 +254,7 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
       if (t.name === 'SEARCH_TRAINS' && (k === 'origin' || k === 'destination')) description = 'Station name or code as the user said it (e.g. "Amritsar", "ASR") — the backend resolves it.';
       if (t.name === 'SEARCH_TRAINS' && k === 'date') description = 'Travel date exactly as the user said it ("kal", "parso", "5 Oct") or YYYY-MM-DD — the backend DateResolver resolves it. Never compute dates.';
       props[k] = { type: p.type, description, ...(p.enum ? { enum: p.enum } : {}) };
-      if (p.required && t.name === 'SEARCH_TRAINS') required.push(k);
+      if (p.required && canonicalToolOf(t.name) === 'SEARCH_TRAINS') required.push(k);
     }
     return { type: 'function', function: { name: t.name, description: t.description, parameters: { type: 'object', properties: props, required } } };
   });
@@ -254,7 +268,9 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
       intent: { type: 'string', enum: ['BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'CANCEL_BOOKING', 'MODIFY_BOOKING', 'CHECK_REFUND_STATUS', 'GENERAL_RAILWAY_QUERY', 'UNKNOWN'] },
       action: { type: 'string', description: 'SELECT_TRAIN | SELECT_CLASS | UPDATE_JOURNEY | UPDATE_DATE | UPDATE_PASSENGERS | SET_PASSENGER_COUNT | UPDATE_PASSENGER | START_PASSENGER_COLLECTION | COLLECT_PASSENGERS | COLLECT_PASSENGER_DETAILS | SHOW_REVIEW | REQUEST_CONFIRMATION | PREPARE_IRCTC_HANDOFF | REFINE_RESULTS | COMPARE_TRAINS | NO_ACTION' },
       entities: { type: 'object', additionalProperties: true, properties: {
-        originRaw: STR('origin as said'), destinationRaw: STR('destination as said'), dateRaw: STR('date words as said'),
+        originRaw: STR(providerToolCatalog.enabled() ? 'origin station CODE (e.g. ASR) — understand the station in any language/script yourself' : 'origin as said'),
+        destinationRaw: STR(providerToolCatalog.enabled() ? 'destination station CODE (e.g. NDLS) — understand the station in any language/script yourself' : 'destination as said'),
+        dateRaw: STR(providerToolCatalog.enabled() ? 'journey date as YYYY-MM-DD, computed by you from the user\'s words and "today"' : 'date words as said'),
         preferredTimeRaw: STR('e.g. subah / morning / raat'), preferredClassRaw: STR('e.g. AC / sleeper / CC'),
         trainRef, classRaw: STR('class as said, e.g. "CC", "AC", "sleeper"'),
         passengersCountRaw: STR('passenger count as said'), passengersDelta: { type: 'number' },
@@ -284,7 +300,10 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
     inputMode: input.inputMode, bookingState: input.state, missingFields: input.missingFields,
     // Prompt 25 Part 7: dominant language of the LATEST user message (the reply language; the model writes the reply)
     replyLanguage: detectLanguageStyle(input.userText, (input.history || []).filter(m => m.role === 'user').map(m => String(m.content || ''))),
-    context: input.context ?? null
+    context: input.context ?? null,
+    // P37: the LLM interprets dates itself → it needs today's date; and it knows which railway providers are callable
+    today: todayInIndia(),
+    ...(providerToolCatalog.enabled() ? { railwayProviders: providerToolCatalog.list().map(c => c.label) } : {})
   };
   const messages: any[] = [
     { role: 'system', content: NATIVE_AGENT_SYSTEM_PROMPT },
@@ -306,7 +325,9 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
       const r = st.results.find(x => String(x.callId) === c.callId);
       // Prompt 28: ToolResultIdentityBinding — every result names the entity it belongs to; errors are structured
       const content = r
-        ? { ...(r.resultRef ? { toolResultId: r.resultRef } : {}), tool: r.toolName, ...(entityOf(r.identity) ? { entity: entityOf(r.identity) } : {}), ok: r.ok,
+        ? { ...(r.resultRef ? { toolResultId: r.resultRef } : {}), tool: r.toolName,
+            // P37: the provider tool the LLM called + the normalized provider status (SUCCESS / NO_RESULTS / PROVIDER_TIMEOUT …)
+            ...(c.name !== r.toolName ? { providerTool: c.name } : {}), providerStatus: providerStatusOf({ ok: r.ok, empty: (r as any).empty, error: r.error as any }), ...(entityOf(r.identity) ? { entity: entityOf(r.identity) } : {}), ok: r.ok,
             // Prompt 32: honest outcome category + provider identity (MOCK data is never live)
             ...(r.outcome ? { outcome: r.outcome } : {}), ...(r.dataSource ? { dataSource: r.dataSource } : {}),
             // Prompt 35: which live provider answered + failover chain (provider normalization — no re-wording needed)
@@ -377,7 +398,9 @@ export function decisionFromNative(msg: any, input: LLMTurnInput): AgentDecision
   const idOf = (c: any) => { let id = typeof c?.id === 'string' && c.id ? c.id : uuid(); if (seen.has(id)) id = uuid(); seen.add(id); return id; };
   let update: { id: string; args: Record<string, any> } | null = null;
   const toolCalls: any[] = [];
-  for (const c of calls.slice(0, 6)) {
+  // P37: no silent truncation of the model's step — every call (up to a payload-safety bound) reaches the runtime, whose
+  // configurable MAX_TOOL_CALLS_PER_TURN budget rejects the excess with an explicit TOOL_CALL_LIMIT_EXCEEDED result
+  for (const c of calls.slice(0, 32)) {
     const name = String(c?.function?.name ?? c?.name ?? '');
     const args = parseArgs(c?.function?.arguments ?? c?.arguments);
     if (name === SESSION_UPDATE_TOOL) { if (!update) update = { id: idOf(c), args }; continue; }
@@ -397,7 +420,7 @@ export function decisionFromNative(msg: any, input: LLMTurnInput): AgentDecision
   }
   // railway tools only: a search carries the model's own route/date arguments as the journey entities (same shape
   // MockLLM uses), everything else is an information request with no session change
-  const search = toolCalls.find(c => c.name === 'SEARCH_TRAINS');
+  const search = toolCalls.find(c => canonicalToolOf(c.name) === 'SEARCH_TRAINS');
   const sa = search?.arguments || {};
   return {
     intent: search ? 'SEARCH_TRAINS' : 'GENERAL_RAILWAY_QUERY', action: search ? 'SEARCH_TRAINS' : 'NO_ACTION',
