@@ -117,7 +117,7 @@ Known pre-existing failures in older suites (they also fail at earlier HEADs; re
 - p7-agent-loop Group 3, unit p18 [6][7][8], p23 [8], p7 unit SEARCH_TRAINS date;
 - found during P33 (verified failing at `397ce32` too): unit p12 [13] (pins 5 REGISTERED_TOOLS; CHECK_PNR / TRACK_TRAIN exist since P14), integration p8 [24] (expects the old "Pehle train select kar lete hain, phir fare…" wording).
 
-P33 open item: G3 p33 [2] failed in the confirming run because the test helper `ctxOf` read the turn's LAST LLM request (after the passenger was applied) instead of the FIRST decision request; the helper was fixed (`find` instead of `reverse().find`) but NOT re-run (once-only rule). Verify it first in the next workspace.
+P33 final check (resolved): G3 p33 [2] now observes the FIRST decision request of the turn at the turn boundary (`sayObserved`: request index captured before the turn; asserted pre-application) for both the piecewise and the one-message count + details cases; the P33 G3 file passed 23/23.
 
 ### Pinned invariants (must not break)
 

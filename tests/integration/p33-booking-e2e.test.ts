@@ -89,16 +89,33 @@ function native(extra: Record<string, any[]> = {}) {
 const shown = (r: any) => [r.voice?.assistantText, r.responseMessage, r.voice?.speechText, ...(r.voice?.segments || [])].map(x => String(x ?? '')).join(' | ');
 const tools = (r: any) => (r.turnLog.diagnostics.tools || []).map((t: any) => `${t.tool}:${t.outcome}`);
 const delta = (n0: Record<string, number>) => Object.fromEntries(['search', 'avail', 'fare'].map(k => [k, (rail.n[k] || 0) - (n0[k] || 0)]));
-const ctxOf = (fake: any, user: string) => {
-  // the turn's FIRST decision request = the context the LLM had when deciding (later requests follow tool / state application)
-  const req = fake.decisionRequests.find((q: any) => q.body.messages.some((m: any) => m.role === 'user' && m.content === user));
+/** bookingPreparation from the AUTHORITATIVE SESSION CONTEXT of one LLM request (balanced-brace: the message is length-clipped). */
+const prepOf = (req: any) => {
   const m = req.body.messages.find((x: any) => x.role === 'system' && String(x.content).startsWith('AUTHORITATIVE SESSION CONTEXT'));
   const c = String(m.content); const k = c.indexOf('"bookingPreparation":');
-  if (k < 0) return { context: {} };
-  let i = c.indexOf('{', k), depth = 0, j = i;                     // balanced-brace extraction (the message is length-clipped)
+  if (k < 0) return undefined;                                                         // booking not started yet
+  let i = c.indexOf('{', k), depth = 0, j = i;
   for (; j < c.length; j++) { if (c[j] === '{') depth++; else if (c[j] === '}' && --depth === 0) break; }
-  return { context: { bookingPreparation: JSON.parse(c.slice(i, j + 1)) } };
+  return JSON.parse(c.slice(i, j + 1));
 };
+/**
+ * Observation point = the TURN BOUNDARY: the first decision request sent DURING this turn (index captured before the
+ * turn starts). It is sent before the LLM's reply exists, so nothing this turn produces (passenger changes, tool
+ * results) can be in it. Asserted: its newest user message is this turn's text, and nothing (no tool result, no
+ * assistant tool call) follows it — i.e. pre-application. Never a later continuation request of the same turn.
+ */
+const sayObserved = async (h: { say: (t: string) => Promise<any>; fake: any }, text: string) => {
+  const i0 = h.fake.decisionRequests.length;
+  const r = await h.say(text);
+  const req = h.fake.decisionRequests[i0];
+  expect(req, `no LLM request in turn "${text}"`).toBeTruthy();
+  const msgs: any[] = req.body.messages;
+  const u = msgs.map(m => m.role).lastIndexOf('user');
+  expect(msgs[u].content).toBe(text);
+  expect(msgs.slice(u + 1).some(m => m.role === 'tool' || (m.role === 'assistant' && m.tool_calls?.length)), 'request is pre-application').toBe(false);
+  return { r, bp: prepOf(req) };
+};
+const REASK = /doosre passenger|passenger\s*2\b|neha ki details|details bataiye|details batayein/i;
 const audit = (r: any) => r.turnLog.bookingPreparation.audit;
 const pctx = () => ({ turnId: 't', mode: 'TEXT' as const, cards: [], events: [] as string[], changes: [] as string[] });
 const NO_SUCCESS = /book ho gayi|booking confirmed|booked successfully|PNR\s*\d{6,}|transaction id/i;
@@ -131,17 +148,40 @@ describe('P33 G3 — natural booking preparation (the LLM decides what to ask)',
     expect(shown(r)).not.toMatch(NO_SUCCESS);
   });
 
-  it('[2] partial details are retained and exposed: P1 complete, P2 missing → the LLM sees exactly what is missing', async () => {
+  it('[2] passenger state the LLM sees at the turn boundary (pre-application): piecewise P1 complete / P2 missing, and count + details in one message; no re-ask, saved data correct', async () => {
+    // A — piecewise: at the START of the "Neha" turn the LLM sees P1 complete and exactly P2's fields missing
     const h = native();
     await h.say('Kal Amritsar se Delhi jaana hai'); await h.say('Doosri wali 3A mein 2 tickets');
     await h.say('Rahul 31 male');
-    await h.say('Neha 28 female');
-    const bp = ctxOf(h.fake, 'Neha 28 female').context.bookingPreparation;             // context the LLM got BEFORE this turn
-    expect(bp.passengers).toEqual([{ passenger: 1, name: 'Rahul', age: 31, gender: 'MALE', missing: [] }, { passenger: 2, missing: ['name', 'age', 'gender'] }]);
-    expect(bp.missing).toEqual(['passenger2.name', 'passenger2.age', 'passenger2.gender']);
-    expect(bp).toMatchObject({ train: { number: '12497' }, class: '3A', passengerCount: 2, availabilityCheck: 'NOT_CHECKED', fareCheck: 'NOT_CHECKED' });
-    expect(JSON.stringify(bp)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/i);
+    const a = await sayObserved(h, 'Neha 28 female');
+    expect(a.bp.passengers).toEqual([{ passenger: 1, name: 'Rahul', age: 31, gender: 'MALE', missing: [] }, { passenger: 2, missing: ['name', 'age', 'gender'] }]);
+    expect(a.bp.missing).toEqual(['passenger2.name', 'passenger2.age', 'passenger2.gender']);
+    expect(a.bp).toMatchObject({ train: { number: '12497' }, class: '3A', passengerCount: 2, availabilityCheck: 'NOT_CHECKED', fareCheck: 'NOT_CHECKED' });
+    expect(JSON.stringify(a.bp)).not.toMatch(/Neha/);                                      // nothing from this turn leaked in
+    expect(JSON.stringify(a.bp)).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-/i);
+    // saved data correct; the reply does not ask for the passenger just supplied
+    expect(h.s().passengers.map((p: any) => [p.name, p.age, p.gender])).toEqual([['Rahul', 31, 'MALE'], ['Neha', 28, 'FEMALE']]);
     expect(h.s().review).toMatchObject({ reviewVersion: 1, valid: true });
+    expect(shown(a.r)).not.toMatch(REASK);
+    // the NEXT turn's boundary context shows both passengers complete → nothing left for the LLM to ask
+    const a2 = await sayObserved(h, 'Ek minute');
+    expect(a2.bp.passengers.map((p: any) => p.missing)).toEqual([[], []]);
+    expect(a2.bp.missing).toEqual([]);
+
+    // B — count + both passengers in ONE message: pre-application context has no passengers yet
+    const g = native();
+    await g.say('Kal Amritsar se Delhi jaana hai');
+    const b = await sayObserved(g, ALL_IN_ONE);
+    expect(b.bp?.passengers ?? []).toEqual([]);
+    expect(JSON.stringify(b.bp ?? {})).not.toMatch(/Rahul|Neha/);
+    // slots created correctly from the one message; saved data correct; no re-ask
+    expect(g.s().passengersCount).toBe(2);
+    expect(g.s().passengers.map((p: any) => [p.name, p.age, p.gender])).toEqual([['Rahul', 31, 'MALE'], ['Neha', 28, 'FEMALE']]);
+    expect(g.s().review).toMatchObject({ reviewVersion: 1, valid: true });
+    expect(shown(b.r)).not.toMatch(REASK);
+    const b2 = await sayObserved(g, 'Ek minute');
+    expect(b2.bp).toMatchObject({ passengerCount: 2, missing: [] });
+    expect(b2.bp.passengers).toEqual([{ passenger: 1, name: 'Rahul', age: 31, gender: 'MALE', missing: [] }, { passenger: 2, name: 'Neha', age: 28, gender: 'FEMALE', missing: [] }]);
   });
 
   it('[3] one natural message with train + class + count + both passengers → review from THIS turn\'s availability + fare', async () => {
