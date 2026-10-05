@@ -137,19 +137,25 @@ function strictAge(raw: string): number | null {
   return resolvePassengerAge(t);
 }
 
+/** P38: Devanagari words that are never a name (\\b does not work for Devanagari, so whole-word set). */
+const DEVANAGARI_NOT_A_NAME = new Set(['है', 'हैं', 'नहीं', 'हाँ', 'हां', 'टिकट', 'ट्रेन', 'यात्री', 'नाम', 'उम्र', 'साल', 'पुरुष', 'महिला', 'बुक', 'पासवर्ड', 'ओटीपी', 'दिल्ली', 'अमृतसर']);
+
 export function canonicalName(v: any): string | null {
   if (typeof v !== 'string') return null;
   // Prompt 19: trailing punctuation is removed BEFORE the "hai" strip ("Mohit hai." → "Mohit", never "Mohit Hai")
   let n = v.trim().replace(/[.,!?;:]+$/g, '').trim()
     .replace(/^(actually|nahi|no|sorry)\s*,?\s*/i, '')
     .replace(/^(mera naam|my name is|uska naam|unka naam|naam|name|passenger ka naam)\s*(hai|is|:)?\s*/i, '')
+    .replace(/^(मेरा नाम|उसका नाम|उनका नाम|नाम)\s*(है|:)?\s*/u, '')
+    .replace(/\s+(है|हैं)$/u, '')
     .replace(/\s+(hai|he|h)$/i, '')
     .replace(/[.,!]+$/g, '')
     .trim();
   if (n.length < 2 || n.length > 40) return null;
   if (/\d/.test(n)) return null;
   if (NOT_A_NAME.test(n)) return null;
-  if (!/^[\p{L}][\p{L}\s.'-]*$/u.test(n)) return null;
+  if (!/^[\p{L}][\p{L}\p{M}\s.'-]*$/u.test(n)) return null;   // P38: \p{M} = Devanagari matras (मोहित)
+  if (n.split(/\s+/).some(w => DEVANAGARI_NOT_A_NAME.has(w))) return null;
   return n.split(/\s+/).map(w => w[0].toUpperCase() + w.slice(1).toLowerCase()).join(' ');
 }
 

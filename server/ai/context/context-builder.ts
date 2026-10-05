@@ -125,7 +125,9 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
       passengerDetails: {
         required: s.passengersCount || 0,
         completed: (s.passengers || []).filter(p => p.name && p.age && p.gender).length,
-        currentIndex: s.currentPassengerIndex || 0
+        currentIndex: s.currentPassengerIndex || 0,
+        // P38: details given before train/class exist are held (applied automatically once both are selected)
+        ...((s as any).heldPassengerChanges ? { heldUntilTrainAndClassSelected: (s as any).heldPassengerChanges.changes.length } : {})
       },
       sessionVersion: s.sessionVersion
     },

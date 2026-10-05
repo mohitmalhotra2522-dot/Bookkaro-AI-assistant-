@@ -12,6 +12,7 @@
  * ("minus two" is INVALID_PASSENGER_COUNT even if an LLM proposes 2).
  */
 import { MAX_PASSENGERS } from '@shared/constants';
+import { normalizeDevanagariNumbers } from '@shared/devanagari-numbers';
 
 const WORD_NUM: Record<string, number> = {
   zero: 0, shunya: 0, sifar: 0,
@@ -54,7 +55,7 @@ function result(n: number, matched: string, breakdown?: { adults: number; childr
  * Returns null when the text does not state a passenger count (train numbers, ages, dates are ignored).
  */
 export function parsePassengerCount(text: string, opts: { expectingCount?: boolean } = {}): PassengerCountParse | null {
-  const t = ` ${String(text || '').toLowerCase().replace(/[!?]/g, ' ').replace(/\s+/g, ' ')} `;
+  const t = ` ${normalizeDevanagariNumbers(String(text || '')).toLowerCase().replace(/[!?]/g, ' ').replace(/\s+/g, ' ')} `;
 
   // "one adult and one child" / "2 adults, 1 bachcha" → total only (no category field in the contract)
   const mix = t.match(new RegExp(`\\b${NUM}\\s*adults?\\s*(?:and|aur|,|&|\\+)\\s*${NUM}\\s*${CHILD}\\b`));

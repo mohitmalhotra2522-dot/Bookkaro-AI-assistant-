@@ -12,6 +12,7 @@ import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
+import { normalizeDevanagariNumbers } from '@shared/devanagari-numbers';
 
 export type StationResolution =
   | { kind: 'RESOLVED'; code: string; name: string }
@@ -77,7 +78,7 @@ const NUM_WORDS: Record<string, number> = { ek: 1, one: 1, do: 2, two: 2, teen: 
 /** Passenger counts the user's own words name (digits 1–9 or number words). */
 export function countMentioned(text: string): Set<number> {
   const out = new Set<number>();
-  for (const w of lc(text).split(' ')) {
+  for (const w of lc(normalizeDevanagariNumbers(text)).split(' ')) {
     if (/^\d$/.test(w)) out.add(Number(w));
     else if (NUM_WORDS[w]) out.add(NUM_WORDS[w]);
   }

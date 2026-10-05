@@ -437,6 +437,23 @@ export class ContextualTurnApplier {
     // 10-pre) Prompt 19 (Part 13/14): structured LLM proposal { passengerIndex, changes } — validated by
     //     PassengerChangeValidator (index exists / field in contract / value valid / never a credential) and
     //     only then converted to an explicit update of that STABLE passenger id.
+    // P38: one long message often carries passenger details BEFORE a train/class exists (search → select happens in a
+    //     later step of the same chain). They used to be dropped silently while the reply claimed "details note kar
+    //     liye". Now they are HELD for this journey only and applied (validated as usual) once train + class are selected.
+    {
+      const jk = `${S().origin || ''}|${S().destination || ''}|${S().date || ''}`;
+      const held = (S() as any).heldPassengerChanges as { journeyKey: string; changes: any[] } | undefined;
+      if (held && held.journeyKey !== jk) { delete (S() as any).heldPassengerChanges; }
+      else if (held && !e.passengerChanges?.length && S().selectedTrain && S().selectedClass) {
+        e.passengerChanges = held.changes; delete (S() as any).heldPassengerChanges;
+        out.applied.push('HELD_PASSENGER_DETAILS_APPLIED');
+      }
+      if (e.passengerChanges?.length && !(S().selectedTrain && S().selectedClass)) {
+        (S() as any).heldPassengerChanges = { journeyKey: jk, changes: e.passengerChanges.slice(0, 6) };
+        out.applied.push('PASSENGER_DETAILS_HELD');
+        out.notes.push('Passenger details mil gayi hain — train aur class select hote hi inhe add kar dunga.');
+      }
+    }
     if (e.passengerChanges?.length && S().selectedTrain && S().selectedClass) {
       // Prompt 33: one natural message may carry train + class + count + every passenger ("Doosri wali 3A, do log:
       // Rahul 31 male, Neha 28 female"). The count (validated above) defines the slots — create them now (idempotent,

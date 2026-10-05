@@ -11,6 +11,7 @@
  *    NaturalResponseComposer before any of it is spoken.
  * The API key stays server-side, is never logged and is never sent to the browser. `fetch` is injectable (tests).
  */
+import { webSourceLabel } from '../../railway/providers/web/web-providers';
 import { LLMProviderError, isLLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult, type SpokenResponseInput, type SpokenResponseResult } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
 import { providerToolCatalog, providerStatusOf } from '../tools/provider-tools';
@@ -44,7 +45,12 @@ export const SESSION_UPDATE_TOOL = 'update_booking_session';
 
 const MAX_TOKENS_DECISION = 700;
 /** Native agent steps: reasoning models spend part of the budget on hidden reasoning tokens. */
-const MAX_TOKENS_AGENT = 1400;
+/**
+ * P38: output budget of ONE agent step (reasoning + tool call / reply). Reasoning models spend far more tokens on
+ * Devanagari / long multi-slot messages; at 1400 Muse hit finish_reason=length with no tool call or reply → the turn
+ * failed as LLM_UNAVAILABLE. Not a step limit or a guard (the tool/step budgets are unchanged). LLM_MAX_TOKENS_AGENT.
+ */
+const MAX_TOKENS_AGENT = Math.min(8000, Math.max(800, Number(process.env.LLM_MAX_TOKENS_AGENT) || 3200));
 const MAX_TOKENS_SPEECH = 400;
 const MAX_TOOL_RESULT_CHARS = 3500;
 
@@ -332,6 +338,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
             ...(r.outcome ? { outcome: r.outcome } : {}), ...(r.dataSource ? { dataSource: r.dataSource } : {}),
             // Prompt 35: which live provider answered + failover chain (provider normalization — no re-wording needed)
             ...(r.provider ? { provider: r.provider, fallbackUsed: !!r.fallbackUsed, providerAttempts: r.providerAttempts } : {}),
+            // P38: web connector results are never authoritative — the label travels with the data
+            ...(/^(erail|railyatri)_/.test(c.name) ? { verification: 'UNVERIFIED_WEB', sourceLabel: webSourceLabel(c.name.split('_')[0]) } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
               : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details),
                   ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)) } }) }
