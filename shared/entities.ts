@@ -96,6 +96,8 @@ export type BerthPreference =
   | 'UPPER'
   | 'SIDE_LOWER'
   | 'SIDE_UPPER'
+  | 'CABIN'
+  | 'COUPE'
   | 'NO_PREFERENCE';
 
 export type FoodPreference = 'VEG' | 'NON_VEG' | 'NO_FOOD';

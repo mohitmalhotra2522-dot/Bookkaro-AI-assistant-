@@ -12,7 +12,7 @@ import { formatDate } from '../../lib/format';
  * when offered). Nothing is calculated or invented here.
  */
 const BERTH_LABEL: Record<string, string> = {
-  NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper'
+  NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', WINDOW: 'Window side', CABIN: 'Cabin', COUPE: 'Coupe'
 };
 const FOOD_LABEL: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non-veg', NO_FOOD: 'No food' };
 const GENDERS: Array<[string, string]> = [['MALE', 'Male'], ['FEMALE', 'Female'], ['OTHER', 'Transgender']];
@@ -182,7 +182,7 @@ export const PassengerFormPage: React.FC<Props> = ({ sessionId, onClose, onSaved
 
                 {berthOptions.length > 0 && (
                   <label className="bk-field">
-                    <span className="bk-field__label">Berth preference ({spec.travelClass})</span>
+                    <span className="bk-field__label">{berthOptions.every(o => o === 'NO_PREFERENCE' || o === 'WINDOW') ? 'Seat preference' : 'Berth preference'} ({spec.travelClass})</span>
                     <select className={`bk-field__input${err(i, 'berthPreference') ? ' is-invalid' : ''}`} value={r.berthPreference || 'NO_PREFERENCE'} onChange={e => set(i, 'berthPreference', e.target.value)}>
                       {berthOptions.map(o => <option key={o} value={o}>{BERTH_LABEL[o] || o}</option>)}
                     </select>

@@ -51,9 +51,9 @@ describe('[2] Devanagari names', () => {
 describe('[3] Passenger form spec — nothing fake', () => {
   it('berth options come only from the class layout', () => {
     expect(berthOptionsForClass('3A')).toEqual(['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER']);
-    expect(berthOptionsForClass('CC')).toEqual([]);
+    expect(berthOptionsForClass('EA')).toEqual([]);
     expect(berthOptionsForClass('XYZ')).toEqual([]);
-    const cc = buildFormSpec(session('CC'), fac(true));
+    const cc = buildFormSpec(session('EA'), fac(true));
     expect(cc.berth.options).toEqual([]);
     expect(cc.berth.note).toMatch(/seat railway allot/);
   });

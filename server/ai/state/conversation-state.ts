@@ -302,7 +302,8 @@ export class ConversationStateManager {
       duration: train.duration,
       availableClasses: (train.classes || []).map((c: any) => c.code),
       classes: train.classes || [],
-      dataSource: train.dataSource || 'MOCK',
+      // rows from the agent search carry `provider` (not dataSource): a named non-mock provider = LIVE; unknown stays MOCK
+      dataSource: train.dataSource || (typeof train.provider === 'string' && train.provider && !/mock/i.test(train.provider) ? 'LIVE' : 'MOCK'),
       // ---- Prompt 10: authoritative provenance (validated by the execution gateway) ----
       /** Result row id from the search that produced this selection. */
       resultId: train.resultId,

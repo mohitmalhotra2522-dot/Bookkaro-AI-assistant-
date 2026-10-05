@@ -10,7 +10,7 @@
  * Pure functions over the BookingSession — values are never logged.
  */
 import type { BookingSession, Passenger } from '@shared/entities';
-import { berthOptionsForClass, FOOD_PREFERENCES } from '@shared/constants';
+import { berthOptionsForClass, isSeatPreferenceClass, FOOD_PREFERENCES } from '@shared/constants';
 
 export type FoodOptionStatus = 'OFFERED' | 'NOT_INCLUDED' | 'UNKNOWN' | 'NOT_CHECKED';
 
@@ -44,8 +44,8 @@ export function passengerOptionsView(s: BookingSession) {
   const food = foodStatusOf(s);
   return {
     berth: berth.length
-      ? { options: [...berth], ask: true }
-      : { options: [] as string[], ask: false, note: SEAT_CLASSES.has(cls.toUpperCase()) ? `${cls}: seat is allotted by the railway — no berth choice` : `${cls}: no verified berth choices` },
+      ? { options: [...berth], ask: true, ...(isSeatPreferenceClass(cls) ? { note: `${cls}: no berth — IRCTC seat preference only (WINDOW = Window Side)` } : {}) }
+      : { options: [] as string[], ask: false, note: SEAT_CLASSES.has(cls.toUpperCase()) ? `${cls}: seat is allotted by the railway — no verified seat preference` : `${cls}: no verified berth choices` },
     food: food.status === 'OFFERED'
       ? { status: food.status, options: [...FOOD_PREFERENCES], ask: true }
       : { status: food.status, options: [] as string[], ask: false,
@@ -74,7 +74,9 @@ export function gateOptionalField(s: BookingSession, field: 'berthPreference' | 
     const opts = berthOptionsForClass(s.selectedClass) as readonly string[];
     if (!opts.length) return value === 'NO_PREFERENCE' ? { ok: false, silent: true, message: '' }
       : { ok: false, message: `${s.selectedClass || 'Is class'} mein berth choice nahi hoti — seat railway allot karti hai.` };
-    if (!opts.includes(value)) return { ok: false, message: `${s.selectedClass} mein berth options: ${opts.map(berthLabel).join(', ')}.` };
+    if (!opts.includes(value)) return { ok: false, message: isSeatPreferenceClass(s.selectedClass)
+      ? `${s.selectedClass} mein berth choice nahi hoti — sirf seat preference: ${opts.map(berthLabel).join(', ')}.`
+      : `${s.selectedClass} mein berth options: ${opts.map(berthLabel).join(', ')}.` };
     return { ok: true };
   }
   const f = foodStatusOf(s).status;
@@ -83,7 +85,7 @@ export function gateOptionalField(s: BookingSession, field: 'berthPreference' | 
   return { ok: false, message: 'Provider data ke hisaab se is train ke fare mein khana shaamil nahi hai — meal choice nahi hoti.' };
 }
 
-const BERTH_LABEL: Record<string, string> = { NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', WINDOW: 'Window' };
+const BERTH_LABEL: Record<string, string> = { NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', WINDOW: 'Window side', CABIN: 'Cabin', COUPE: 'Coupe' };
 const FOOD_LABEL: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non-veg', NO_FOOD: 'No food' };
 export const berthLabel = (v: string) => BERTH_LABEL[v] || String(v);
 export const foodLabel = (v: string) => FOOD_LABEL[v] || String(v);

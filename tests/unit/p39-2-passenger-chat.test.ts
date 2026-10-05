@@ -36,7 +36,7 @@ describe('[1] passenger options the chat may ask — nothing invented', () => {
   it('berth choices only from the selected class; seat classes get none', () => {
     expect(passengerOptionsView(sess('3A'))!.berth).toMatchObject({ ask: true, options: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'] });
     expect(passengerOptionsView(sess('2A'))!.berth.options).not.toContain('MIDDLE');
-    expect(passengerOptionsView(sess('CC'))!.berth).toMatchObject({ ask: false, options: [] });
+    expect(passengerOptionsView(sess('EA'))!.berth).toMatchObject({ ask: false, options: [] });
     expect(passengerOptionsView(sess('3A', { selectedClass: undefined }))).toBeUndefined();
   });
   it('meal status comes only from a provider result for THIS train', () => {
@@ -58,9 +58,9 @@ describe('[1] passenger options the chat may ask — nothing invented', () => {
     expect(v.passengers[1]).toMatchObject({ missing: ['name', 'age', 'gender'] });
     expect(v.alsoAsk).toEqual(['passenger1.foodPreference', 'passenger2.berthPreference', 'passenger2.foodPreference']);
     expect(v.missing).toEqual(['passenger2.name', 'passenger2.age', 'passenger2.gender']);
-    const cc: any = bookingPreparationView(sess('CC', info('12926', { catering: false })));
+    const cc: any = bookingPreparationView(sess('EA', info('12926', { catering: false })));
     expect(cc.alsoAsk).toBeUndefined();
-    expect(optionalToAsk(sess('CC'), {})).toEqual([]);
+    expect(optionalToAsk(sess('EA'), {})).toEqual([]);
   });
 });
 
@@ -77,7 +77,7 @@ describe('[2] validation of chat-proposed berth / meal', () => {
     expect(gateOptionalField(sess('3A'), 'berthPreference', 'SIDE_UPPER')).toEqual({ ok: true });
     expect(gateOptionalField(sess('2A'), 'berthPreference', 'MIDDLE')).toMatchObject({ ok: false, message: expect.stringMatching(/2A mein berth options/) });
     expect(gateOptionalField(sess('CC'), 'berthPreference', 'LOWER')).toMatchObject({ ok: false, message: expect.stringMatching(/berth choice nahi/) });
-    expect(gateOptionalField(sess('CC'), 'berthPreference', 'NO_PREFERENCE')).toMatchObject({ ok: false, silent: true });
+    expect(gateOptionalField(sess('EA'), 'berthPreference', 'NO_PREFERENCE')).toMatchObject({ ok: false, silent: true });
     expect(gateOptionalField(sess('3A'), 'foodPreference', 'VEG')).toMatchObject({ ok: false, message: expect.stringMatching(/verify nahi/) });
     expect(gateOptionalField(sess('3A', info('12926', { catering: false })), 'foodPreference', 'VEG')).toMatchObject({ ok: false, message: expect.stringMatching(/shaamil nahi/) });
     expect(gateOptionalField(sess('3A', info('12926', { catering: true })), 'foodPreference', 'VEG')).toEqual({ ok: true });

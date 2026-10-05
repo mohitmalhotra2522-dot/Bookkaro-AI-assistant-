@@ -23,7 +23,7 @@ import { resolvePassengerAge, resolvePassengerGender } from '../ai/agent/passeng
 export type PassengerField = 'name' | 'age' | 'gender' | 'berthPreference' | 'foodPreference';
 export const SCHEMA_FIELDS: ReadonlySet<string> = new Set(['name', 'age', 'gender', 'berthPreference', 'foodPreference']);
 
-const BERTHS: BerthPreference[] = ['WINDOW', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER', 'NO_PREFERENCE'];
+const BERTHS: BerthPreference[] = ['WINDOW', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER', 'CABIN', 'COUPE', 'NO_PREFERENCE'];
 const GENDERS: Gender[] = ['MALE', 'FEMALE', 'OTHER'];
 const FOODS: FoodPreference[] = ['VEG', 'NON_VEG', 'NO_FOOD'];
 

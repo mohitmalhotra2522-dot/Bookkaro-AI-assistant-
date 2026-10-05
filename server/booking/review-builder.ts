@@ -46,7 +46,7 @@ export interface BuildOptions {
 const tn = (t: any) => (t ? String(t.number || t.trainNumber) : undefined);
 const G: Record<string, string> = { MALE: 'M', FEMALE: 'F', OTHER: 'O' };
 /** P38: berth / meal choices from the passenger form (only when set; NO_PREFERENCE is not repeated). */
-const BERTH_SHORT: Record<string, string> = { LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side Lower', SIDE_UPPER: 'Side Upper', WINDOW: 'Window' };
+const BERTH_SHORT: Record<string, string> = { LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side Lower', SIDE_UPPER: 'Side Upper', WINDOW: 'Window', CABIN: 'Cabin', COUPE: 'Coupe' };
 const FOOD_SHORT: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non-Veg', NO_FOOD: 'No Food' };
 const extras = (p: any): string => { const x = [p.berthPreference && BERTH_SHORT[p.berthPreference], p.foodPreference && FOOD_SHORT[p.foodPreference]].filter(Boolean); return x.length ? ` [${x.join(', ')}]` : ''; };
 

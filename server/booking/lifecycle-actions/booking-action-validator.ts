@@ -187,7 +187,7 @@ export class BookingActionValidator {
       if (p.field === 'age' && !(typeof p.value === 'number' && Number.isInteger(p.value) && p.value >= 1 && p.value <= 120)) return 'Age 1 se 120 ke beech honi chahiye.';
       if (p.field === 'gender' && !['MALE', 'FEMALE', 'OTHER'].includes(String(p.value))) return 'Gender male, female ya other ho sakta hai.';
       if (p.field === 'name' && !(typeof p.value === 'string' && /^[A-Za-z][A-Za-z .]{1,39}$/.test(p.value))) return 'Naam sirf letters mein, 2–40 characters ka hona chahiye.';
-      if (p.field === 'berthPreference' && !['LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'].includes(String(p.value))) return 'Berth preference lower, middle, upper, side lower ya side upper ho sakti hai.';
+      if (p.field === 'berthPreference' && !['LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER', 'WINDOW', 'CABIN', 'COUPE'].includes(String(p.value))) return 'Berth preference lower, middle, upper, side lower, side upper, (chair car mein) window side ya (1A mein) cabin / coupe ho sakti hai.';
       return null;
     }
     return null;

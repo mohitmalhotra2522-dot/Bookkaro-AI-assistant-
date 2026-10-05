@@ -426,3 +426,9 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   (`LLM_FALLBACK_COOLDOWN_MS`), fallback timeout `LLM_FALLBACK_TIMEOUT_MS` (60 s). Visible: log
   `{"llm":{"event":"LLM_FALLBACK_USED",...}}`, `/api/health` `llm.fallback` state, turn diagnostics `model`. Both fail →
   normal LLM_UNAVAILABLE. Per-call timeout cap is 120 s (`2b36ddc`). Tests: `tests/unit/llm-fallback.test.ts` (7).
+- **Seat / berth preferences = verified IRCTC passenger-form choices** (`shared/constants.ts` BERTH_OPTIONS_BY_CLASS):
+  SL/3A/3E: Lower/Middle/Upper/Side Lower/Side Upper · 2A: Lower/Upper/Side Lower/Side Upper · 1A: Lower/Upper/Cabin/Coupe ·
+  CC/2S/EC: Window Side only (EC seen on the real IRCTC page for 12014 EC) · EA/EV/unknown: none (not verified).
+  New enum values WINDOW (existing), CABIN, COUPE → IRCTC labels "Window Side" / "Cabin" / "Coupe" in the handoff.
+  Also fixed: live trains selected via the agent were labelled MOCK ("Development data — not live") — `setSelectedTrain`
+  now derives LIVE from the row's provider (unknown stays MOCK). Tests: `tests/unit/seat-preference-cc.test.ts`.

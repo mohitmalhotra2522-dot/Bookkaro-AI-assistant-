@@ -13,7 +13,7 @@
  */
 import type { BookingSession, Passenger, FoodPreference, BerthPreference } from '@shared/entities';
 import { BookingState } from '@shared/states';
-import { MAX_PASSENGERS, berthOptionsForClass, FOOD_PREFERENCES } from '@shared/constants';
+import { MAX_PASSENGERS, berthOptionsForClass, isSeatPreferenceClass, FOOD_PREFERENCES } from '@shared/constants';
 import { passengerValidator } from './passenger-validator';
 import { passengerCollection } from './passenger-collection';
 import { railwayRegistry } from '../railway/registry/provider-registry';
@@ -85,7 +85,8 @@ export function buildFormSpec(s: BookingSession, facilities: TrainFacilitiesView
     sessionVersion: s.sessionVersion,
     train: { number: String(t.number || t.trainNumber || ''), name: String(t.name || t.trainName || ''), origin: t.origin, destination: t.destination, departure: t.departure, arrival: t.arrival, date: t.date || s.date, dataSource: t.dataSource },
     travelClass: cls,
-    berth: { options, note: options.length ? null : SEAT_CLASSES.has(cls.toUpperCase()) ? `${cls} mein seat railway allot karti hai — berth choice nahi hoti.` : 'Is class ke liye berth choice ki verified jaankari nahi hai.' },
+    berth: { options, note: isSeatPreferenceClass(cls) ? `${cls} mein berth nahi hoti — IRCTC sirf seat preference deta hai (Window Side). Seat railway allot karti hai, preference guarantee nahi.`
+      : options.length ? null : SEAT_CLASSES.has(cls.toUpperCase()) ? `${cls} mein seat preference ki verified jaankari nahi hai — seat railway allot karti hai.` : 'Is class ke liye berth choice ki verified jaankari nahi hai.' },
     food: foodView(facilities),
     maxPassengers: MAX_PASSENGERS,
     passengersCount: s.passengersCount || 0,

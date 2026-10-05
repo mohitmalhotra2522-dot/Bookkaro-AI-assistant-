@@ -125,7 +125,7 @@ describe('P39.3 — handoff payload contract + integrity', () => {
     expect(bad(x => { x.transcript = 'haan'; })).toBe('UNKNOWN_KEYS');
     expect(bad(x => { x.passengers[0].mobile = '9800000000'; })).toBe('PASSENGER_KEYS');
     expect(bad(x => { x.passengers.reverse(); })).toBe('PASSENGER_ORDER');
-    expect(bad(x => { x.journey.dateIrctc = '07/10/2026'; })).toBe('DATE');
+    expect(bad(x => { x.journey.dateIrctc = x.journey.dateIrctc === '07/10/2026' ? '08/10/2026' : '07/10/2026'; })).toBe('DATE');   // always ≠ the real journey date (clock-independent)
     expect(bad(x => { x.schemaVersion = 2; })).toBe('SCHEMA_VERSION');
     expect(bad(x => { x.passengers = []; })).toBe('PASSENGERS');
     expect(bad(x => { x.travelClass = { code: 'CC', label: 'AC 3 Tier (3A)' }; })).toBe('CLASS');

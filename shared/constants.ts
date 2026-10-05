@@ -85,18 +85,30 @@ export const MAX_PASSENGERS = 6;
 
 /**
  * P38 — berth choices per class (standard Indian Railways coach layout, as offered on the IRCTC passenger form).
- * Shown only for a class the provider listed for the selected train. Seat classes (CC / EC / 2S / EA) and unknown
- * classes have NO berth choice — the seat is allotted by the railway (nothing invented).
+ * Shown only for a class the provider listed for the selected train. Verified IRCTC passenger-form choices:
+ *   - chair cars CC / 2S / EC: no berth, ONE seat preference "Window Side" (IRCTC code WS; EC seen on the real IRCTC
+ *     passenger page for 12014 EC: No Preference / Window Side);
+ *   - 1A: Lower / Upper + Cabin / Coupe preference (IRCTC per-passenger preferred-berth option for First AC).
+ * Other classes (EA / EV / VS / unknown) get NO choice — not verified, so nothing is invented. 3E side-middle is not
+ * offered (not verified on the IRCTC form).
  */
 export const BERTH_OPTIONS_BY_CLASS: Readonly<Record<string, readonly BerthPreferenceCode[]>> = Object.freeze({
   SL: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
   '3A': ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
   '3E': ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
   '2A': ['NO_PREFERENCE', 'LOWER', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
-  '1A': ['NO_PREFERENCE', 'LOWER', 'UPPER'],
-  FC: ['NO_PREFERENCE', 'LOWER', 'UPPER']
+  '1A': ['NO_PREFERENCE', 'LOWER', 'UPPER', 'CABIN', 'COUPE'],
+  FC: ['NO_PREFERENCE', 'LOWER', 'UPPER'],
+  CC: ['NO_PREFERENCE', 'WINDOW'],
+  '2S': ['NO_PREFERENCE', 'WINDOW'],
+  EC: ['NO_PREFERENCE', 'WINDOW']
 });
-type BerthPreferenceCode = 'LOWER' | 'MIDDLE' | 'UPPER' | 'SIDE_LOWER' | 'SIDE_UPPER' | 'NO_PREFERENCE';
+type BerthPreferenceCode = 'LOWER' | 'MIDDLE' | 'UPPER' | 'SIDE_LOWER' | 'SIDE_UPPER' | 'WINDOW' | 'CABIN' | 'COUPE' | 'NO_PREFERENCE';
+/** Classes whose only IRCTC choice is a seat preference (Window Side), not a berth. */
+export function isSeatPreferenceClass(cls: string | null | undefined): boolean {
+  const o = berthOptionsForClass(cls);
+  return o.length > 0 && o.every(x => x === 'NO_PREFERENCE' || x === 'WINDOW');
+}
 export function berthOptionsForClass(cls: string | null | undefined): readonly BerthPreferenceCode[] {
   return BERTH_OPTIONS_BY_CLASS[String(cls || '').toUpperCase()] || [];
 }
