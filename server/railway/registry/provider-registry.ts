@@ -5,6 +5,7 @@ import { scopedProviderId } from '../providers/provider-scope';
 import { providerToolCatalog } from '../../ai/tools/provider-tools';
 import { PROVIDER_CAPABILITY_MATRIX, type LiveProviderId } from '../providers/live/provider-capabilities';
 import type { RegisteredToolName } from '../../ai/tools/tool-registry';
+import { createWebProvider, enabledWebConnectors, WEB_CAPABILITY_MATRIX, WEB_PROVIDER_LABEL } from '../providers/web/web-providers';
 
 const LIVE_LABEL: Record<LiveProviderId, string> = { railcore: 'RailCore', railradar: 'RailRadar', railkit: 'RailKit' };
 /** Declared capability → canonical tool contract (GET_CANCELLED_TRAINS has no RailwayProvider contract → not exposed). */
@@ -29,8 +30,20 @@ export function registerLiveProviderTools(env: NodeJS.ProcessEnv = process.env):
     providerToolCatalog.register({ id, label: LIVE_LABEL[id], registryId: id, capabilities: caps });
     exposed.push(id);
   }
+  // P38: robots-allowed WEB connectors (eRail / RailYatri) — extra tools the LLM may choose; never a hidden fallback
+  for (const id of enabledWebConnectors(env)) {
+    const caps = Object.keys(WEB_CAPABILITY_MATRIX[id] || {}).map(c => CAP_TO_TOOL[c]).filter(Boolean);
+    if (!caps.length) continue;
+    providerToolCatalog.register({ id, label: `${WEB_PROVIDER_LABEL[id]} (web)`, registryId: id, capabilities: caps, note: WEB_NOTE[id] });
+    exposed.push(id);
+  }
   return exposed;
 }
+
+const WEB_NOTE: Record<string, string> = {
+  erail: 'WEB DATA — UNVERIFIED (public eRail website, not a railway API): trains, timings, run days and coach classes only; NO seat availability and NO fare. Useful when the API providers fail or to cross-check. Always tell the user it is unverified web data.',
+  railyatri: 'WEB DATA — UNVERIFIED (crowd-sourced RailYatri page, not a railway API): live running status, delay, next station, platform. Always tell the user it is unverified and mention its "as of" time.'
+};
 
 /**
  * RailwayProviderRegistry — simple config-driven provider selector.
@@ -51,6 +64,9 @@ export class RailwayProviderRegistry {
     this.register('railcore', () => createLiveProvider('railcore'));
     this.register('railkit', () => createLiveProvider('railkit'));
     this.register('railradar', () => createLiveProvider('railradar'));
+    // P38: web connectors (only reachable through their own provider tools / provider scope)
+    this.register('erail', () => createWebProvider('erail'));
+    this.register('railyatri', () => createWebProvider('railyatri'));
 
     this.activeId = process.env.RAILWAY_PROVIDER || 'mock';
     // an unknown id / chain is a startup error, never a silent switch

@@ -6,8 +6,9 @@
  * failure. This module is only the catalog + name mapping for the secure generic gateway:
  *
  *   - a tool is exposed ONLY for a registered connector that is implemented, configured (server-side key present) and
- *     declares the capability (documented endpoint). No fake provider tools — ConfirmTkt / RailYatri / eRail have no
- *     authorized integration, so they are never exposed; a call to one returns PROVIDER_NOT_IMPLEMENTED.
+ *     declares the capability (documented endpoint). No fake provider tools — ConfirmTkt has no allowed integration,
+ *     so it is never exposed; a call returns PROVIDER_NOT_IMPLEMENTED. P38: eRail / RailYatri are WEB connectors
+ *     (robots-allowed public pages, results labelled UNVERIFIED_WEB).
  *   - `railcore_search` maps to the canonical, already-validated tool contract (SEARCH_TRAINS) + provider `railcore`.
  *     The gateway then executes it on THAT connector only (provider scope) — it never picks, re-orders or switches the
  *     provider and never chains another tool.
@@ -32,8 +33,10 @@ const SUFFIX_TO_CANONICAL = new Map(Object.entries(PROVIDER_TOOL_SUFFIX).map(([k
 /** Extra suffixes the brief names; no RailwayProvider contract exists for them → never exposed. */
 const KNOWN_UNEXPOSED_SUFFIXES = new Set(['cancelled_trains', 'status']);
 
-/** Providers named in the product brief WITHOUT an implemented / authorized integration (never exposed). */
-export const NOT_IMPLEMENTED_PROVIDERS: readonly string[] = Object.freeze(['confirmtkt', 'railyatri', 'erail']);
+/** Providers named in the product brief WITHOUT an implemented / authorized integration (never exposed).
+ *  P38: eRail + RailYatri now have robots-allowed WEB connectors (unverified, live mode only); ConfirmTkt stays out
+ *  (robots.txt disallows its train / PNR pages, private token API). */
+export const NOT_IMPLEMENTED_PROVIDERS: readonly string[] = Object.freeze(['confirmtkt']);
 
 export interface ProviderConnectorInfo {
   /** Tool prefix + provider id the LLM sees (`railcore`). */

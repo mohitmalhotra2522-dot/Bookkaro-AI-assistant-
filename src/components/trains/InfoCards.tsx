@@ -79,7 +79,9 @@ export const PnrNote: React.FC<{ d: any }> = ({ d }) => (
 export const LiveStatusNote: React.FC<{ d: any }> = ({ d }) => (
   <Note label="Live train status" icon={<IconPin size={18} />}
     title={<>{d.trainNumber}: {d.currentStatus}</>}
-    sub={<>{d.currentStationName || d.currentStationCode || ''}{typeof d.delayMinutes === 'number' ? ` · ${d.delayMinutes} min late` : ''}<Src d={d} /></>} />
+    sub={<>{d.currentStationName || d.currentStationCode || ''}{typeof d.delayMinutes === 'number' ? ` · ${d.delayMinutes} min late` : ''}
+      {d.nextStationName ? ` · Next: ${d.nextStationName}` : ''}{d.platformNumber ? ` · PF ${d.platformNumber}` : ''}
+      {d.sourceNote ? <><br /><span className="bk-tag bk-tag--web">WEB (RailYatri) — unverified{d.lastUpdated ? ` · as of ${String(d.lastUpdated).slice(11, 16)}` : ''}</span></> : <Src d={d} />}</>} />
 );
 
 export const BookingDetailsNote: React.FC<{ d: any }> = ({ d }) => {

@@ -93,6 +93,8 @@ const ClassChip: React.FC<{ cls: ClassOption; active: boolean; disabled?: boolea
   );
 };
 
+const WEB_SOURCES: Record<string, string> = { erail: 'eRail', railyatri: 'RailYatri' };
+
 /** Search results list: header with real count / source / freshness, then cards (first few, then "show all"). */
 export const TrainResults: React.FC<{
   trains: Array<Props['train']>;
@@ -110,12 +112,16 @@ export const TrainResults: React.FC<{
   const [all, setAll] = useState(trains.length <= INITIAL + 1);
   const shown = all ? trains : trains.slice(0, INITIAL);
   const isMock = String(source || '').toLowerCase() === 'mock';
+  // P38: results from a web connector (eRail) are public-website data — never shown as verified railway data
+  const isWeb = WEB_SOURCES[String(source || '').toLowerCase()] !== undefined;
+  const webLabel = `WEB (${WEB_SOURCES[String(source || '').toLowerCase()]}) — unverified`;
   return (
     <section className="bk-results" aria-label="Train results">
       <div className="bk-section-head">
         <h3>{trains.length} {trains.length === 1 ? 'train' : 'trains'}{routeLabel ? ` · ${routeLabel}` : ''}</h3>
         <span className="bk-meta">
           {isMock ? <span className="bk-tag bk-tag--warn">Development data — not live</span>
+            : isWeb ? <span className="bk-tag bk-tag--web">{webLabel}{retrievedAt ? ` · ${formatClock(retrievedAt)}` : ''}</span>
             : retrievedAt ? <>Fetched {formatClock(retrievedAt)}</> : null}
         </span>
       </div>

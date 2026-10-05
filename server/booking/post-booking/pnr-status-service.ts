@@ -34,6 +34,8 @@ export interface NormalizedPnrStatus {
 }
 
 export interface NormalizedLiveStatus {
+  /** P38 (web connector only): unverified crowd-sourced data + extra fields it supplied. */
+  verification?: 'UNVERIFIED_WEB'; sourceNote?: string; nextStationName?: string; platformNumber?: string; statusAsOf?: string;
   trainNumber: string;
   trainName: string | null;
   currentStatus: string;
@@ -58,7 +60,8 @@ export const PNR_MESSAGES = {
   PNR_NOT_FOUND: 'Railway provider ko yeh PNR nahi mila. Kripya PNR number dobara check karein.',
   LIVE_STATUS_UNAVAILABLE: 'Live train status abhi available nahi hai — railway provider se live data nahi mila.',
   LIVE_STATUS_TIMEOUT: 'Railway provider ne time par jawab nahi diya — live status abhi verify nahi ho paaya.',
-  LIVE_STATUS_PROVIDER_ERROR: 'Railway provider se live status ka sahi jawab nahi mila.'
+  LIVE_STATUS_PROVIDER_ERROR: 'Railway provider se live status ka sahi jawab nahi mila.',
+  LIVE_STATUS_NOT_FOUND: 'Is train ka live status provider ke paas abhi nahi hai — train shayad abhi chal nahi rahi.'
 } as const;
 
 const TEXT_RE = /^[A-Za-z0-9 /,.()#:+&'-]{1,80}$/;
@@ -150,6 +153,9 @@ export class LiveTrainStatusService {
   }
 }
 
+/** P38: plain display text from a web connector result (bounded; never markup). */
+const webText = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() && !/[<>]/.test(v) ? v.trim().slice(0, 200) : undefined);
+
 export function normalizeTrackResponse(raw: any, trainNumber: string, meta: { providerId: string; source: string; latencyMs: number }): LiveToolResponse<NormalizedLiveStatus> {
   const fail = (code = 'LIVE_STATUS_PROVIDER_ERROR') => ({ ok: false as const, error: { code, message: (PNR_MESSAGES as any)[code] }, meta });
   if (!raw || typeof raw !== 'object' || typeof raw.ok !== 'boolean') return fail();
@@ -157,6 +163,7 @@ export function normalizeTrackResponse(raw: any, trainNumber: string, meta: { pr
     const c = String(raw.error?.code || '');
     if (/TIMEOUT/.test(c)) return fail('LIVE_STATUS_TIMEOUT');
     if (/UNAVAILABLE|NOT_IMPLEMENTED|NOT_SUPPORTED/.test(c)) return fail('LIVE_STATUS_UNAVAILABLE');
+    if (c === 'NOT_FOUND' && meta.providerId === 'railyatri') return fail('LIVE_STATUS_NOT_FOUND'); // P38: honest cause, not a generic error
     return fail();
   }
   const d = raw.data;
@@ -171,7 +178,13 @@ export function normalizeTrackResponse(raw: any, trainNumber: string, meta: { pr
     ok: true,
     data: {
       trainNumber, trainName: tn ?? null, currentStatus: status, currentStationCode: code ?? null, currentStationName: name ?? null, delayMinutes: delay,
-      lastUpdated: upd ?? null, dataSource: /mock/i.test(meta.source) ? 'MOCK' : 'LIVE', providerId: meta.providerId, retrievedAt: new Date().toISOString(), fresh: true
+      lastUpdated: upd ?? null, dataSource: /mock/i.test(meta.source) ? 'MOCK' : 'LIVE', providerId: meta.providerId, retrievedAt: new Date().toISOString(), fresh: true,
+      // P38: a web connector (RailYatri) result keeps its UNVERIFIED label + the extra crowd-sourced fields it supplied
+      ...(meta.providerId === 'railyatri' ? {
+        verification: 'UNVERIFIED_WEB' as const, sourceNote: webText(d.sourceNote) ?? 'Crowd-sourced (RailYatri) — unverified.',
+        ...(webText(d.nextStationName) ? { nextStationName: webText(d.nextStationName) } : {}), ...(webText(d.platformNumber) ? { platformNumber: webText(d.platformNumber) } : {}),
+        ...(webText(d.statusAsOf) ? { statusAsOf: webText(d.statusAsOf) } : {})
+      } : {})
     },
     meta
   };

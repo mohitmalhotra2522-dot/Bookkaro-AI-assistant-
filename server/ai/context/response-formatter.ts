@@ -55,7 +55,10 @@ export function factFromTool(toolName: string, data: any, mode: 'TEXT' | 'VOICE'
       return `${head} ${rows.join(', ')}.`;
     }
     case 'TRACK_TRAIN': {
-      const src = data.dataSource === 'MOCK' ? 'mock / non-live development data' : 'railway provider, abhi fetch kiya';
+      // P38: a web connector result (RailYatri) is crowd-sourced website data — never "railway provider"
+      const src = data.dataSource === 'MOCK' ? 'mock / non-live development data'
+        : data.sourceNote ? `RailYatri website, crowd-sourced — unverified${data.lastUpdated ? `, as of ${String(data.lastUpdated).slice(11, 16)}` : ''}`
+        : 'railway provider, abhi fetch kiya';
       const where = data.currentStationName || data.currentStationCode;
       return `${data.trainNumber}${data.trainName && mode === 'TEXT' ? ' ' + data.trainName : ''} live status (${src}): ${data.currentStatus}${where ? ` — last reported: ${where}` : ''}${typeof data.delayMinutes === 'number' ? `, ${data.delayMinutes} min late` : ''}.`;
     }
