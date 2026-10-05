@@ -11,7 +11,7 @@ import { berthOptionsForClass } from '../../shared/constants';
 import { buildFormSpec, validateForm, formNotReady, type TrainFacilitiesView } from '../../server/booking/passenger-form';
 import { parseErailTrains, erailClasses, monFirstWeekday, parseRailYatriLive, webSourceLabel } from '../../server/railway/providers/web/web-providers';
 import { normalizeTrackResponse } from '../../server/booking/post-booking/pnr-status-service';
-import { factFromTool } from '../../server/ai/context/response-formatter';
+import { factFromTool, searchSummary } from '../../server/ai/context/response-formatter';
 
 const session = (cls: string, extra: any = {}): any => ({
   sessionId: 's1', sessionVersion: 7, date: '2026-10-06', selectedClass: cls, passengersCount: 2, passengers: [],
@@ -114,6 +114,16 @@ describe('[5] eRail parser (inline fixture)', () => {
     expect(t[0]).toMatchObject({ origin: 'ASR', destination: 'NDLS', departure: '17:10', arrival: '23:25', duration: '6h 15m' });
     expect(t[0].classes.every((c: any) => c.fare === null && c.availability === null)).toBe(true);
     expect((r as any).originName).toBe('Amritsar Jn');
+  });
+  it('search summary of eRail results is labelled unverified (text + voice); RailCore summary unchanged', () => {
+    const ses: any = { origin: 'ASR', destination: 'NDLS', originName: 'Amritsar Junction', destinationName: 'New Delhi', date: '2026-10-06', providerSource: 'erail',
+      searchResults: { trains: [{ trainNumber: '12926', trainName: 'PASCHIM EXP', departure: '17:10', arrival: '23:25', duration: '6h 15m', classes: [{ code: 'SL' }] }] } };
+    const r = searchSummary(ses, 'TEXT');
+    expect(r).toMatch(/1 train mili hai \(eRail website — unverified web data; fare \/ seat availability nahi\)/);
+    expect(r).toMatch(/12926 PASCHIM EXP — 17:10 → 23:25/);
+    expect(searchSummary(ses, 'VOICE')).toMatch(/eRail website se, unverified/);
+    expect(searchSummary({ ...ses, providerSource: 'railcore' }, 'TEXT')).not.toMatch(/unverified/);
+    expect(searchSummary({ ...ses, searchResults: { trains: [] } }, 'TEXT')).toMatch(/koi train nahi mili \(eRail website — unverified/);
   });
   it('station-not-found is an honest error', () => {
     const r = parseErailTrains('~~~~~To station not found', '2026-10-06');

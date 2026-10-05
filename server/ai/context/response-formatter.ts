@@ -16,13 +16,15 @@ export function humanDate(iso?: string): string {
 export function searchSummary(s: BookingSession, mode: 'TEXT' | 'VOICE'): string {
   const ts = currentResults(s);
   const route = `${shortName(s.originName, s.origin)} → ${shortName(s.destinationName, s.destination)}`;
-  if (!ts.length) return `${route} ${humanDate(s.date)} ke liye koi train nahi mili.`;
+  // P38: results from a web connector (eRail) are labelled in the text/voice too — never presented as railway data
+  const web = s.providerSource === 'erail' ? ' (eRail website — unverified web data; fare / seat availability nahi)' : '';
+  if (!ts.length) return `${route} ${humanDate(s.date)} ke liye koi train nahi mili${web}.`;
   if (mode === 'VOICE') {
     const top = ts.slice(0, 2).map(t => t.trainNumber).join(' aur ');
-    return `${humanDate(s.date)} ko ${ts.length} ${ts.length > 1 ? 'trainein mili hain' : 'train mili hai'}. ${top}${ts.length > 2 ? ' sabse pehle hain' : ''}.`;
+    return `${humanDate(s.date)} ko ${ts.length} ${ts.length > 1 ? 'trainein mili hain' : 'train mili hai'}${web ? ' — eRail website se, unverified' : ''}. ${top}${ts.length > 2 ? ' sabse pehle hain' : ''}.`;
   }
   const lines = ts.map(t => `${t.displayIndex}. ${t.trainNumber} ${t.trainName} — ${t.departure} → ${t.arrival} (${t.duration}) · ${(t.classes || []).map(c => c.code).join('/')}`);
-  return `${route}, ${humanDate(s.date)}: ${ts.length} ${ts.length > 1 ? 'trains mili hain' : 'train mili hai'}.\n${lines.join('\n')}`;
+  return `${route}, ${humanDate(s.date)}: ${ts.length} ${ts.length > 1 ? 'trains mili hain' : 'train mili hai'}${web}.\n${lines.join('\n')}`;
 }
 
 export function shortName(name?: string, code?: string) {
