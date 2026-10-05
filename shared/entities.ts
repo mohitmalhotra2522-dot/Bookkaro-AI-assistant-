@@ -98,12 +98,16 @@ export type BerthPreference =
   | 'SIDE_UPPER'
   | 'NO_PREFERENCE';
 
+export type FoodPreference = 'VEG' | 'NON_VEG' | 'NO_FOOD';
+
 export interface Passenger {
   id: string;
   name?: string;
   age?: number;
   gender?: Gender;
   berthPreference?: BerthPreference;
+  /** P38: set ONLY from the passenger form, and only for a train whose provider data says catering is included. */
+  foodPreference?: FoodPreference;
   manuallyEdited?: boolean;
   missingFields?: ('name' | 'age' | 'gender' | 'berthPreference')[];
 }

@@ -10,9 +10,13 @@ interface Props {
   onEdit?: (passenger: Passenger, index: number) => void;
 }
 
+const FOOD: Record<string, string> = { VEG: 'Veg meal', NON_VEG: 'Non-veg meal', NO_FOOD: 'No meal' };
+
 /** One compact passenger row — name, age · gender (berth only when provided). */
 export const PassengerCard: React.FC<Props> = ({ passenger, index, onEdit }) => {
-  const meta = [passenger.age ? String(passenger.age) : '', genderLabel(passenger.gender as any), passenger.berthPreference ? `${passenger.berthPreference} berth` : '']
+  const meta = [passenger.age ? String(passenger.age) : '', genderLabel(passenger.gender as any),
+    passenger.berthPreference && passenger.berthPreference !== 'NO_PREFERENCE' ? `${passenger.berthPreference.replace('_', ' ').toLowerCase()} berth` : '',
+    passenger.foodPreference ? FOOD[passenger.foodPreference] || '' : '']
     .filter(Boolean).join(' · ');
   return (
     <div className="bk-pax__row">
@@ -30,7 +34,7 @@ export const PassengerCard: React.FC<Props> = ({ passenger, index, onEdit }) => 
   );
 };
 
-export const PassengerList: React.FC<{ passengers: Passenger[]; onEdit?: Props['onEdit']; onAdd?: () => void }> = ({ passengers, onEdit, onAdd }) => (
+export const PassengerList: React.FC<{ passengers: Passenger[]; onEdit?: Props['onEdit']; onAdd?: () => void; onOpenForm?: () => void }> = ({ passengers, onEdit, onAdd, onOpenForm }) => (
   <section className="bk-card bk-pax" aria-label="Passengers">
     <div className="bk-section-head">
       <h3 style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><IconUsers size={18} /> Passengers</h3>
@@ -39,9 +43,10 @@ export const PassengerList: React.FC<{ passengers: Passenger[]; onEdit?: Props['
     <div className="bk-pax__list">
       {passengers.map((p, i) => <PassengerCard key={(p as any).id || i} passenger={p} index={i} onEdit={onEdit} />)}
     </div>
-    {onAdd && (
+    {(onAdd || onOpenForm) && (
       <div className="bk-pax__foot">
-        <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm" onClick={onAdd}><IconPlus size={16} /> Add passenger</button>
+        {onOpenForm && <button type="button" className="bk-btn bk-btn--primary bk-btn--sm" onClick={onOpenForm}><IconEdit size={16} /> Fill / edit in form</button>}
+        {onAdd && <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm" onClick={onAdd}><IconPlus size={16} /> Add passenger</button>}
       </div>
     )}
   </section>

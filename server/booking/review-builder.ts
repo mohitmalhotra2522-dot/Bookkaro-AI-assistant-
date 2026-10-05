@@ -21,7 +21,7 @@ export interface BookingReview {
   route: { origin?: string; originName?: string; destination?: string; destinationName?: string };
   date?: string;
   passengersCount: number;
-  passengers: Array<{ passengerId: string; index: number; name?: string; age?: number; gender?: string; berthPreference?: string }>;
+  passengers: Array<{ passengerId: string; index: number; name?: string; age?: number; gender?: string; berthPreference?: string; foodPreference?: string }>;
   selectedTrain: { number: string; name: string; departure?: string; arrival?: string } | null;
   /** @deprecated alias of selectedTrain (Prompt 8 UI) */
   train: { number: string; name: string; departure?: string; arrival?: string } | null;
@@ -45,6 +45,10 @@ export interface BuildOptions {
 
 const tn = (t: any) => (t ? String(t.number || t.trainNumber) : undefined);
 const G: Record<string, string> = { MALE: 'M', FEMALE: 'F', OTHER: 'O' };
+/** P38: berth / meal choices from the passenger form (only when set; NO_PREFERENCE is not repeated). */
+const BERTH_SHORT: Record<string, string> = { LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side Lower', SIDE_UPPER: 'Side Upper', WINDOW: 'Window' };
+const FOOD_SHORT: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non-Veg', NO_FOOD: 'No Food' };
+const extras = (p: any): string => { const x = [p.berthPreference && BERTH_SHORT[p.berthPreference], p.foodPreference && FOOD_SHORT[p.foodPreference]].filter(Boolean); return x.length ? ` [${x.join(', ')}]` : ''; };
 
 /** Booking-critical fingerprint: any change ⇒ the review is obsolete. */
 export function reviewFingerprint(s: BookingSession): string {
@@ -52,7 +56,7 @@ export function reviewFingerprint(s: BookingSession): string {
   const f: any = s.fare;
   return JSON.stringify([
     s.origin, s.destination, s.date, tn(s.selectedTrain), s.selectedClass, s.passengersCount,
-    (s.passengers || []).map(p => [p.id, p.name, p.age, p.gender, p.berthPreference ?? null]),
+    (s.passengers || []).map(p => [p.id, p.name, p.age, p.gender, p.berthPreference ?? null, ...(p.foodPreference ? [p.foodPreference] : [])]),
     a ? [a.status, a.retrievedAt] : null,
     f ? [f.total, f.passengersCount, f.retrievedAt] : null
   ]);
@@ -77,7 +81,7 @@ export function buildReviewSnapshot(s: BookingSession, reviewVersion: number, no
     journey: { origin: s.origin!, destination: s.destination!, date: s.date!, ...(s.originName ? { originName: s.originName } : {}), ...(s.destinationName ? { destinationName: s.destinationName } : {}) },
     train: { number: tn(t)!, name: t?.name || t?.trainName, departure: t?.departure, arrival: t?.arrival, resultSetId: t?.searchResultId ?? (s.searchResults as any)?.resultId ?? null },
     travelClass: s.selectedClass!,
-    passengers: (s.passengers || []).map((p, i) => ({ index: i + 1, name: p.name!, age: p.age!, gender: p.gender!, ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}) })),
+    passengers: (s.passengers || []).map((p, i) => ({ index: i + 1, name: p.name!, age: p.age!, gender: p.gender!, ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}), ...(p.foodPreference ? { foodPreference: p.foodPreference } : {}) })),
     availability: availOk
       ? { status: 'VERIFIED', value: String(a.status), retrievedAt: a.retrievedAt || a.fetchedAt, toolExecutionId: a.toolExecutionId }
       : as.status === 'UNAVAILABLE' ? { status: 'AVAILABILITY_UNAVAILABLE', errorCode: deps.availability?.errorCode ?? null } : { status: 'NOT_VERIFIED' },
@@ -120,7 +124,7 @@ export class ReviewBuilder {
       passengersCount: count,
       passengers: (s.passengers || []).map((p, i) => ({
         passengerId: p.id, index: i + 1, name: p.name, age: p.age, gender: p.gender,
-        ...(p.berthPreference ? { berthPreference: p.berthPreference } : {})
+        ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}), ...(p.foodPreference ? { foodPreference: p.foodPreference } : {})
       })),
       selectedTrain: train, train,
       selectedClass: cls,
@@ -133,7 +137,7 @@ export class ReviewBuilder {
     };
 
     const route = `${shortName(s.originName, s.origin)} → ${shortName(s.destinationName, s.destination)}`;
-    const paxNames = data.passengers.filter(p => p.name).map(p => `${p.name}${p.age ? ` (${p.age}${p.gender ? `, ${G[p.gender] || p.gender}` : ''})` : ''}`);
+    const paxNames = data.passengers.filter(p => p.name).map(p => `${p.name}${p.age ? ` (${p.age}${p.gender ? `, ${G[p.gender] || p.gender}` : ''})` : ''}${extras(p)}`);
     const paxLine = `${count} passenger${count > 1 ? 's' : ''}${paxNames.length ? `: ${paxNames.join(', ')}` : ''}`;
     const fareLine = data.fare.verified ? `Fare: ₹${data.fare.total}${count > 1 ? ` (₹${data.fare.perPassenger} × ${count})` : ''}` : 'Fare abhi verify nahi hua hai.';
     const availLine = data.availability.verified ? `Availability: ${data.availability.status}` : 'Availability abhi verify nahi hui hai.';

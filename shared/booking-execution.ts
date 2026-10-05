@@ -54,6 +54,8 @@ export interface ExecutionPassenger {
   age: number;
   gender: 'MALE' | 'FEMALE' | 'OTHER';
   berthPreference?: string;
+  /** P38: only present when the train's provider data shows catering and the user chose it. */
+  foodPreference?: string;
 }
 
 export interface ExecutionTrainRef {

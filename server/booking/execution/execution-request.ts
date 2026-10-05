@@ -15,7 +15,8 @@ export function buildExecutionRequest(s: BookingSession, opts: { requestId: stri
     name: String(p.name ?? ''),
     age: Number(p.age),
     gender: p.gender,
-    ...(p.berthPreference ? { berthPreference: String(p.berthPreference) } : {})
+    ...(p.berthPreference ? { berthPreference: String(p.berthPreference) } : {}),
+    ...(p.foodPreference ? { foodPreference: String(p.foodPreference) } : {})
   }));
   return {
     sessionId: s.sessionId,

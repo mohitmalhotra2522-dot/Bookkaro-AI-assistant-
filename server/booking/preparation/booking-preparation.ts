@@ -181,6 +181,7 @@ export function buildBookingPreparation(s: BookingSession): BookingPreparationVi
     passengersCount: s.passengersCount ?? null,
     passengerDetails: (s.passengers || []).map((p, i) => ({
       index: i + 1, passengerId: p.id, name: p.name, age: p.age, gender: p.gender, berthPreference: p.berthPreference,
+      ...(p.foodPreference ? { foodPreference: p.foodPreference } : {}),
       complete: passengerValidator.missingRequired(p).length === 0
     })),
     availabilityResult: availabilityStatus(s),

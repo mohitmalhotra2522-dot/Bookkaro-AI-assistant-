@@ -90,7 +90,8 @@ export class IrctcHandoffAdapter {
         name: p.name,
         age: p.age,
         gender: p.gender,
-        berthPreference: p.berthPreference
+        berthPreference: p.berthPreference,
+        ...(p.foodPreference ? { foodPreference: p.foodPreference } : {})
       })),
       fare: session.fare ? { total: session.fare.total, currency: session.fare.currency, dataSource: session.fare.dataSource } : null
     };

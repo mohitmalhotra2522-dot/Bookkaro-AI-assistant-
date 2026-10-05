@@ -85,7 +85,10 @@ export class RailCoreProvider extends LiveRailwayProvider {
         ...(Array.isArray(d.running_days) ? { runsOn: d.running_days.map((x: any) => String(x)) } : {}),
         classes: (Array.isArray(d.classes) ? d.classes : []).map((c: any) => String(c).toUpperCase()).filter((c: string) => VALID_CLASSES.has(c))
           .map((code: string) => ({ code, availability: null, availabilityStatus: 'UNKNOWN', fare: null, fareCurrency: null } as ClassOption)),
-        timetable: stops.map(({ station, stationName, arrival, departure }) => ({ station, stationName, arrival, departure }))
+        timetable: stops.map(({ station, stationName, arrival, departure }) => ({ station, stationName, arrival, departure })),
+        // P38: RailCore schedule flags, passed through only when the provider sends a boolean
+        ...(typeof d.catering === 'boolean' || typeof d.pantry === 'boolean'
+          ? { facilities: { ...(typeof d.catering === 'boolean' ? { catering: d.catering } : {}), ...(typeof d.pantry === 'boolean' ? { pantry: d.pantry } : {}) } } : {})
       };
       return { ok: true, data: details, meta: this.meta(t0, s.fresh) };
     });

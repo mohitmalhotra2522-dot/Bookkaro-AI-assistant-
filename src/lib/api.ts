@@ -184,3 +184,36 @@ export async function transcribeSpeech(req: { sessionId: string; voiceTurnId: st
   if (res.ok && body && typeof body.transcript === 'string' && body.voiceTurnId === req.voiceTurnId) return { ok: true, transcript: body.transcript, language: body.language ?? null };
   return { ok: false, code: typeof body?.error === 'string' && /^STT_[A-Z_]+$/.test(body.error) ? body.error : (res.ok ? 'STT_PROVIDER_BAD_RESPONSE' : 'STT_PROVIDER_UNAVAILABLE'), message: typeof body?.message === 'string' ? body.message : undefined };
 }
+
+// ───────────── P38: IRCTC-style passenger form (deterministic backend validation) ─────────────
+export interface PassengerFormSpec {
+  sessionId: string;
+  sessionVersion: number;
+  train: { number: string; name: string; origin?: string; destination?: string; departure?: string; arrival?: string; date?: string; dataSource?: string };
+  travelClass: string;
+  berth: { options: string[]; note: string | null };
+  food: { status: 'OFFERED' | 'NOT_INCLUDED' | 'UNKNOWN'; options: string[]; pantry: boolean | null; source: string | null; note: string };
+  maxPassengers: number;
+  passengersCount: number;
+  passengers: Array<{ name: string; age: number | null; gender: string | null; berthPreference: string | null; foodPreference: string | null }>;
+}
+export interface PassengerFormInput { name: string; age: number | string; gender: string; berthPreference?: string; foodPreference?: string }
+export type PassengerFormSubmitResult =
+  | { ok: true; sessionVersion: number; passengersCount: number; changedFields: number; bookingState: string }
+  | { ok: false; status: number; code: string; message: string; fieldErrors?: Array<{ passengerIndex: number; field: string; message: string }> };
+
+export async function getPassengerForm(sessionId: string): Promise<{ ok: true; spec: PassengerFormSpec } | { ok: false; status: number; code: string; message: string }> {
+  const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/passenger-form`);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, status: res.status, code: data.code || 'ERROR', message: data.message || 'Passenger form abhi nahi khul paaya.' };
+  return { ok: true, spec: data };
+}
+
+export async function submitPassengerForm(sessionId: string, body: { passengers: PassengerFormInput[]; expectedSessionVersion: number }): Promise<PassengerFormSubmitResult> {
+  const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/passenger-form`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) return { ok: false, status: res.status, code: data.code || 'ERROR', message: data.message || 'Details save nahi ho paayi.', fieldErrors: data.fieldErrors };
+  return { ok: true, ...data };
+}

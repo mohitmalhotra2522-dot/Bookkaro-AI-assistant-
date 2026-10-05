@@ -9,6 +9,7 @@ import { MessageBubble } from '../components/chat/MessageBubble';
 import { MicButton, voiceVisual } from '../components/voice/MicButton';
 import { TrainResults } from '../components/trains/TrainCard';
 import { PassengerList } from '../components/passengers/PassengerCard';
+import { PassengerFormPage } from '../components/passengers/PassengerFormPage';
 import { BookingReviewCard } from '../components/review/BookingReviewCard';
 import { SessionInspector, type InspectorMeta } from '../components/debug/SessionInspector';
 import type { VoiceTranscriptInfo } from '@shared/voice/transcript';
@@ -45,6 +46,8 @@ const App: React.FC = () => {
   const [activeTools, setActiveTools] = useState<string[]>([]);
   const [sheet, setSheet] = useState<null | 'menu' | 'settings' | 'trip' | 'suggest'>(null);
   const [showInspector, setShowInspector] = useState(false);
+  // P38: full-screen IRCTC-style passenger form (opens only once a train + class are selected)
+  const [paxForm, setPaxForm] = useState(false);
   const lastUserTextRef = useRef<string>('');
   const appStatus = useAppStatus();
 
@@ -263,6 +266,15 @@ const App: React.FC = () => {
     focusComposer();
   };
 
+  const ctxAny: any = context;
+  const canOpenPaxForm = !!sessionId && !!ctxAny?.selectedTrain && !!ctxAny?.selectedClass && !['HANDOFF_READY', 'BOOKING_SUBMITTED', 'CONFIRMED', 'COMPLETE'].includes(String(ctxAny?.bookingState || ''));
+  const openPaxForm = () => { if (canOpenPaxForm && !isLoading) { setSheet(null); setPaxForm(true); } };
+  /** After the backend accepted the form, ask for the review in a VISIBLE chat turn (fare / availability re-checked by the API). */
+  const onPaxSaved = (count: number) => {
+    setPaxForm(false);
+    void send(`Passenger details form se bhar di hain (${count} passenger${count > 1 ? 's' : ''}) — review dikhao`, 'TEXT');
+  };
+
   const retry = lastUserTextRef.current ? () => { setError(null); void send(lastUserTextRef.current, 'TEXT'); } : undefined;
 
   const micLabel =
@@ -312,7 +324,7 @@ const App: React.FC = () => {
           trainNumber: t.trainNumber || t.number,
           trainName: t.trainName || t.name,
           origin: t.origin, destination: t.destination, departure: t.departure, arrival: t.arrival, duration: t.duration,
-          runsOn: t.runsOn, retrievedAt: t.retrievedAt,
+          runsOn: t.runsOn, retrievedAt: t.retrievedAt, provider: t.provider,
           classes: t.classes || (t.availableClasses || []).map((code: string) => ({ code, availability: null, availabilityStatus: 'UNKNOWN' as const, fare: null, fareCurrency: null }))
         }));
         const first = trains[0];
@@ -330,7 +342,8 @@ const App: React.FC = () => {
         return (
           <PassengerList key={key} passengers={d.passengers || []}
             onEdit={(p, i) => prefill(`Passenger ${i + 1}${p.name ? ` (${p.name})` : ''} ki details badalni hain: `)}
-            onAdd={() => prefill('Ek aur passenger add karna hai: ')} />
+            onAdd={() => prefill('Ek aur passenger add karna hai: ')}
+            onOpenForm={canOpenPaxForm ? openPaxForm : undefined} />
         );
       case 'review':
         return (
@@ -442,6 +455,12 @@ const App: React.FC = () => {
               </div>
               <div className="bk-chat__dock">
                 <div className="bk-chat__dock-inner">
+                  {canOpenPaxForm && !isLoading && (
+                    <div className="bk-formcta">
+                      <span>{ctxAny?.selectedTrain?.number} · {ctxAny?.selectedClass} — passenger details form mein bharein</span>
+                      <button type="button" className="bk-btn bk-btn--primary bk-btn--sm" onClick={openPaxForm}>Passenger form</button>
+                    </div>
+                  )}
                   {voicePanelEl}
                   {composerEl('dock')}
                 </div>
@@ -455,6 +474,7 @@ const App: React.FC = () => {
         <div className="bk-toast"><ErrorBanner onRetry={retry} onDismiss={() => setError(null)} /></div>
       )}
       {sheets}
+      {paxForm && sessionId && <PassengerFormPage sessionId={sessionId} onClose={() => setPaxForm(false)} onSaved={onPaxSaved} />}
     </div>
   );
 };

@@ -27,6 +27,7 @@ import { webResearchStatus } from './research/web-research-service';
 import { createServerSTT, createServerTTS, voiceProviderStatus } from './voice/live/openai-compatible-voice';
 import { registerVoiceRoutes } from './voice/live/voice-routes';
 import { createElevenLabsBatchSTT } from './voice/stt/elevenlabs-batch-stt';
+import { applyForm, buildFormSpec, fetchTrainFacilities, formNotReady, validateForm } from './booking/passenger-form';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -154,6 +155,44 @@ server.get('/api/session/:id/turn-events', async (request, reply) => {
   if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
   const after = Math.max(0, Number((request.query as any)?.after) || 0);
   return reply.send({ sessionId: id, events: turnEngine.events.since(id, after).slice(0, 200), lastSeq: turnEngine.events.lastSeq(id) });
+});
+
+/**
+ * P38 — IRCTC-style passenger form (full-screen page). GET returns the class-specific berth choices and the provider's
+ * catering info for the selected train (fetched fresh from the provider that produced the results); POST applies the
+ * form as an explicit user edit after deterministic validation. Values are never logged.
+ */
+server.get('/api/session/:id/passenger-form', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  const s = stateManager.getSession(id);
+  const nr = formNotReady(s);
+  if (nr) return reply.status(nr.status).send({ code: nr.code, message: nr.message });
+  const facilities = await fetchTrainFacilities(s);
+  return reply.send(buildFormSpec(stateManager.getSession(id), facilities));
+});
+
+server.post('/api/session/:id/passenger-form', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  const body = (request.body || {}) as any;
+  const s = stateManager.getSession(id);
+  const nr = formNotReady(s);
+  if (nr) return reply.status(nr.status).send({ code: nr.code, message: nr.message });
+  if (body.expectedSessionVersion !== undefined && Number(body.expectedSessionVersion) !== s.sessionVersion) {
+    return reply.status(409).send({ code: 'STALE_SESSION_VERSION', message: 'Booking beech mein badal gayi — form dobara khol kar details check kijiye.', sessionVersion: s.sessionVersion });
+  }
+  // catering is re-checked fresh from the provider on every submit (never trusted from the client)
+  const facilities = await fetchTrainFacilities(s);
+  const v = validateForm(body, stateManager.getSession(id), facilities);
+  if (!v.ok) return reply.status(v.error.status).send({ code: v.error.code, message: v.error.message, fieldErrors: v.error.fieldErrors });
+  if (stateManager.getSession(id).sessionVersion !== s.sessionVersion) {
+    return reply.status(409).send({ code: 'STALE_SESSION_VERSION', message: 'Booking beech mein badal gayi — form dobara khol kar details check kijiye.', sessionVersion: stateManager.getSession(id).sessionVersion });
+  }
+  const r = applyForm(stateManager, id, v.passengers);
+  request.log.info({ sessionId: id, passengers: r.passengersCount, changedFields: r.changedFields, countChanged: r.countChanged }, 'passenger form applied');
+  const after = stateManager.getSession(id);
+  return reply.send({ ok: true, sessionVersion: after.sessionVersion, passengersCount: r.passengersCount, changedFields: r.changedFields, invalidated: r.invalidated, bookingState: after.bookingState });
 });
 
 /** Prompt 18: barge-in / stop — marks the presentation or in-flight turn INTERRUPTED (no provider cancel, session untouched). */

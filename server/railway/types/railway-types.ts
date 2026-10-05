@@ -129,6 +129,8 @@ export interface TrackRequest { trainNumber: string; }
 export interface PNRRequest { pnr: string; }
 
 export interface TrainDetails extends NormalizedTrain {
+  /** P38: provider-reported on-board facilities (absent = the provider does not say). */
+  facilities?: { catering?: boolean; pantry?: boolean };
   timetable?: Array<{ station: StationCode; stationName?: string; arrival?: string; departure?: string }>;
 }
 

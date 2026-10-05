@@ -37,7 +37,8 @@ export function buildBookingSnapshot(s: BookingSession, now: number): SnapshotBu
     selectedClass: cls,
     passengers: (s.passengers || []).map((p: any) => ({
       passengerId: String(p.id), name: String(p.name ?? ''), age: Number(p.age), gender: p.gender,
-      ...(p.berthPreference ? { berthPreference: String(p.berthPreference) } : {})
+      ...(p.berthPreference ? { berthPreference: String(p.berthPreference) } : {}),
+      ...(p.foodPreference ? { foodPreference: String(p.foodPreference) } : {})
     })),
     availabilitySnapshot: { status: String(a.status), available: !!a.available, retrievedAt: a.retrievedAt, dataSource: a.dataSource },
     fareSnapshot: { perPassenger: f.perPassenger, total: f.total, currency: f.currency || 'INR', passengersCount: f.passengersCount, retrievedAt: f.retrievedAt, dataSource: f.dataSource },

@@ -91,7 +91,7 @@ export interface BookingPreparationView {
   selectedClass: string | null;
   passengersCount: number | null;
   /** 1-based deterministic index → stable passenger id + field presence. */
-  passengerDetails: Array<{ index: number; passengerId: string; name?: string; age?: number; gender?: string; berthPreference?: string; complete: boolean }>;
+  passengerDetails: Array<{ index: number; passengerId: string; name?: string; age?: number; gender?: string; berthPreference?: string; foodPreference?: string; complete: boolean }>;
   availabilityResult: { status: DependencyStatus; value?: string; fetchedAt?: string; toolExecutionId?: string };
   fareResult: { status: DependencyStatus; total?: number; perPassenger?: number; fetchedAt?: string; toolExecutionId?: string };
   reviewVersion: number | null;
@@ -185,7 +185,7 @@ export interface ReviewSnapshot {
   journey: { origin: string; destination: string; date: string; originName?: string; destinationName?: string };
   train: { number: string; name?: string; departure?: string; arrival?: string; resultSetId: string | null };
   travelClass: string;
-  passengers: Array<{ index: number; name: string; age: number; gender: string; berthPreference?: string }>;
+  passengers: Array<{ index: number; name: string; age: number; gender: string; berthPreference?: string; foodPreference?: string }>;
   availability: { status: SnapshotAvailabilityStatus; value?: string; retrievedAt?: string; toolExecutionId?: string; errorCode?: string | null };
   fare: { status: SnapshotFareStatus; total?: number; perPassenger?: number; currency?: string; passengersCount?: number; retrievedAt?: string; toolExecutionId?: string; errorCode?: string | null };
   dataSource?: string;

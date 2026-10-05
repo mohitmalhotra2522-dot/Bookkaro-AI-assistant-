@@ -82,3 +82,23 @@ export const DEFAULT_PREPARATION_POLICY = {
 export const PASSENGER_REQUIRED_FIELDS = ['name', 'age', 'gender'] as const;
 export const PASSENGER_OPTIONAL_FIELDS = ['berthPreference'] as const;
 export const MAX_PASSENGERS = 6;
+
+/**
+ * P38 — berth choices per class (standard Indian Railways coach layout, as offered on the IRCTC passenger form).
+ * Shown only for a class the provider listed for the selected train. Seat classes (CC / EC / 2S / EA) and unknown
+ * classes have NO berth choice — the seat is allotted by the railway (nothing invented).
+ */
+export const BERTH_OPTIONS_BY_CLASS: Readonly<Record<string, readonly BerthPreferenceCode[]>> = Object.freeze({
+  SL: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
+  '3A': ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
+  '3E': ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
+  '2A': ['NO_PREFERENCE', 'LOWER', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
+  '1A': ['NO_PREFERENCE', 'LOWER', 'UPPER'],
+  FC: ['NO_PREFERENCE', 'LOWER', 'UPPER']
+});
+type BerthPreferenceCode = 'LOWER' | 'MIDDLE' | 'UPPER' | 'SIDE_LOWER' | 'SIDE_UPPER' | 'NO_PREFERENCE';
+export function berthOptionsForClass(cls: string | null | undefined): readonly BerthPreferenceCode[] {
+  return BERTH_OPTIONS_BY_CLASS[String(cls || '').toUpperCase()] || [];
+}
+/** P38 — meal choice, offered ONLY when the provider says catering is included for the selected train. */
+export const FOOD_PREFERENCES = ['VEG', 'NON_VEG', 'NO_FOOD'] as const;
