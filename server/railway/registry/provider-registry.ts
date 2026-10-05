@@ -2,10 +2,13 @@ import type { RailwayProvider } from '../providers/railway-provider';
 import { MockRailwayProvider } from '../providers/mock/mock-provider';
 import { createFailoverProvider, createLiveProvider, parseProviderChain } from '../providers/live/live-config';
 import { scopedProviderId } from '../providers/provider-scope';
-import { providerToolCatalog } from '../../ai/tools/provider-tools';
+import { providerToolCatalog, setWebBlockedLookup } from '../../ai/tools/provider-tools';
 import { PROVIDER_CAPABILITY_MATRIX, type LiveProviderId } from '../providers/live/provider-capabilities';
 import type { RegisteredToolName } from '../../ai/tools/tool-registry';
-import { createWebProvider, enabledWebConnectors, WEB_CAPABILITY_MATRIX, WEB_PROVIDER_LABEL } from '../providers/web/web-providers';
+import { createWebProvider, enabledWebConnectors, blockedWebCapability, WEB_CAPABILITY_MATRIX, WEB_PROVIDER_LABEL } from '../providers/web/web-providers';
+
+// P39: a call for a web capability that robots.txt blocks / that only a private API offers is answered WEB_ACCESS_BLOCKED
+setWebBlockedLookup((provider, canonical) => { const b = blockedWebCapability(provider, canonical); return b ? { status: b.status, note: b.note } : null; });
 
 const LIVE_LABEL: Record<LiveProviderId, string> = { railcore: 'RailCore', railradar: 'RailRadar', railkit: 'RailKit' };
 /** Declared capability → canonical tool contract (GET_CANCELLED_TRAINS has no RailwayProvider contract → not exposed). */
@@ -41,8 +44,9 @@ export function registerLiveProviderTools(env: NodeJS.ProcessEnv = process.env):
 }
 
 const WEB_NOTE: Record<string, string> = {
-  erail: 'WEB DATA — UNVERIFIED (public eRail website, not a railway API): trains, timings, run days and coach classes only; NO seat availability and NO fare. Useful when the API providers fail or to cross-check. Always tell the user it is unverified web data.',
-  railyatri: 'WEB DATA — UNVERIFIED (crowd-sourced RailYatri page, not a railway API): live running status, delay, next station, platform. Always tell the user it is unverified and mention its "as of" time.'
+  erail: 'WEB_RAILWAY_SEARCH via the public eRail website — WEB DATA, UNVERIFIED (not a railway API): trains, timings, run days and coach classes only; NO seat availability (robots.txt blocks it) and NO fare (unverifiable). Use it when the API providers cannot answer, or when the user asks for web verification. Always tell the user it is unverified web data.',
+  railyatri: 'WEB_RAILWAY_STATUS via the RailYatri website — WEB DATA, UNVERIFIED, crowd-sourced (not a railway API): live running status, delay, next station, platform. Tell the user it is crowd-sourced / unverified and give its source-reported time.',
+  confirmtkt: 'WEB_RAILWAY_STATUS via the ConfirmTkt website — WEB DATA, UNVERIFIED (not affiliated with Indian Railways): running status, last reported station, delay and the source "Last Updated" time. ONLY live status: ConfirmTkt train search / PNR are robots-blocked; availability / fare have no public page.'
 };
 
 /**
@@ -67,6 +71,7 @@ export class RailwayProviderRegistry {
     // P38: web connectors (only reachable through their own provider tools / provider scope)
     this.register('erail', () => createWebProvider('erail'));
     this.register('railyatri', () => createWebProvider('railyatri'));
+    this.register('confirmtkt', () => createWebProvider('confirmtkt'));   // P39: robots-allowed running-status page only
 
     this.activeId = process.env.RAILWAY_PROVIDER || 'mock';
     // an unknown id / chain is a startup error, never a silent switch

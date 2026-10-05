@@ -28,6 +28,9 @@ import { createServerSTT, createServerTTS, voiceProviderStatus } from './voice/l
 import { registerVoiceRoutes } from './voice/live/voice-routes';
 import { createElevenLabsBatchSTT } from './voice/stt/elevenlabs-batch-stt';
 import { applyForm, buildFormSpec, fetchTrainFacilities, formNotReady, validateForm } from './booking/passenger-form';
+import { enabledWebConnectors, webCapabilityMatrix } from './railway/providers/web/web-providers';
+import { IRCTC_BRIDGE_TOKEN_HEADER } from '@shared/irctc-handoff';
+import { mockIrctcEnabled, renderMockIrctc, MOCK_IRCTC_SCENARIOS } from './irctc/mock/mock-irctc';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -217,6 +220,73 @@ server.get('/api/session/:id/conversation', async (request, reply) => {
   if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
   return reply.send({ sessionId: id, turns: turnEngine.getTurns(id) });
 });
+
+/** P39: verified web-source capability matrix (static verification + runtime lastChecked). Never claims more. */
+server.get('/api/railway/web-capabilities', async (_, reply) => {
+  return reply.send({ enabled: enabledWebConnectors(), sources: webCapabilityMatrix(enabledWebConnectors()), authoritative: false,
+    note: 'Web data is unverified and never used for booking review; seat availability / fare / PNR are API-only.' });
+});
+
+/**
+ * P39 — user-controlled IRCTC handoff.
+ * Session owner (BookKaro app / Assist page): GET view + snapshot + bridge token; POST create / language.
+ * Extension: GET snapshot / POST metadata-only events with the per-handoff bridge token header.
+ * Nothing here accepts or returns a password, OTP, CAPTCHA, card / UPI detail, cookie or IRCTC token.
+ */
+const irctc = () => orchestrator.preparation.irctcHandoffs;
+server.get('/api/session/:id/irctc-handoff', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ code: 'SESSION_NOT_FOUND' });
+  reply.header('Cache-Control', 'no-store');
+  const a = irctc().ownerAccess(stateManager.getSession(id), Date.now());
+  if (!a) return reply.status(404).send({ code: 'IRCTC_HANDOFF_NOT_FOUND', message: 'Abhi koi IRCTC handoff nahi hai — pehle booking review confirm kijiye.' });
+  return reply.send(a);
+});
+
+server.post('/api/session/:id/irctc-handoff', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ code: 'SESSION_NOT_FOUND' });
+  const body = (request.body as any) || {};
+  if (!checkNoSensitiveData(body).ok) return reply.status(400).send({ code: 'SENSITIVE_DATA_REJECTED', message: 'Password, OTP, CAPTCHA, card/UPI details ya tokens yahan accept nahi kiye jaate.' });
+  reply.header('Cache-Control', 'no-store');
+  const s = stateManager.getSession(id);
+  if (body.action === 'language') {
+    const r = irctc().setLanguage(s, body.language === 'hi' ? 'hi' : 'en', Date.now());
+    return r.ok ? reply.send({ ok: true, view: r.value }) : reply.status(r.status).send({ code: r.code, message: r.message });
+  }
+  if (body.action !== 'create') return reply.status(400).send({ code: 'INVALID_ACTION' });
+  // backend-validated: only the CURRENT confirmed review (booking handoff READY) can be handed to IRCTC
+  const r = irctc().create(s, Date.now(), { language: body.language === 'hi' ? 'hi' : 'en' });
+  if (!r.ok) return reply.status(r.status).send({ code: r.code, message: r.message });
+  const a = irctc().ownerAccess(stateManager.getSession(id), Date.now());
+  return reply.send({ ok: true, created: r.value.created, ...a });
+});
+
+server.get('/api/irctc/handoff/:handoffId', async (request, reply) => {
+  const { handoffId } = request.params as any;
+  reply.header('Cache-Control', 'no-store');
+  const sid = irctc().sessionOf(handoffId);
+  const r = irctc().snapshot(handoffId, request.headers[IRCTC_BRIDGE_TOKEN_HEADER], sid && stateManager.hasSession(sid) ? stateManager.getSession(sid) : undefined, Date.now());
+  return r.ok ? reply.send(r.value) : reply.status(r.status).send({ code: r.code, message: r.message });
+});
+
+server.post('/api/irctc/handoff/:handoffId/events', async (request, reply) => {
+  const { handoffId } = request.params as any;
+  reply.header('Cache-Control', 'no-store');
+  const sid = irctc().sessionOf(handoffId);
+  const r = irctc().applyEvent(handoffId, request.headers[IRCTC_BRIDGE_TOKEN_HEADER], request.body, sid && stateManager.hasSession(sid) ? stateManager.getSession(sid) : undefined, Date.now());
+  return r.ok ? reply.send({ ok: true, view: r.value }) : reply.status(r.status).send({ code: r.code, message: r.message });
+});
+
+/** P39: MockIRCTC (20 scenarios) for extension development — never served in production. */
+if (mockIrctcEnabled(process.env)) {
+  server.get('/api/dev/mock-irctc', async (_, reply) => reply.type('text/html').send(renderMockIrctc(null)));
+  server.get('/api/dev/mock-irctc/:scenario', async (request, reply) => {
+    const id = String((request.params as any).scenario || '');
+    if (!MOCK_IRCTC_SCENARIOS.some(x => x.id === id)) return reply.status(404).send({ code: 'UNKNOWN_SCENARIO' });
+    return reply.type('text/html').send(renderMockIrctc(id, { train: String((request.query as any)?.train || '') }));
+  });
+}
 
 /**
  * Explicit handoff consumption boundary (Prompt 11). NOT called by the conversation.

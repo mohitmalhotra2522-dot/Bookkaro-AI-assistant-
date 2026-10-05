@@ -532,3 +532,13 @@ img, svg { display: block; }
 @media (max-width: 380px) { .bk-field-row { flex-direction: column; } .bk-field--age { width: 100%; } }
 .bk-formcta { display: flex; align-items: center; gap: 10px; justify-content: space-between; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 8px 10px 8px 12px; margin-bottom: 8px; font-size: 13px; color: var(--text-2); }
 .bk-tag--web { background: var(--warn-bg); color: var(--warn); }
+
+/* P39 — IRCTC Assist page */
+.bk-irctc__row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.bk-irctc__row:last-child { border-bottom: 0; }
+.bk-irctc__val { font-weight: 600; color: var(--text); word-break: break-word; }
+.bk-irctc__checklist { list-style: none; padding: 0; margin: 6px 0 10px; display: grid; gap: 6px; }
+.bk-irctc__checklist li { display: flex; align-items: center; gap: 8px; }
+.bk-irctc__lang { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bk-irctc__pax { padding: 4px 0 8px; border-bottom: 1px dashed var(--border); }
+.bk-irctc__pax:last-child { border-bottom: 0; }

@@ -37,6 +37,18 @@ const KNOWN_UNEXPOSED_SUFFIXES = new Set(['cancelled_trains', 'status']);
  *  P38: eRail + RailYatri now have robots-allowed WEB connectors (unverified, live mode only); ConfirmTkt stays out
  *  (robots.txt disallows its train / PNR pages, private token API). */
 export const NOT_IMPLEMENTED_PROVIDERS: readonly string[] = Object.freeze(['confirmtkt']);
+/** P39: ConfirmTkt may ONLY be registered as its own web connector with its robots-allowed capability (TRACK_TRAIN —
+ *  public running-status page). Its train search / PNR pages are robots-disallowed and availability / fare are a private
+ *  API, so any other registration is refused and those calls are answered WEB_ACCESS_BLOCKED. */
+const RESTRICTED_PROVIDER_CAPS: Readonly<Record<string, { registryId: string; capabilities: readonly string[] }>> = Object.freeze({
+  confirmtkt: { registryId: 'confirmtkt', capabilities: ['TRACK_TRAIN'] }
+});
+const restrictedOk = (info: { id: string; registryId: string; capabilities: readonly string[] }) => { const r = RESTRICTED_PROVIDER_CAPS[info.id];
+  return !!r && info.registryId === r.registryId && info.capabilities.length > 0 && info.capabilities.every(c => r.capabilities.includes(c)); };
+
+/** P39: capabilities known to be robots-blocked / private / non-public for a web source → WEB_ACCESS_BLOCKED (never fetched). */
+let blockedLookup: (provider: string, canonical: string) => { status: string; note: string } | null = () => null;
+export function setWebBlockedLookup(fn: typeof blockedLookup): void { blockedLookup = fn; }
 
 export interface ProviderConnectorInfo {
   /** Tool prefix + provider id the LLM sees (`railcore`). */
@@ -54,13 +66,14 @@ export interface ProviderConnectorInfo {
 export type ProviderToolResolution =
   | { kind: 'PROVIDER_TOOL'; provider: string; canonical: RegisteredToolName; registryId: string }
   | { kind: 'NOT_IMPLEMENTED'; provider: string; requested: string }
-  | { kind: 'UNSUPPORTED'; provider: string; requested: string };
+  | { kind: 'UNSUPPORTED'; provider: string; requested: string }
+  | { kind: 'BLOCKED'; provider: string; requested: string; status: string; note: string };
 
 class ProviderToolCatalog {
   private readonly connectors = new Map<string, ProviderConnectorInfo>();
 
   register(info: ProviderConnectorInfo): void {
-    if (NOT_IMPLEMENTED_PROVIDERS.includes(info.id)) throw new Error(`${info.id} has no authorized integration`);
+    if (NOT_IMPLEMENTED_PROVIDERS.includes(info.id) && !restrictedOk(info)) throw new Error(`${info.id} has no authorized integration for ${info.capabilities.join(',')}`);
     this.connectors.set(info.id, Object.freeze({ ...info, capabilities: Object.freeze([...info.capabilities]) }));
   }
   unregister(id: string): void { this.connectors.delete(id); }
@@ -79,10 +92,13 @@ class ProviderToolCatalog {
     if (!m) return null;
     const [, provider, suffix] = m;
     const canonical = SUFFIX_TO_CANONICAL.get(suffix);
-    if (NOT_IMPLEMENTED_PROVIDERS.includes(provider)) return { kind: 'NOT_IMPLEMENTED', provider, requested: n };
     const c = this.connectors.get(provider);
+    if (NOT_IMPLEMENTED_PROVIDERS.includes(provider) && !c) return { kind: 'NOT_IMPLEMENTED', provider, requested: n };
     if (!c) return canonical || KNOWN_UNEXPOSED_SUFFIXES.has(suffix) ? { kind: 'NOT_IMPLEMENTED', provider, requested: n } : null;
-    if (!canonical || !c.capabilities.includes(canonical)) return { kind: 'UNSUPPORTED', provider, requested: n };
+    if (!canonical || !c.capabilities.includes(canonical)) {
+      const b = canonical ? blockedLookup(provider, canonical) : null;
+      return b ? { kind: 'BLOCKED', provider, requested: n, status: b.status, note: b.note } : { kind: 'UNSUPPORTED', provider, requested: n };
+    }
     return { kind: 'PROVIDER_TOOL', provider, canonical, registryId: c.registryId };
   }
 
@@ -125,6 +141,7 @@ const WHAT: Partial<Record<RegisteredToolName, string>> = {
 };
 
 function providerDescription(c: ProviderConnectorInfo, canonical: RegisteredToolName, d: ToolDefinition): string {
+  if (/\(web\)$/.test(c.label)) return `${c.label} — PUBLIC WEBSITE, NOT a railway API: ${WHAT[canonical] || d.description}. Calls ${c.label.replace(/ \(web\)$/, '')} ONLY; failures come back to you.${c.note ? ` ${c.note}` : ''}`.slice(0, 900);
   return `${c.label} (railway data provider): ${WHAT[canonical] || d.description}. Calls ${c.label} ONLY — if it fails, the error comes back to you `
     + `and you decide whether to try another provider tool.${c.note ? ` ${c.note}` : ''} ${d.description}`.slice(0, 900);
 }
@@ -154,11 +171,12 @@ export function inProviderScope<T>(provider: string | undefined | null, fn: () =
  * NO_RESULTS (a valid answer) — never a failure; a timeout is never "no trains" / "0 availability".
  */
 export type ProviderStatus = 'SUCCESS' | 'NO_RESULTS' | 'PROVIDER_TIMEOUT' | 'PROVIDER_UNAVAILABLE' | 'RATE_LIMITED' | 'AUTH_ERROR'
-  | 'INVALID_REQUEST' | 'DATA_UNAVAILABLE' | 'PROVIDER_NOT_IMPLEMENTED' | 'UNKNOWN';
+  | 'INVALID_REQUEST' | 'DATA_UNAVAILABLE' | 'PROVIDER_NOT_IMPLEMENTED' | 'WEB_ACCESS_BLOCKED' | 'UNKNOWN';
 
 export function providerStatusOf(r: { ok: boolean; empty?: boolean; error?: { code?: string } | null }): ProviderStatus {
   if (r.ok) return r.empty ? 'NO_RESULTS' : 'SUCCESS';
   const c = String(r.error?.code || '').toUpperCase();
+  if (c === 'WEB_ACCESS_BLOCKED') return 'WEB_ACCESS_BLOCKED';
   if (c === 'PROVIDER_NOT_IMPLEMENTED' || c === 'TOOL_NOT_IMPLEMENTED' || c === 'NOT_CONFIGURED') return 'PROVIDER_NOT_IMPLEMENTED';
   if (/TIMEOUT|TIMED_OUT/.test(c)) return 'PROVIDER_TIMEOUT';
   if (/RATE_?LIMIT|TOO_MANY/.test(c)) return 'RATE_LIMITED';

@@ -10,6 +10,9 @@ meaning and tools. The backend is a strict safety and validation boundary. **Pha
 - railway data comes from `MockRailwayProvider` (labelled non-live) by default. **Since P35:** `RAILWAY_PROVIDER=live`
   enables the real RailCore → RailKit → RailRadar failover chain (see `docs/P35-REAL-INTEGRATION.md`);
 - real booking, payment, IRCTC login and submission are **disabled** (interface-only handoff).
+  **Since P39:** after a confirmed current review the user can open a *user-controlled IRCTC handoff* — the BookKaro
+  Chrome extension (`extension/`) prefills non-sensitive validated fields on IRCTC; the user does login, CAPTCHA, OTP,
+  the final Book/Continue tap and payment personally (see §6f).
 
 Stack:
 - server: Node 20 + TypeScript + Fastify (`server/`);
@@ -102,6 +105,7 @@ Env:
 | 36-C.1.1 | `b2afeca` | voice layer: TTS renderer, concise fact-weighted speech, STT fallback setting |
 | 37 | see `git log` | LLM-native DIRECT multi-provider railway tools (`railcore_*`, `railradar_*`), no hidden failover — see §6d |
 | 38 | see `git log` | Devanagari names/numbers, long messages (held passengers), agent token budget, IRCTC-like passenger form (berth/food from real data), eRail + RailYatri web connectors (unverified) — see §6e |
+| 39 | see `git log` | API-first web fallback (ConfirmTkt live status, capability matrix, SOURCE_CONFLICT) + safe IRCTC handoff + Chrome extension prefill — §6f |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -302,6 +306,54 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   switch). ConfirmTkt stays PROVIDER_NOT_IMPLEMENTED (robots + private API). Booking review stays API-only.
 - Tests: `tests/unit/p38-hindi-form-web.test.ts` (20). Live harness outside the repo: `/home/user/p38/` (`g3.py`,
   `cases-final.json`, `form_test.py`).
+
+## 6f. P39 — API-first web fallback + safe IRCTC handoff + extension prefill
+
+**Web fallback (LLM-chosen, never automatic)**
+- Order in the prompt: RailCore → RailRadar → web. A web tool is used only after the LLM saw the API failures
+  (`priorApiFailures` is attached to web results). The backend never switches.
+- `WEB_SOURCE_CAPABILITIES` (`server/railway/providers/web/web-providers.ts`, `GET /api/railway/web-capabilities`) is the
+  verified matrix (2026-10-05): eRail SEARCH = IMPLEMENTED (availability BLOCKED_BY_ROBOTS, fare UNVERIFIABLE);
+  RailYatri LIVE_STATUS = IMPLEMENTED (availability PRIVATE_API, fare page 404); ConfirmTkt LIVE_STATUS = IMPLEMENTED
+  (`/train-running-status/{no}`, server-rendered, robots-allowed; search + PNR BLOCKED_BY_ROBOTS). Web availability and
+  web fare tools are NOT exposed. A blocked capability returns `WEB_ACCESS_BLOCKED` without any fetch.
+- `toWebRailwayResult` envelope: source, label, `verification: UNVERIFIED_WEB`, freshness (`WEB_REPORTED_TIME` when the page
+  shows "Last Updated", `WEB_CURRENT` for search, else `WEB_UNVERIFIED`; API = `LIVE_API`). No caching — "abhi / dobara"
+  makes a new call (validator still needs the train number in the user's message; it never guesses).
+- **SOURCE_CONFLICT**: in one turn, two providers returning different availability / fare for the same
+  train|class|date → `sourceConflict {kind, values[{provider, value}]}` goes to the LLM, the conflicting session
+  fare/availability is removed (no silent pick), `s.sourceConflicts` keeps the last 5 (no values). Provider = the id the
+  LLM named (`railcore`, not `mock-railcore`).
+- Web data is never authoritative booking data; the review still needs API availability + fare.
+
+**IRCTC handoff**
+- `shared/irctc-handoff.ts` (statuses, events, `IRCTC_TEXT`, max 6 passengers, TTL 20 min, bridge-token header).
+- `server/irctc/handoff/irctc-handoff-manager.ts` — created only from a READY booking handoff + VALID confirmation +
+  current review fingerprint (inside the existing confirm path, **no new booking events** — p10/p11 pin the sequence).
+  Snapshot = validated values only (no secrets). `parseEvent` accepts metadata only (field keys + reason codes; unknown
+  keys rejected; sensitive data → 400). COMPLETED only from the IRCTC confirmation page; flow ended without it →
+  BOOKING_STATUS_UNKNOWN (an UNKNOWN can still be resolved by a later confirmation/failure page; everything else
+  terminal stays terminal). Booking details change → STALE_HANDOFF. BookingSession is never set COMPLETE.
+- `irctc-station-formatter.ts` — station "NAME - CODE" queries, DD/MM/YYYY, class labels "(CC)", passengers
+  (`notConfirmed` reasons e.g. NAME_LENGTH_IRCTC_3_16, GENDER_NOT_REPRESENTABLE).
+- Routes: `GET|POST /api/session/:id/irctc-handoff` (owner: view + snapshot + bridgeToken),
+  `GET /api/irctc/handoff/:id` + `POST /api/irctc/handoff/:id/events` (header `X-BookKaro-Bridge-Token`),
+  dev only `GET /api/dev/mock-irctc[/:scenario][?train=NNNNN]` (disabled when `RENDER` is set / production).
+- UI: `irctc_handoff` card → `src/components/irctc/IrctcAssistPage.tsx` (values + copy buttons, user-only checklist,
+  language EN/हिंदी, "Send to extension", "flow ended without confirmation" button).
+- **Extension** (`extension/`, MV3, load unpacked): `bookkaro-bridge.js` (same-window postMessage on the BookKaro origin)
+  → `background.js` (`chrome.storage.session`: apiBase, handoffId, bridgeToken only) → `irctc-content.js` +
+  `irctc-core.js` (UMD; unit-tested with happy-dom; `extension/package.json` = commonjs only for Node tests).
+  Fills only visible normal controls; never types into login / CAPTCHA / OTP / payment / mobile fields; Search / Book Now
+  / Continue / Pay are **highlighted, never clicked**; user edits always win (pause + ask); a passenger page showing a
+  different train than the review → nothing filled, paused (TRAIN_DIFFERENT_ON_PAGE) until the user taps Resume.
+  Mock-data handoffs are refused on real IRCTC. No `pagehide` "flow ended" (navigation also fires it).
+- **Real IRCTC DOM was never inspected** (Akamai 403 from the sandbox). MockIRCTC (20 scenarios,
+  `server/irctc/mock/mock-irctc.ts`) is a reconstruction; selectors use labels / placeholders / formcontrolname /
+  ARIA, not fixed ids. G5 (real IRCTC up to, not including, the paid booking) is **user-run**.
+- Tests: `tests/unit/p39-web-fallback.test.ts` (9), `tests/unit/p39-irctc-extension.test.ts` (14, happy-dom),
+  `tests/integration/p39-web-conflict.test.ts` (5), `tests/integration/p39-irctc-handoff.test.ts` (13). Real-Chromium
+  E2E harness (outside the repo): `/home/user/p39/e2e/e2e_p39.py` (mock LLM + mock railway + Vite + unpacked extension).
 
 ## 7. Practical gotchas
 

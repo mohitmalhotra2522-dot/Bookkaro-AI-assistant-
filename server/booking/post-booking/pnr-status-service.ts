@@ -153,6 +153,8 @@ export class LiveTrainStatusService {
   }
 }
 
+/** P38/P39: web connectors that answer TRACK_TRAIN (results keep their UNVERIFIED label). */
+const WEB_TRACK = new Set(['railyatri', 'confirmtkt']);
 /** P38: plain display text from a web connector result (bounded; never markup). */
 const webText = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() && !/[<>]/.test(v) ? v.trim().slice(0, 200) : undefined);
 
@@ -163,7 +165,7 @@ export function normalizeTrackResponse(raw: any, trainNumber: string, meta: { pr
     const c = String(raw.error?.code || '');
     if (/TIMEOUT/.test(c)) return fail('LIVE_STATUS_TIMEOUT');
     if (/UNAVAILABLE|NOT_IMPLEMENTED|NOT_SUPPORTED/.test(c)) return fail('LIVE_STATUS_UNAVAILABLE');
-    if (c === 'NOT_FOUND' && meta.providerId === 'railyatri') return fail('LIVE_STATUS_NOT_FOUND'); // P38: honest cause, not a generic error
+    if (c === 'NOT_FOUND' && WEB_TRACK.has(meta.providerId)) return fail('LIVE_STATUS_NOT_FOUND'); // P38: honest cause, not a generic error
     return fail();
   }
   const d = raw.data;
@@ -180,8 +182,8 @@ export function normalizeTrackResponse(raw: any, trainNumber: string, meta: { pr
       trainNumber, trainName: tn ?? null, currentStatus: status, currentStationCode: code ?? null, currentStationName: name ?? null, delayMinutes: delay,
       lastUpdated: upd ?? null, dataSource: /mock/i.test(meta.source) ? 'MOCK' : 'LIVE', providerId: meta.providerId, retrievedAt: new Date().toISOString(), fresh: true,
       // P38: a web connector (RailYatri) result keeps its UNVERIFIED label + the extra crowd-sourced fields it supplied
-      ...(meta.providerId === 'railyatri' ? {
-        verification: 'UNVERIFIED_WEB' as const, sourceNote: webText(d.sourceNote) ?? 'Crowd-sourced (RailYatri) — unverified.',
+      ...(WEB_TRACK.has(meta.providerId) ? {
+        verification: 'UNVERIFIED_WEB' as const, sourceNote: webText(d.sourceNote) ?? `${meta.providerId} website — unverified.`,
         ...(webText(d.nextStationName) ? { nextStationName: webText(d.nextStationName) } : {}), ...(webText(d.platformNumber) ? { platformNumber: webText(d.platformNumber) } : {}),
         ...(webText(d.statusAsOf) ? { statusAsOf: webText(d.statusAsOf) } : {})
       } : {})

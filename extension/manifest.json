@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "BookKaro IRCTC Assist",
+  "version": "0.39.0",
+  "description": "Pre-fills IRCTC journey and passenger forms from your confirmed BookKaro review. You log in, solve CAPTCHA, enter OTP, tap the final Book/Continue and pay yourself.",
+  "minimum_chrome_version": "110",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://bookkaro-ai-assistant.onrender.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://bookkaro-ai-assistant.onrender.com/*", "http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["bookkaro-bridge.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.irctc.co.in/nget/*", "http://localhost/api/dev/mock-irctc*", "http://127.0.0.1/api/dev/mock-irctc*"],
+      "js": ["irctc-core.js", "irctc-content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": { "default_title": "BookKaro IRCTC Assist", "default_popup": "options.html" }
+}

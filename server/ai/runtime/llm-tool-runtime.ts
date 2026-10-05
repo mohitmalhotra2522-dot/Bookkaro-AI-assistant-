@@ -43,6 +43,7 @@ export function mapProviderToolCall(tc: ToolCall): ToolCall {
   const r = providerToolCatalog.resolve(tc.name);
   if (!r) return tc;
   if (r.kind === 'PROVIDER_TOOL') return { ...tc, name: r.canonical, provider: r.provider, toolName: String(tc.name) };
+  if (r.kind === 'BLOCKED') return { ...tc, toolName: String(tc.name), webAccessBlocked: { provider: r.provider, status: r.status, note: r.note } } as any;
   return { ...tc, toolName: String(tc.name), providerNotImplemented: r.provider };
 }
 import { ToolCallValidator, type ValidatedToolCall } from '../tools/tool-call-validator';
@@ -50,7 +51,7 @@ import { RailwayToolService } from '../../railway/tools/railway-tool-service';
 import { RailwaySearchOrchestrator } from '../../railway/orchestrator/search-orchestrator';
 import type { BookingSession, BookingEventType } from '@shared/entities';
 import { BookingState } from '@shared/states';
-import type { TurnToolResultView } from '../providers/llm-provider';
+import type { TurnToolResultView, SourceConflict } from '../providers/llm-provider';
 import type { LLMContext } from '../context/context-builder';
 import type { ApplyOutcome } from '../context/turn-applier';
 import { v4 as uuidv4 } from '../orchestrator/utils';
@@ -248,6 +249,8 @@ export class BoundToolRuntime {
   private lastProvider?: string;
   /** Prompt 28: per-turn result sequence → `fare-2` style references for the LLM */
   private resultSeq = 0;
+  /** P39: per-turn values seen per (capability|train|class|date) → SOURCE_CONFLICT across providers. */
+  private sourceValues = new Map<string, { turnId: string; provider: string; value: string }[]>();
   /** Prompt 14: tools permitted by the latest applied decision (undefined = no restriction). */
   private allowedTools?: readonly string[];
   /** Prompt 17: per-turn RailwayToolRuntime state (budget, loop detector, execution records). */
@@ -630,18 +633,59 @@ export class BoundToolRuntime {
       H.emit?.('STALE_RESULT_REJECTED', { toolName: vt.name, requestId: H.requestId, toolExecutionId: x.record.toolExecutionId, journeyVersionAtCall: x.prepared.journeyVersion, journeyVersionNow: s.journeyVersion });
       return { stale: true };
     }
+    const sourceConflict = norm.success ? this.detectSourceConflict(vt, norm, x) : undefined;
     steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', dataSource: x.dataSource ?? null, validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
     turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status,
       outcome: toolOutcomeOf({ ok: norm.success, empty: x.empty, status: x.record.status, code: norm.error?.code, normalizedCode: x.error?.normalized }), dataSource: x.dataSource ?? null, attempts: x.record.attempt || 1,
-      ...providerViewOf(x),
+      ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}),
       identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}) });
-    localHistory.push({ role: 'tool', content: JSON.stringify({ ...this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null), ...providerViewOf(x) }), toolCallId: tc.callId, toolName: tc.name });
+    localHistory.push({ role: 'tool', content: JSON.stringify({ ...this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null), ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}) }), toolCallId: tc.callId, toolName: tc.name });
     this.syncToSession(vt, norm);
+    if (sourceConflict) this.dropConflictingValue(vt, sourceConflict);
     if (!norm.success) {
       H.emit?.('TOOL_FAILED', { toolName: vt.name, code: norm.error?.code, stage: 'provider', status: x.record.status, toolExecutionId: x.record.toolExecutionId });
       return { stale: false, error: { code: 'TOOL_FAILED', message: norm.error?.message || 'Tool failed.' } };
     }
     return { stale: false };
+  }
+
+  /**
+   * P39: SOURCE_CONFLICT — a successful CHECK_AVAILABILITY / GET_FARE whose value differs from another provider's value
+   * for the same train / class / date in THIS turn. Both values are reported; nothing is picked or averaged.
+   */
+  private detectSourceConflict(vt: ValidatedToolCall, norm: NormalizedToolResult, x: ExecutedCall): SourceConflict | undefined {
+    if (vt.name !== 'CHECK_AVAILABILITY' && vt.name !== 'GET_FARE') return undefined;
+    // the provider the LLM named (railcore_fare → railcore); else the executing registry id
+    const provider = String((x.prepared.tc as any)?.provider || x.provider || norm.provider || '').toLowerCase();
+    if (!provider) return undefined;
+    const d: any = norm.data || {};
+    const value = vt.name === 'CHECK_AVAILABILITY'
+      ? String(d.status ?? '').replace(/\s+/g, ' ').trim().toUpperCase()
+      : (typeof d.perPassenger === 'number' ? `INR ${d.perPassenger}` : '');
+    if (!value) return undefined;
+    const train = String(vt.arguments.trainNumber || ''); const cls = String(vt.arguments.travelClass || '');
+    const date = (vt.arguments.date || this.getSession().date || null) as string | null;
+    const key = `${vt.name}|${train}|${cls}|${date || ''}`;
+    const turnId = String(this.hooks.turnId ?? this.hooks.requestId ?? '');
+    const seen = (this.sourceValues.get(key) || []).filter(e => e.turnId === turnId && e.provider !== provider);
+    this.sourceValues.set(key, [...seen, { turnId, provider, value }]);
+    const differing = seen.filter(e => e.value !== value);
+    if (!differing.length) return undefined;
+    this.hooks.emit?.('SOURCE_CONFLICT' as any, { toolName: vt.name, providers: [...differing.map(e => e.provider), provider] });
+    return { code: 'SOURCE_CONFLICT', kind: vt.name === 'GET_FARE' ? 'FARE' : 'AVAILABILITY', trainNumber: train, travelClass: cls, date,
+      values: [...differing.map(e => ({ provider: e.provider, value: e.value })), { provider, value }] };
+  }
+
+  /** P39: a conflicting value is never left in the session as if verified — a fresh check is needed before review. */
+  private dropConflictingValue(vt: ValidatedToolCall, c: SourceConflict): void {
+    const s: any = this.getSession();
+    const conflicts = [...(s.sourceConflicts || []), { kind: c.kind, trainNumber: c.trainNumber, travelClass: c.travelClass, date: c.date, providers: c.values.map(v => v.provider), at: new Date().toISOString() }].slice(-5);
+    if (c.kind === 'AVAILABILITY') {
+      const av = { ...(s.availability || {}) }; delete av[c.travelClass];
+      this.commitSession({ availability: Object.keys(av).length ? av : undefined, sourceConflicts: conflicts } as any);
+    } else {
+      this.commitSession({ fare: undefined, sourceConflicts: conflicts } as any);
+    }
   }
 
   private async executeTool(vt: ValidatedToolCall, guard?: { canApply: () => boolean }): Promise<any> {

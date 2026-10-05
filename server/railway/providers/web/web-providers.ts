@@ -8,7 +8,10 @@
  *                             against provider fares — it is a generic per-distance table) and NO seat availability.
  *   railyatri  TRACK_TRAIN    GET https://www.railyatri.in/live-train-status/{no} (`__NEXT_DATA__` → ltsData).
  *                             Crowd-sourced running status; RailYatri's seat availability is a private token API → never used.
- *   confirmtkt —              robots.txt disallows the train / PNR pages; private API → not implemented.
+ *   confirmtkt TRACK_TRAIN    P39: GET https://www.confirmtkt.com/train-running-status/{no} (robots: only /rbooking/trains/,
+ *                             /pnr-status/, /rbooking/bridge/, /forum/, /blog/ … are disallowed). Server-rendered station rows
+ *                             (passed = check icon), "Delay by N min", source "Last Updated". Train search / PNR pages are
+ *                             robots-disallowed → WEB_ACCESS_BLOCKED; availability / fare have no public page (private API).
  *
  * These are never authoritative: booking review / confirmation keep using the railway API providers only. A connector
  * is only ever called because the LLM chose its tool (no hidden fallback). Every failure is a typed error, never data.
@@ -21,17 +24,103 @@ import type {
 import { liveError, VALID_CLASSES, type FetchLike } from '../live/live-http';
 import type { RailwayCapability } from '../live/provider-capabilities';
 
-export type WebProviderId = 'erail' | 'railyatri';
-export const WEB_PROVIDER_IDS: readonly WebProviderId[] = Object.freeze(['erail', 'railyatri']);
-export const WEB_PROVIDER_LABEL: Readonly<Record<WebProviderId, string>> = Object.freeze({ erail: 'eRail', railyatri: 'RailYatri' });
+export type WebProviderId = 'erail' | 'railyatri' | 'confirmtkt';
+export const WEB_PROVIDER_IDS: readonly WebProviderId[] = Object.freeze(['erail', 'railyatri', 'confirmtkt']);
+export const WEB_PROVIDER_LABEL: Readonly<Record<WebProviderId, string>> = Object.freeze({ erail: 'eRail', railyatri: 'RailYatri', confirmtkt: 'ConfirmTkt' });
 /** Label every web result carries (UI + LLM). */
 export const webSourceLabel = (id: string) => `WEB (${WEB_PROVIDER_LABEL[id as WebProviderId] || id}) — unverified`;
 
 /** Declared web capabilities (robots-allowed endpoint behind each). Anything absent is UNSUPPORTED — never emulated. */
 export const WEB_CAPABILITY_MATRIX: Readonly<Record<WebProviderId, Readonly<Partial<Record<RailwayCapability, string>>>>> = Object.freeze({
   erail: Object.freeze({ SEARCH_TRAINS: 'GET https://erail.in/rail/getTrains.aspx?Station_From&Station_To' }),
-  railyatri: Object.freeze({ TRACK_TRAIN: 'GET https://www.railyatri.in/live-train-status/{train_number} (__NEXT_DATA__.ltsData)' })
+  railyatri: Object.freeze({ TRACK_TRAIN: 'GET https://www.railyatri.in/live-train-status/{train_number} (__NEXT_DATA__.ltsData)' }),
+  confirmtkt: Object.freeze({ TRACK_TRAIN: 'GET https://www.confirmtkt.com/train-running-status/{train_number} (server-rendered rows)' })
 });
+
+// ------------------------------------------------------------------ P39: verified capability metadata
+
+/** IMPLEMENTED = exposed tool · BLOCKED_BY_ROBOTS / PRIVATE_API / NO_PUBLIC_PAGE / UNVERIFIABLE = never fetched, never claimed. */
+export type WebCapabilityStatus = 'IMPLEMENTED' | 'BLOCKED_BY_ROBOTS' | 'PRIVATE_API' | 'NO_PUBLIC_PAGE' | 'UNVERIFIABLE' | 'NOT_IMPLEMENTED';
+export interface WebCapabilityInfo {
+  source: WebProviderId;
+  capability: RailwayCapability;
+  /** true only when implemented AND verified; false when blocked / not public; 'unknown' when never verified. */
+  available: boolean | 'unknown';
+  status: WebCapabilityStatus;
+  accessMethod: 'PUBLIC_ENDPOINT_TEXT' | 'PUBLIC_PAGE_NEXT_DATA' | 'PUBLIC_PAGE_HTML' | 'NONE';
+  /** When the access rule / page structure was last verified by hand (robots.txt + live page). */
+  verifiedOn: string;
+  reference: string;
+  note: string;
+}
+const VERIFIED_ON = '2026-10-05';
+const CAP = (source: WebProviderId, capability: RailwayCapability, status: WebCapabilityStatus, accessMethod: WebCapabilityInfo['accessMethod'], reference: string, note: string): WebCapabilityInfo =>
+  Object.freeze({ source, capability, available: status === 'IMPLEMENTED' ? true : status === 'NOT_IMPLEMENTED' ? 'unknown' as const : false, status, accessMethod, verifiedOn: VERIFIED_ON, reference, note });
+export const WEB_SOURCE_CAPABILITIES: readonly WebCapabilityInfo[] = Object.freeze([
+  CAP('erail', 'SEARCH_TRAINS', 'IMPLEMENTED', 'PUBLIC_ENDPOINT_TEXT', 'https://erail.in/rail/getTrains.aspx', 'Trains, timings, run days, coach classes. Includes nearby stations.'),
+  CAP('erail', 'GET_TIMETABLE', 'NOT_IMPLEMENTED', 'NONE', 'https://erail.in', 'Not built — API providers cover timetables.'),
+  CAP('erail', 'CHECK_AVAILABILITY', 'BLOCKED_BY_ROBOTS', 'NONE', 'https://erail.in/robots.txt', 'robots.txt: Disallow /Rail/getAvailability.aspx.'),
+  CAP('erail', 'GET_FARE', 'UNVERIFIABLE', 'NONE', 'https://erail.in', 'Embedded fare table could not be verified against provider fares — never shown.'),
+  CAP('railyatri', 'TRACK_TRAIN', 'IMPLEMENTED', 'PUBLIC_PAGE_NEXT_DATA', 'https://www.railyatri.in/live-train-status/{train}', 'Crowd-sourced; source-reported update time; may be stale.'),
+  CAP('railyatri', 'CHECK_AVAILABILITY', 'PRIVATE_API', 'NONE', 'https://www.railyatri.in/seat-availability/{train}', 'Page is a shell; availability loads from a private token API — not used.'),
+  CAP('railyatri', 'GET_FARE', 'NO_PUBLIC_PAGE', 'NONE', 'https://www.railyatri.in/train-fare/{train}', 'HTTP 404 — no public fare page.'),
+  CAP('confirmtkt', 'TRACK_TRAIN', 'IMPLEMENTED', 'PUBLIC_PAGE_HTML', 'https://www.confirmtkt.com/train-running-status/{train}', 'Server-rendered running status with source "Last Updated" time; not affiliated with Indian Railways.'),
+  CAP('confirmtkt', 'SEARCH_TRAINS', 'BLOCKED_BY_ROBOTS', 'NONE', 'https://www.confirmtkt.com/robots.txt', 'robots.txt: Disallow /rbooking/trains/.'),
+  CAP('confirmtkt', 'CHECK_PNR', 'BLOCKED_BY_ROBOTS', 'NONE', 'https://www.confirmtkt.com/robots.txt', 'robots.txt: Disallow /pnr-status/.'),
+  CAP('confirmtkt', 'CHECK_AVAILABILITY', 'NO_PUBLIC_PAGE', 'NONE', 'https://www.confirmtkt.com/seat-availability/{train}', 'Redirects to error-404 — availability only via the private booking API.'),
+  CAP('confirmtkt', 'GET_FARE', 'NO_PUBLIC_PAGE', 'NONE', 'https://www.confirmtkt.com/train-fare/{train}', 'Redirects to error-404.')
+]);
+/** A capability we KNOW cannot be fetched legitimately → the call is answered WEB_ACCESS_BLOCKED (never attempted). */
+export function blockedWebCapability(source: string, cap: string): WebCapabilityInfo | null {
+  const c = WEB_SOURCE_CAPABILITIES.find(x => x.source === source && x.capability === cap);
+  return c && c.available === false ? c : null;
+}
+
+/** Runtime "last checked" per source × capability (metadata only: time + outcome, never page content). */
+const lastChecked = new Map<string, { at: string; outcome: string }>();
+export function noteWebCheck(source: string, cap: string, outcome: string): void { lastChecked.set(`${source}:${cap}`, { at: new Date().toISOString(), outcome }); }
+export function webCapabilityMatrix(enabled: readonly string[] = WEB_PROVIDER_IDS): Array<WebCapabilityInfo & { enabled: boolean; lastChecked: string | null; lastOutcome: string | null }> {
+  return WEB_SOURCE_CAPABILITIES.map(c => { const l = lastChecked.get(`${c.source}:${c.capability}`); return { ...c, enabled: enabled.includes(c.source), lastChecked: l?.at ?? null, lastOutcome: l?.outcome ?? null }; });
+}
+
+// ------------------------------------------------------------------ P39: WebRailwayResult contract
+
+export type WebResultStatus = 'SUCCESS' | 'NO_RESULT' | 'BLOCKED' | 'TIMEOUT' | 'UNAVAILABLE' | 'PARSE_FAILED' | 'SOURCE_CONFLICT';
+/** LIVE_API = railway API provider · WEB_CURRENT = public page fetched now, no source timestamp · WEB_REPORTED_TIME = the
+ *  source states its own update time · WEB_UNVERIFIED = web data whose time is unknown · WEB_UNAVAILABLE = nothing usable. */
+export type SourceFreshnessLabel = 'LIVE_API' | 'WEB_CURRENT' | 'WEB_REPORTED_TIME' | 'WEB_UNVERIFIED' | 'WEB_UNAVAILABLE';
+export interface WebRailwayResult {
+  source: WebProviderId;
+  capability: RailwayCapability;
+  status: WebResultStatus;
+  fetchedAt: string;
+  sourceReportedAt: string | null;
+  freshness: SourceFreshnessLabel;
+  verification: 'UNVERIFIED_WEB';
+  urlReference: string;
+  warnings: string[];
+}
+const URL_OF: Record<string, (a: any) => string> = {
+  'erail:SEARCH_TRAINS': a => `https://erail.in/?from=${encodeURIComponent(a?.origin || '')}&to=${encodeURIComponent(a?.destination || '')}`,
+  'railyatri:TRACK_TRAIN': a => `https://www.railyatri.in/live-train-status/${encodeURIComponent(a?.trainNumber || '')}`,
+  'confirmtkt:TRACK_TRAIN': a => `https://www.confirmtkt.com/train-running-status/${encodeURIComponent(a?.trainNumber || '')}`
+};
+const WARN: Record<string, string[]> = {
+  erail: ['Public website data, not a railway API — no seat availability, no fare.', 'May include nearby stations of the same city.'],
+  railyatri: ['Crowd-sourced running status — may be stale; confirm with NTES / Indian Railways.'],
+  confirmtkt: ['Website running status, not affiliated with Indian Railways — may be delayed.']
+};
+/** Envelope for a web tool result (pure). `r` is the normalized tool result the LLM gets. */
+export function toWebRailwayResult(source: WebProviderId, capability: RailwayCapability, r: { ok: boolean; empty?: boolean; data?: any; error?: { code?: string } | null }, args: any, now = new Date()): WebRailwayResult {
+  const code = String(r.error?.code || '');
+  const status: WebResultStatus = r.ok ? (r.empty ? 'NO_RESULT' : 'SUCCESS')
+    : /BLOCKED/.test(code) ? 'BLOCKED' : /TIMEOUT/.test(code) ? 'TIMEOUT' : /NOT_FOUND|NO_TRAINS|NO_RESULT/.test(code) ? 'NO_RESULT'
+    : /DATA_INVALID|PARSE/.test(code) ? 'PARSE_FAILED' : 'UNAVAILABLE';
+  const reported = r.ok && typeof r.data?.lastUpdated === 'string' ? r.data.lastUpdated : null;
+  const freshness: SourceFreshnessLabel = status !== 'SUCCESS' ? 'WEB_UNAVAILABLE' : reported ? 'WEB_REPORTED_TIME' : capability === 'SEARCH_TRAINS' ? 'WEB_CURRENT' : 'WEB_UNVERIFIED';
+  return { source, capability, status, fetchedAt: now.toISOString(), sourceReportedAt: reported, freshness, verification: 'UNVERIFIED_WEB',
+    urlReference: (URL_OF[`${source}:${capability}`] || (() => ''))(args), warnings: [...(WARN[source] || [])] };
+}
 
 const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 const CLASS_ORDER = ['1A', 'EA', 'EC', '2A', 'FC', '3A', '3E', 'CC', 'EV', 'VS', 'SL', '2S'];
@@ -84,8 +173,11 @@ abstract class WebRailwayProvider implements RailwayProvider {
       return this.fail<T>('TOOL_NOT_IMPLEMENTED', t0, why, false);
     }
     if (!this.configured) return this.fail<T>('NOT_CONFIGURED', t0, `${this.label} web connector band hai.`, false);
-    try { return await body(t0); }
-    catch { return this.fail<T>('PROVIDER_DATA_INVALID', t0, `${this.label} page ka format samajh nahi aaya — data nahi diya.`, false); }
+    let out: RailwayResponse<T>;
+    try { out = await body(t0); }
+    catch { out = this.fail<T>('PROVIDER_DATA_INVALID', t0, `${this.label} page ka format samajh nahi aaya — data nahi diya.`, false); }
+    noteWebCheck(this.providerId, cap, out.ok ? 'SUCCESS' : String((out as any).error?.code || 'FAILED'));
+    return out;
   }
 
   searchTrains(_r: SearchTrainsRequest): Promise<RailwayResponse<TrainSearchResultData>> { return this.run('SEARCH_TRAINS', async t0 => this.fail('TOOL_NOT_IMPLEMENTED', t0)); }
@@ -205,14 +297,82 @@ export class RailYatriWebProvider extends WebRailwayProvider {
   }
 }
 
-export function createWebProvider(id: WebProviderId, env: NodeJS.ProcessEnv = process.env): WebRailwayProvider {
-  const timeoutMs = Math.max(1000, Number(env.RAILWAY_WEB_TIMEOUT_MS) || 12000);
-  return id === 'erail' ? new ErailWebProvider({ timeoutMs }) : new RailYatriWebProvider({ timeoutMs });
+// ------------------------------------------------------------------ ConfirmTkt (P39)
+
+const MON3 = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const strip = (h: string) => h.replace(/<svg[\s\S]*?<\/svg>/g, ' ').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/\s+/g, ' ').trim();
+/** "05 Oct 2026 10:51" → "2026-10-05 10:51:00 +0530" (the page states IST). */
+export function confirmTktTime(x: string | undefined): string | undefined {
+  const m = String(x || '').match(/(\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})\s+(\d{1,2}):(\d{2})/);
+  if (!m) return undefined;
+  const mo = MON3.findIndex(n => n.toLowerCase() === m[2].toLowerCase());
+  if (mo < 0) return undefined;
+  return `${m[3]}-${String(mo + 1).padStart(2, '0')}-${m[1].padStart(2, '0')} ${m[4].padStart(2, '0')}:${m[5]}:00 +0530`;
+}
+export function parseConfirmTktLive(html: string, trainNumber: string): TrackData & Record<string, any> {
+  const h = String(html || '');
+  const dm = h.match(/var\s+data\s*=\s*(\{[\s\S]*?\});\s*\n/);
+  let meta: any = null;
+  if (dm) { try { meta = JSON.parse(dm[1]); } catch { meta = null; } }
+  const no = meta ? String(meta.TrainNumberString || meta.TrainNo || '') : '';
+  if (meta && no && no !== String(trainNumber)) throw new WebDataInvalid('train-mismatch');
+  const rows = h.split(/<div class="row rs__station-row/).slice(1).map(r => {
+    const chunk = r.split(/<div class="row rs__station-row|<div class="well well-sm"/)[0];
+    const name = (chunk.match(/rs__station-name[^>]*>([^<]+)</) || [])[1]?.trim();
+    const delayTxt = strip((chunk.match(/rs__station-delay[^>]*>([\s\S]*?)<\/div>/) || [])[1] || '');
+    return { name, passed: /bi-check-circle/.test(chunk), delayTxt };
+  }).filter(r => r.name);
+  if (!rows.length) throw Object.assign(new WebDataInvalid('not-found'), { notFound: true });
+  const updated = confirmTktTime((h.match(/Last Updated:(?:&nbsp;|\s)*([^,<(]+)/) || [])[1]);
+  const passed = rows.filter(r => r.passed);
+  const last = passed[passed.length - 1];
+  const next = last ? rows[rows.indexOf(last) + 1] : rows[0];
+  const dly = last?.delayTxt.match(/Delay by\s+(\d+)\s*min/i);
+  const delay = last ? (dly ? Number(dly[1]) : /right time|on time/i.test(last.delayTxt) ? 0 : undefined) : undefined;
+  const status = !last ? 'Abhi tak koi running update report nahi hua (train shayad chali nahi).'
+    : last === rows[rows.length - 1] ? `Reached ${last.name}` : `Last reported at ${last.name}`;
+  return {
+    trainNumber: String(trainNumber), trainName: meta?.TrainName ? String(meta.TrainName).trim() : undefined, currentStatus: status,
+    ...(updated ? { lastUpdated: updated } : {}),
+    ...(last ? { currentStationName: last.name } : {}),
+    ...(delay !== undefined ? { delayMinutes: delay } : {}),
+    ...(next?.name && next !== last ? { nextStationName: next.name } : {}),
+    sourceNote: 'ConfirmTkt website (not affiliated with Indian Railways) — unverified; confirm with NTES.'
+  };
 }
 
-/** Web connectors enabled for this deployment: RAILWAY_WEB_CONNECTORS=erail,railyatri (default) | none. */
+export class ConfirmTktWebProvider extends WebRailwayProvider {
+  readonly providerId = 'confirmtkt' as const;
+  readonly label = 'ConfirmTkt';
+  trackTrain(req: TrackRequest): Promise<RailwayResponse<TrackData>> {
+    return this.run('TRACK_TRAIN', async t0 => {
+      const n = String(req.trainNumber || '').trim();
+      if (!/^\d{5}$/.test(n)) return this.fail('INVALID_REQUEST', t0, 'Live status ke liye 5 digit ka train number chahiye.', false);
+      const g = await this.getText(`https://www.confirmtkt.com/train-running-status/${n}`, t0);
+      if (!g.ok) return g.resp;
+      try { return { ok: true, data: parseConfirmTktLive(g.text, n), meta: this.meta(t0) }; }
+      catch (e: any) { if (e?.notFound) return this.fail('NOT_FOUND', t0, `ConfirmTkt par ${n} ka running status nahi mila.`, false); throw e; }
+    });
+  }
+}
+
+export function createWebProvider(id: WebProviderId, env: NodeJS.ProcessEnv = process.env): WebRailwayProvider {
+  const timeoutMs = Math.max(1000, Number(env.RAILWAY_WEB_TIMEOUT_MS) || 12000);
+  return id === 'erail' ? new ErailWebProvider({ timeoutMs }) : id === 'confirmtkt' ? new ConfirmTktWebProvider({ timeoutMs }) : new RailYatriWebProvider({ timeoutMs });
+}
+
+/**
+ * Web connectors enabled for this deployment.
+ *   RAILWAY_WEB_CONNECTORS=erail,railyatri,confirmtkt (default) | none   — the list
+ *   WEB_RAILWAY_ENABLED=false                                           — P39 master switch (all off)
+ *   ERAIL_WEB_ENABLED / RAILYATRI_WEB_ENABLED / CONFIRMTKT_WEB_ENABLED=false — per source
+ * (WEB_RESEARCH_ENABLED is the separate P35 search-engine research tool and is NOT used here.)
+ */
 export function enabledWebConnectors(env: NodeJS.ProcessEnv = process.env): WebProviderId[] {
-  const raw = String(env.RAILWAY_WEB_CONNECTORS ?? 'erail,railyatri').trim().toLowerCase();
+  const off = (v: string | undefined) => /^(false|0|off|no)$/i.test(String(v ?? '').trim());
+  if (off(env.WEB_RAILWAY_ENABLED)) return [];
+  const raw = String(env.RAILWAY_WEB_CONNECTORS ?? 'erail,railyatri,confirmtkt').trim().toLowerCase();
   if (!raw || raw === 'none' || raw === 'off') return [];
-  return raw.split(',').map(s => s.trim()).filter((s): s is WebProviderId => (WEB_PROVIDER_IDS as readonly string[]).includes(s));
+  const flag: Record<WebProviderId, string | undefined> = { erail: env.ERAIL_WEB_ENABLED, railyatri: env.RAILYATRI_WEB_ENABLED, confirmtkt: env.CONFIRMTKT_WEB_ENABLED };
+  return raw.split(',').map(s => s.trim()).filter((s): s is WebProviderId => (WEB_PROVIDER_IDS as readonly string[]).includes(s) && !off(flag[s as WebProviderId]));
 }

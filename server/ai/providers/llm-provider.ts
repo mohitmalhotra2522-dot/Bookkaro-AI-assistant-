@@ -6,10 +6,15 @@ import type { ToolDefinition } from '../tools/tool-registry';
 import type { LLMContext } from '../context/context-builder';
 
 /** A tool result produced earlier in THIS turn's loop (what the LLM reacts to). */
+/** P39: SOURCE_CONFLICT — values reported by different providers for the same train / class / date. */
+export interface SourceConflict { code: 'SOURCE_CONFLICT'; kind: 'AVAILABILITY' | 'FARE'; trainNumber: string; travelClass: string; date: string | null; values: Array<{ provider: string; value: string }> }
+
 export interface TurnToolResultView {
   toolName: string;
   callId: string;
   ok: boolean;
+  /** P39: two providers disagreed for the same train / class / date in this turn (both values, never resolved). */
+  sourceConflict?: SourceConflict;
   data?: any;
   error?: { code: string; message: string; details?: any };
   /** Prompt 17: SUCCEEDED with zero items (e.g. no trains on the route) — NOT a failure. */

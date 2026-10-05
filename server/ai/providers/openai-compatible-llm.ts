@@ -11,7 +11,7 @@
  *    NaturalResponseComposer before any of it is spoken.
  * The API key stays server-side, is never logged and is never sent to the browser. `fetch` is injectable (tests).
  */
-import { webSourceLabel } from '../../railway/providers/web/web-providers';
+import { webSourceLabel, toWebRailwayResult } from '../../railway/providers/web/web-providers';
 import { LLMProviderError, isLLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult, type SpokenResponseInput, type SpokenResponseResult } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
 import { providerToolCatalog, providerStatusOf } from '../tools/provider-tools';
@@ -236,6 +236,26 @@ export function toDecision(raw: any, input: LLMTurnInput): AgentDecision {
 
 const STR = (description: string) => ({ type: 'string', description });
 
+const WEB_TOOL_RE = /^(erail|railyatri|confirmtkt)_/;
+const CANON_CAP: Record<string, string> = { SEARCH_TRAINS: 'SEARCH_TRAINS', GET_TRAIN_INFO: 'GET_TRAIN_INFO', GET_TIMETABLE: 'GET_TIMETABLE', CHECK_AVAILABILITY: 'CHECK_AVAILABILITY', GET_FARE: 'GET_FARE', TRACK_TRAIN: 'TRACK_TRAIN', CHECK_PNR: 'CHECK_PNR' };
+/** P39: label of one provider result for the LLM (pure). */
+export function sourceLabelOf(toolName: string, r: { toolName: string; ok: boolean; empty?: boolean; data?: any; error?: any; dataSource?: any }, steps: Array<{ toolCalls: Array<{ callId: string; name: string; arguments?: any }>; results: Array<{ callId: any; ok: boolean; toolName: string; error?: any }> }>): Record<string, unknown> {
+  const m = WEB_TOOL_RE.exec(toolName);
+  if (!m) return /^(railcore|railradar|railkit)_/.test(toolName) && r.dataSource !== 'MOCK' ? { sourceLabel: 'LIVE_API' } : {};
+  const source = m[1] as 'erail' | 'railyatri' | 'confirmtkt';
+  const cap = CANON_CAP[r.toolName] || r.toolName;
+  const call = steps.flatMap(st => st.toolCalls).find(tc => tc.name === toolName);
+  const web = toWebRailwayResult(source, cap as any, { ok: r.ok, empty: (r as any).empty, data: r.data, error: r.error }, call?.arguments || {});
+  const priorApiFailures: Array<{ provider: string; code: string }> = [];
+  for (const st of steps) for (const tc of st.toolCalls) {
+    if (!/^(railcore|railradar|railkit)_/.test(tc.name)) continue;
+    const rr = st.results.find(x => String(x.callId) === tc.callId);
+    if (rr && !rr.ok && rr.toolName === r.toolName) priorApiFailures.push({ provider: tc.name.split('_')[0], code: String(rr.error?.code || 'FAILED') });
+  }
+  return { verification: 'UNVERIFIED_WEB', sourceLabel: webSourceLabel(source), freshness: web.freshness, webResult: web,
+    ...(priorApiFailures.length ? { priorApiFailures, mustMention: 'Say plainly which API providers failed before this web data, then that this is unverified web data.' } : {}) };
+}
+
 /** P37: canonical contract of a (provider-level) tool name — `railcore_search` → SEARCH_TRAINS. */
 export function canonicalToolOf(name: string): string {
   const r = providerToolCatalog.resolve(name);
@@ -338,8 +358,11 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
             ...(r.outcome ? { outcome: r.outcome } : {}), ...(r.dataSource ? { dataSource: r.dataSource } : {}),
             // Prompt 35: which live provider answered + failover chain (provider normalization — no re-wording needed)
             ...(r.provider ? { provider: r.provider, fallbackUsed: !!r.fallbackUsed, providerAttempts: r.providerAttempts } : {}),
-            // P38: web connector results are never authoritative — the label travels with the data
-            ...(/^(erail|railyatri)_/.test(c.name) ? { verification: 'UNVERIFIED_WEB', sourceLabel: webSourceLabel(c.name.split('_')[0]) } : {}),
+            // P38/P39: source + freshness label on every provider result. Web results carry the WebRailwayResult envelope
+            //   (status / fetchedAt / sourceReportedAt / freshness / urlReference / warnings) and the API failures of this
+            //   turn for the same capability, so the reply can never hide them. API results are LIVE_API.
+            ...sourceLabelOf(c.name, r, (input.agentTranscript || []) as any),
+            ...((r as any).sourceConflict ? { sourceConflict: (r as any).sourceConflict } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
               : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details),
                   ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)) } }) }

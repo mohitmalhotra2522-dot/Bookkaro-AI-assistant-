@@ -222,6 +222,12 @@ export class ToolTurn {
       return this.reject(tc, rec, 'PROVIDER_NOT_IMPLEMENTED', `"${String(tc.toolName || tc.name).slice(0, 40)}" is not available: ${tc.providerNotImplemented} has no implemented integration here. Use one of the provider tools you were given.`,
         false, { provider: tc.providerNotImplemented, available: providerToolCatalog.list().map(c => c.id) }, 'TOOL_NOT_IMPLEMENTED');
     }
+    // P39: a robots-blocked / private-API web capability is never fetched — honest WEB_ACCESS_BLOCKED, nothing executed
+    if ((tc as any)?.webAccessBlocked) {
+      const b = (tc as any).webAccessBlocked;
+      return this.reject(tc, rec, 'WEB_ACCESS_BLOCKED' as any, `"${String(tc.toolName || tc.name).slice(0, 40)}" is not accessible: ${b.provider} ${b.status === 'BLOCKED_BY_ROBOTS' ? 'robots.txt disallows this page' : b.status === 'PRIVATE_API' ? 'offers this only through a private API' : b.status === 'UNVERIFIABLE' ? 'data cannot be verified' : 'has no public page for this'} (${String(b.note).slice(0, 120)}). Nothing was fetched.`,
+        false, { provider: b.provider, webStatus: b.status }, 'WEB_ACCESS_BLOCKED' as any);
+    }
     if (fromLLM && providerToolCatalog.enabled() && !tc?.provider && providerToolCatalog.toolName('x', tc?.name as any)) {
       return this.reject(tc, rec, 'PROVIDER_TOOL_REQUIRED', `Call a provider tool (${providerToolCatalog.list().map(c => `${c.id}_…`).join(', ')}) — the backend does not pick a provider.`, false, undefined, 'INVALID_REQUEST');
     }

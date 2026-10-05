@@ -14,6 +14,7 @@ import { BookingReviewCard } from '../components/review/BookingReviewCard';
 import { SessionInspector, type InspectorMeta } from '../components/debug/SessionInspector';
 import type { VoiceTranscriptInfo } from '@shared/voice/transcript';
 import { HandoffCard } from '../components/review/HandoffCard';
+import { IrctcAssistPage, IrctcHandoffCard } from '../components/irctc/IrctcAssistPage';
 import * as Info from '../components/trains/InfoCards';
 import { Composer } from '../components/chat/Composer';
 import { EmptyChat, ErrorBanner, ThinkingIndicator, QUICK_PROMPTS } from '../components/chat/ChatStates';
@@ -48,6 +49,7 @@ const App: React.FC = () => {
   const [showInspector, setShowInspector] = useState(false);
   // P38: full-screen IRCTC-style passenger form (opens only once a train + class are selected)
   const [paxForm, setPaxForm] = useState(false);
+  const [irctcAssist, setIrctcAssist] = useState(false);
   const lastUserTextRef = useRef<string>('');
   const appStatus = useAppStatus();
 
@@ -356,6 +358,7 @@ const App: React.FC = () => {
           />
         );
       case 'handoff': return <HandoffCard key={key} d={d} onProviderStatus={() => runExecute()} />;
+      case 'irctc_handoff': return <IrctcHandoffCard key={key} d={d} onOpen={() => { setSheet(null); setIrctcAssist(true); }} />;
       case 'booking_execution': return <Info.BookingExecutionNote key={key} d={d} onReconcile={runReconcile} />;
       case 'handoff_consume': return <Info.HandoffConsumeNote key={key} d={d} />;
       case 'handoff_status': return <Info.HandoffStatusNote key={key} d={d} />;
@@ -475,6 +478,7 @@ const App: React.FC = () => {
       )}
       {sheets}
       {paxForm && sessionId && <PassengerFormPage sessionId={sessionId} onClose={() => setPaxForm(false)} onSaved={onPaxSaved} />}
+      {irctcAssist && sessionId && <IrctcAssistPage sessionId={sessionId} onClose={() => setIrctcAssist(false)} />}
     </div>
   );
 };

@@ -32,6 +32,7 @@ import { transitionLifecycle } from './execution/booking-lifecycle';
 import { BookingConfirmationService } from './handoff/booking-confirmation';
 import { BookingHandoffSessionService, type ConsumeHandoffOutcome } from './handoff/booking-handoff-session-service';
 import { EXECUTION_DISABLED_MESSAGE, NOTHING_SUBMITTED, bookingExecutionView, type ProviderExecutionOutcome } from './provider/booking-provider-execution-service';
+import { IrctcHandoffManager, irctcHandoffManager } from '../irctc/handoff/irctc-handoff-manager';
 
 export interface PrepCtx {
   turnId: string;
@@ -99,7 +100,11 @@ export class BookingPreparationService {
   /** Secure handoff sessions + the (disabled) executor adapter boundary (Prompt 11). */
   readonly handoffSessions: BookingHandoffSessionService;
 
-  constructor(private readonly state: ConversationStateManager, opts: { policy?: Partial<PreparationPolicy>; clock?: () => number; gateway?: BookingExecutionGateway; handoffSessions?: BookingHandoffSessionService } = {}) {
+  /** P39: user-controlled IRCTC handoff (prefill only — login / CAPTCHA / OTP / final Book / payment by the user). */
+  readonly irctcHandoffs: IrctcHandoffManager;
+
+  constructor(private readonly state: ConversationStateManager, opts: { policy?: Partial<PreparationPolicy>; clock?: () => number; gateway?: BookingExecutionGateway; handoffSessions?: BookingHandoffSessionService; irctcHandoffs?: IrctcHandoffManager } = {}) {
+    this.irctcHandoffs = opts.irctcHandoffs || irctcHandoffManager;
     this.readiness = new BookingReadinessEvaluator({ ...defaultPolicy(), ...(opts.policy || {}) });
     this.clock = opts.clock || (() => Date.now());
     this.gateway = opts.gateway || new BookingExecutionGateway(state, { clock: this.clock });
@@ -165,6 +170,10 @@ export class BookingPreparationService {
     if (this.confirmations.setStatus(s, status, reason, now)) {
       this.emit(sessionId, ctx, 'BOOKING_CONFIRMATION_INVALIDATED', { reviewVersion: s.confirmation!.reviewVersion, sessionVersion: s.confirmation!.sessionVersion, status, reason: reason.split(':')[0] });
     }
+    // P39: booking details changed → the IRCTC handoff is stale (a time-based booking-handoff expiry is not: IRCTC
+    // re-checks availability itself, and the IRCTC handoff has its own TTL)
+    // (metadata audit is the manager's own log — the pinned booking event sequence is unchanged)
+    if (status === 'INVALIDATED') this.irctcHandoffs.markStale(s, reason, now);
     const hs = s.handoffSession;
     const hsChanged = !!hs && this.handoffSessions.setStatus(s, status, reason, now);
     if (!s.handoff || s.handoff.status !== 'READY') return hsChanged;
@@ -245,6 +254,7 @@ export class BookingPreparationService {
         // Prompt 12: same handoff → provider execution lock / existing record (never a second submission)
         const px = await this.gateway.executeBooking(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'DUPLICATE_CONFIRM', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
         ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, true, px) });
+        this.pushIrctcHandoff(sessionId, ctx);
       }
     }
     return g.log;
@@ -630,10 +640,26 @@ export class BookingPreparationService {
     const px = await this.gateway.executeBooking(sessionId, { requestId: ctx.requestId || ctx.turnId, turnId: ctx.turnId, source: 'CONFIRM', emit: (t, d) => this.emit(sessionId, ctx, t, d) });
     out.providerExecution = px;
     ctx.cards.push({ type: 'handoff', data: this.handoffCard(sessionId, g, false, px) });
+    const irctcNote = this.pushIrctcHandoff(sessionId, ctx);
+    if (irctcNote) out.notes.push(irctcNote);
     const pxMsg = px.message;
     out.notes.push(ctx.mode === 'VOICE' || !NOTHING_SUBMITTED(px.record as any) ? pxMsg : `${pxMsg} ${NO_EXECUTION_NOTE}`);
     out.readiness = this.evaluate(sessionId, ctx);
     return out;
+  }
+
+  /**
+   * P39: create (or re-show) the IRCTC handoff for the confirmed review and push its card. Returns a note ONLY when
+   * the IRCTC handoff could not be created (e.g. more than 6 passengers) — the confirmation wording is unchanged.
+   */
+  private pushIrctcHandoff(sessionId: string, ctx: PrepCtx): string | undefined {
+    const r = this.irctcHandoffs.create(this.state.getSession(sessionId), this.clock());
+    if (r.ok) {
+      ctx.cards.push({ type: 'irctc_handoff', data: r.value.view });
+      return undefined;
+    }
+    ctx.cards.push({ type: 'irctc_handoff', data: { status: 'UNAVAILABLE', code: r.code, message: r.message } });
+    return r.code === 'IRCTC_PASSENGER_LIMIT_EXCEEDED' ? r.message : undefined;
   }
 
   private handoffCard(sessionId: string, g: Extract<GatewayOutcome, { ok: true }>, duplicate: boolean, px?: ProviderExecutionOutcome) {

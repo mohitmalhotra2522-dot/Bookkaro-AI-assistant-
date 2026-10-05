@@ -99,14 +99,20 @@ export const BookingReviewCard: React.FC<Props> = ({ data, confirmable, onChange
       <div className="bk-review__actions">
         <button type="button" className="bk-btn bk-btn--ghost" onClick={onChange}>Change</button>
         <button type="button" className="bk-btn bk-btn--primary" disabled={!confirmable} onClick={() => onConfirm(data.reviewVersion)}>
-          Confirm &amp; Continue
+          Confirm &amp; continue to IRCTC
         </button>
       </div>
+      {confirmable && (
+        <div className="bk-callout" role="note" data-irctc-note>
+          <IconLock size={16} />
+          <span>Details verified hain. IRCTC par continue karun? Confirm karne par IRCTC handoff banega — BookKaro sirf journey aur passenger details fill karega; login / CAPTCHA / OTP / final Book / payment aap khud karenge.</span>
+        </div>
+      )}
 
       {bookingDisabled && (
         <div className="bk-callout" role="note">
           <IconLock size={16} />
-          <span>Confirming verifies your booking details only. Real railway booking, IRCTC login and payment are not enabled — no ticket will be booked.</span>
+          <span>BookKaro khud ticket book nahi karta. IRCTC par login, CAPTCHA, OTP, final Book aur payment aap khud karenge — tab tak koi ticket book nahi hota.</span>
         </div>
       )}
       {data.dataSource && <div className="bk-meta" style={{ marginTop: 10 }}>{data.dataSource}</div>}

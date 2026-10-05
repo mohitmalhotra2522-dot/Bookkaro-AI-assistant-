@@ -61,6 +61,7 @@ export const SessionInspector: React.FC<{ ctx: any; meta: InspectorMeta }> = ({ 
           {cell('prep', c.bookingPreparationState)}
           {cell('prepPath', c.preparationTrace?.path?.length ? c.preparationTrace.path.join('→') : undefined)}
           {cell('handoff', c.handoff ? `${c.handoff.snapshot?.handoffId} ${c.handoff.status}${c.handoff.statusReason ? ` (${String(c.handoff.statusReason).split(':')[0]})` : ''}` : undefined, !!c.handoff && c.handoff.status !== 'READY')}
+          {cell('irctc', c.irctcHandoff ? `${c.irctcHandoff.status}${c.irctcHandoff.lastPage ? ` @${c.irctcHandoff.lastPage}` : ''} · filled ${c.irctcHandoff.filledFields?.length ?? 0}` : undefined, !!c.irctcHandoff && ['STALE_HANDOFF', 'EXPIRED', 'BOOKING_STATUS_UNKNOWN', 'BOOKING_FAILED'].includes(c.irctcHandoff.status))}
           {cell('expires', c.handoff?.status === 'READY' && c.handoff.snapshot?.expiresAt ? new Date(c.handoff.snapshot.expiresAt).toLocaleTimeString() : undefined)}
           {cell('lifecycle', c.bookingLifecycle?.status)}
           {cell('confirmation', c.confirmation ? `${c.confirmation.status} · review v${c.confirmation.reviewVersion} · sv${c.confirmation.sessionVersion}` : undefined, !!c.confirmation && c.confirmation.status !== 'VALID')}

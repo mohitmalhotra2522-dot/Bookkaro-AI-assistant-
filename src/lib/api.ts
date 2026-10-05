@@ -217,3 +217,25 @@ export async function submitPassengerForm(sessionId: string, body: { passengers:
   if (!res.ok) return { ok: false, status: res.status, code: data.code || 'ERROR', message: data.message || 'Details save nahi ho paayi.', fieldErrors: data.fieldErrors };
   return { ok: true, ...data };
 }
+
+// ---- P39: user-controlled IRCTC handoff (session owner). Never sends credentials; the bridge token is only handed
+// to the BookKaro extension via same-window postMessage. ----
+export type IrctcOwnerAccess = { view: import('@shared/irctc-handoff').IrctcHandoffView; snapshot: import('@shared/irctc-handoff').IrctcHandoffSnapshot; bridgeToken: string };
+export async function getIrctcHandoff(sessionId: string): Promise<{ ok: true; access: IrctcOwnerAccess } | { ok: false; status: number; code: string; message: string }> {
+  const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/irctc-handoff`, { cache: 'no-store' }).catch(() => null);
+  if (!res) return { ok: false, status: 0, code: 'NETWORK', message: 'Network error' };
+  const body = await res.json().catch(() => ({}));
+  return res.ok ? { ok: true, access: body } : { ok: false, status: res.status, code: body.code || `HTTP_${res.status}`, message: body.message || '' };
+}
+export async function irctcHandoffAction(sessionId: string, body: { action: 'create' | 'language'; language?: 'en' | 'hi' }): Promise<{ ok: boolean; code?: string; message?: string }> {
+  const res = await fetch(`/api/session/${encodeURIComponent(sessionId)}/irctc-handoff`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
+  if (!res) return { ok: false, code: 'NETWORK' };
+  const b = await res.json().catch(() => ({}));
+  return res.ok ? { ok: true } : { ok: false, code: b.code, message: b.message };
+}
+export async function postIrctcEvent(handoffId: string, bridgeToken: string, event: Record<string, unknown>): Promise<{ ok: boolean; code?: string }> {
+  const res = await fetch(`/api/irctc/handoff/${encodeURIComponent(handoffId)}/events`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-BookKaro-Bridge-Token': bridgeToken }, body: JSON.stringify(event) }).catch(() => null);
+  if (!res) return { ok: false, code: 'NETWORK' };
+  const b = await res.json().catch(() => ({}));
+  return res.ok ? { ok: true } : { ok: false, code: b.code };
+}

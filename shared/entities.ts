@@ -252,6 +252,8 @@ export interface BookingSession {
   confirmation?: BookingConfirmation;
   /** Current short-lived handoff session (READY / EXPIRED / INVALIDATED / FAILED). */
   handoffSession?: BookingHandoffSession;
+  /** P39: user-controlled IRCTC handoff (client view only — no passenger values, no bridge token). */
+  irctcHandoff?: import('./irctc-handoff').IrctcHandoffView;
   /** Status history of handoff sessions (snapshots never mutated). */
   handoffSessionHistory?: Array<{ handoffSessionId: string; bookingHandoffId: string; status: HandoffSessionStatus; statusReason?: string; at: string }>;
 

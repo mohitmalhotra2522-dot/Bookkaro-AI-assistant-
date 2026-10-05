@@ -1,0 +1,1 @@
+{ "type": "commonjs", "private": true, "description": "Chrome MV3 extension — plain scripts (CommonJS only for the unit tests of irctc-core.js)" }
