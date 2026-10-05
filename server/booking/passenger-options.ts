@@ -85,7 +85,7 @@ export function gateOptionalField(s: BookingSession, field: 'berthPreference' | 
   return { ok: false, message: 'Provider data ke hisaab se is train ke fare mein khana shaamil nahi hai — meal choice nahi hoti.' };
 }
 
-const BERTH_LABEL: Record<string, string> = { NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', WINDOW: 'Window side', CABIN: 'Cabin', COUPE: 'Coupe' };
+const BERTH_LABEL: Record<string, string> = { NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', SIDE_MIDDLE: 'Side middle', WINDOW: 'Window side', CABIN: 'Cabin', COUPE: 'Coupe' };
 const FOOD_LABEL: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non-veg', NO_FOOD: 'No food' };
 export const berthLabel = (v: string) => BERTH_LABEL[v] || String(v);
 export const foodLabel = (v: string) => FOOD_LABEL[v] || String(v);

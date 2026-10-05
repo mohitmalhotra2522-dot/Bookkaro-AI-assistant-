@@ -96,6 +96,7 @@ export type BerthPreference =
   | 'UPPER'
   | 'SIDE_LOWER'
   | 'SIDE_UPPER'
+  | 'SIDE_MIDDLE'
   | 'CABIN'
   | 'COUPE'
   | 'NO_PREFERENCE';

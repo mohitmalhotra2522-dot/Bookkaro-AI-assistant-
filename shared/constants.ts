@@ -85,17 +85,19 @@ export const MAX_PASSENGERS = 6;
 
 /**
  * P38 — berth choices per class (standard Indian Railways coach layout, as offered on the IRCTC passenger form).
- * Shown only for a class the provider listed for the selected train. Verified IRCTC passenger-form choices:
- *   - chair cars CC / 2S / EC: no berth, ONE seat preference "Window Side" (IRCTC code WS; EC seen on the real IRCTC
- *     passenger page for 12014 EC: No Preference / Window Side);
- *   - 1A: Lower / Upper + Cabin / Coupe preference (IRCTC per-passenger preferred-berth option for First AC).
- * Other classes (EA / EV / VS / unknown) get NO choice — not verified, so nothing is invented. 3E side-middle is not
- * offered (not verified on the IRCTC form).
+ * Source of truth = IRCTC's own web app (www.irctc.co.in/nget, BookingModule chunk + berthName pipe + labels_en.json,
+ * fetched Oct 2026): the passenger "berth" <select> is `No Preference` + bkgCfg.applicableBerthTypes — a list IRCTC's
+ * server sends per train/class/date at booking time (after login; never called by BookKaro). IRCTC codes → labels:
+ * LB Lower · MB Middle · UB Upper · SL Side Lower · SU Side Upper · SM Side Middle · WS Window Side · CB Cabin · CP Coupe.
+ * This table = which of those codes physically exist per class (EC: seen on the real IRCTC page for 12014 EC):
+ *   SL / 3A: LB MB UB SL SU · 3E: + SM · 2A: LB UB SL SU · 1A: LB UB CB CP · FC: LB UB · CC / 2S / EC: WS.
+ * EA / EV / VS / unknown: none (not verified — nothing invented). At handoff the extension only selects an option the
+ * real IRCTC dropdown contains; if IRCTC does not offer it for that train the field is reported, never substituted.
  */
 export const BERTH_OPTIONS_BY_CLASS: Readonly<Record<string, readonly BerthPreferenceCode[]>> = Object.freeze({
   SL: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
   '3A': ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
-  '3E': ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
+  '3E': ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_MIDDLE', 'SIDE_UPPER'],
   '2A': ['NO_PREFERENCE', 'LOWER', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'],
   '1A': ['NO_PREFERENCE', 'LOWER', 'UPPER', 'CABIN', 'COUPE'],
   FC: ['NO_PREFERENCE', 'LOWER', 'UPPER'],
@@ -103,7 +105,7 @@ export const BERTH_OPTIONS_BY_CLASS: Readonly<Record<string, readonly BerthPrefe
   '2S': ['NO_PREFERENCE', 'WINDOW'],
   EC: ['NO_PREFERENCE', 'WINDOW']
 });
-type BerthPreferenceCode = 'LOWER' | 'MIDDLE' | 'UPPER' | 'SIDE_LOWER' | 'SIDE_UPPER' | 'WINDOW' | 'CABIN' | 'COUPE' | 'NO_PREFERENCE';
+type BerthPreferenceCode = 'LOWER' | 'MIDDLE' | 'UPPER' | 'SIDE_LOWER' | 'SIDE_UPPER' | 'SIDE_MIDDLE' | 'WINDOW' | 'CABIN' | 'COUPE' | 'NO_PREFERENCE';
 /** Classes whose only IRCTC choice is a seat preference (Window Side), not a berth. */
 export function isSeatPreferenceClass(cls: string | null | undefined): boolean {
   const o = berthOptionsForClass(cls);

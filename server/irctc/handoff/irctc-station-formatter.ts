@@ -40,7 +40,7 @@ export function formatIrctcClass(code: string): { code: string; label: string | 
 
 const GENDER: Record<string, IrctcPassengerFill['gender']> = { MALE: 'Male', FEMALE: 'Female' };
 const BERTH: Record<string, string> = {
-  LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side Lower', SIDE_UPPER: 'Side Upper',
+  LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side Lower', SIDE_UPPER: 'Side Upper', SIDE_MIDDLE: 'Side Middle',
   WINDOW: 'Window Side', CABIN: 'Cabin', COUPE: 'Coupe', NO_PREFERENCE: 'No Preference'
 };
 const FOOD: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non Veg', NO_FOOD: 'No Food' };

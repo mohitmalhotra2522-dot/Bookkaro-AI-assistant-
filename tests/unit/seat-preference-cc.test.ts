@@ -24,6 +24,8 @@ describe('[1] CC / 2S: IRCTC seat preference Window Side — EC & unknown stay e
     expect(berthOptionsForClass('EC')).toEqual(['NO_PREFERENCE', 'WINDOW']);   // real IRCTC 12014 EC page
     expect(berthOptionsForClass('1A')).toEqual(['NO_PREFERENCE', 'LOWER', 'UPPER', 'CABIN', 'COUPE']);
     expect(berthOptionsForClass('3E')).not.toContain('WINDOW');
+    expect(berthOptionsForClass('3E')).toEqual(['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_MIDDLE', 'SIDE_UPPER']);   // IRCTC code SM
+    for (const c of ['SL', '3A', '2A', '1A', 'CC', 'EC']) expect(berthOptionsForClass(c)).not.toContain('SIDE_MIDDLE');
     for (const c of ['EA', 'EV', 'VS', 'XYZ', '']) expect(berthOptionsForClass(c)).toEqual([]);
     expect(berthOptionsForClass('3A')).not.toContain('WINDOW');
     expect(berthOptionsForClass('SL')).not.toContain('WINDOW');
@@ -71,6 +73,10 @@ describe('[1] CC / 2S: IRCTC seat preference Window Side — EC & unknown stay e
     expect(formatIrctcPassenger({ name: 'Rahul Sharma', age: 31, gender: 'MALE', berthPreference: 'CABIN' }, 1).fill.berth).toBe('Cabin');
     expect(formatIrctcPassenger({ name: 'Rahul Sharma', age: 31, gender: 'MALE', berthPreference: 'COUPE' }, 1).fill.berth).toBe('Coupe');
     expect(formatIrctcPassenger({ name: 'Rahul Sharma', age: 31, gender: 'MALE', berthPreference: 'COUPE' }, 1).notConfirmed).toEqual([]);
+    // exact IRCTC labels (labels_en.json): LB Lower, MB Middle, UB Upper, SL Side Lower, SU Side Upper, SM Side Middle, WS Window Side, CB Cabin, CP Coupe
+    const lab = (b: string) => formatIrctcPassenger({ name: 'Rahul Sharma', age: 31, gender: 'MALE', berthPreference: b }, 1).fill.berth;
+    expect(['LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER', 'SIDE_MIDDLE', 'WINDOW', 'CABIN', 'COUPE', 'NO_PREFERENCE'].map(lab))
+      .toEqual(['Lower', 'Middle', 'Upper', 'Side Lower', 'Side Upper', 'Side Middle', 'Window Side', 'Cabin', 'Coupe', 'No Preference']);
   });
 });
 

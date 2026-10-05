@@ -432,3 +432,12 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   New enum values WINDOW (existing), CABIN, COUPE → IRCTC labels "Window Side" / "Cabin" / "Coupe" in the handoff.
   Also fixed: live trains selected via the agent were labelled MOCK ("Development data — not live") — `setSelectedTrain`
   now derives LIVE from the row's provider (unknown stays MOCK). Tests: `tests/unit/seat-preference-cc.test.ts`.
+
+## Berth/seat preferences — confirmed from IRCTC's own code (uncommitted, after f0271fc)
+- Source: www.irctc.co.in/nget lazy chunk `8-es2015.d29198c5a744dd83df7f.js` (BookingModule, `app-passenger-input`),
+  `main` berthName pipe, `assets/json/labels_en.json` (fetched Oct 2026).
+- IRCTC passenger berth <select> = `No Preference` + `bookingConfigurables.applicableBerthTypes` (server bkgCfg, per
+  train/class/date, after login — BookKaro never calls it). Codes→labels: LB Lower, MB Middle, UB Upper, SL Side Lower,
+  SU Side Upper, SM Side Middle, WS Window Side, CB Cabin, CP Coupe.
+- Change: added `SIDE_MIDDLE` (IRCTC SM, "Side Middle") for 3E only; constants comment cites the IRCTC source; form note
+  says IRCTC decides per train. Extension unchanged (labels already exact; unknown option → field reported, never substituted).

@@ -12,7 +12,7 @@ import { formatDate } from '../../lib/format';
  * when offered). Nothing is calculated or invented here.
  */
 const BERTH_LABEL: Record<string, string> = {
-  NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', WINDOW: 'Window side', CABIN: 'Cabin', COUPE: 'Coupe'
+  NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', SIDE_MIDDLE: 'Side middle', WINDOW: 'Window side', CABIN: 'Cabin', COUPE: 'Coupe'
 };
 const FOOD_LABEL: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non-veg', NO_FOOD: 'No food' };
 const GENDERS: Array<[string, string]> = [['MALE', 'Male'], ['FEMALE', 'Female'], ['OTHER', 'Transgender']];
@@ -142,7 +142,7 @@ export const PassengerFormPage: React.FC<Props> = ({ sessionId, onClose, onSaved
             </section>
 
             <section className="bk-pform__notes" aria-label="Train facilities">
-              <div className="bk-pform__note"><IconInfo size={15} /> <span>{spec.berth.note || `Berth choice: ${spec.travelClass} coach layout ke hisaab se. Allotment railway karti hai — preference guarantee nahi.`}</span></div>
+              <div className="bk-pform__note"><IconInfo size={15} /> <span>{spec.berth.note || `Berth choice: ${spec.travelClass} ke IRCTC options. Allotment railway karti hai — preference guarantee nahi. IRCTC is train ke liye koi option na de toh woh field IRCTC par aap khud chuniye.`}</span></div>
               <div className="bk-pform__note"><IconInfo size={15} /> <span>{spec.food.note}{spec.food.source ? ` (Source: ${spec.food.source})` : ''}</span></div>
             </section>
 
