@@ -299,7 +299,12 @@ export class IrctcHandoffManager {
     };
   }
 
-  private sync(s: BookingSession, rec: IrctcHandoffRecord): void { s.irctcHandoff = this.view(rec); }
+  /**
+   * Session copy = statuses / field names only. The user-facing message (it names login / OTP / CAPTCHA steps the user
+   * does on IRCTC) is rendered for the API view and the chat card, never persisted on the BookingSession, so the session
+   * never carries credential vocabulary (P33 [18] invariant).
+   */
+  private sync(s: BookingSession, rec: IrctcHandoffRecord): void { const { message: _m, ...v } = this.view(rec); s.irctcHandoff = v; }
 }
 
 /** Strict event parser — unknown keys (e.g. a field VALUE) are rejected: events are metadata only. */

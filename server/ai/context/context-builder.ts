@@ -13,6 +13,7 @@
  * is ALSO built from BookingSession — an LLM-generated summary can never
  * replace BookingSession.
  */
+import { optionalToAsk, passengerOptionsView } from '../../booking/passenger-options';
 import { referenceContextView } from './reference-context';
 import type { BookingSession } from '@shared/entities';
 import { currentResults } from './train-reference-resolver';
@@ -88,6 +89,9 @@ export function bookingPreparationView(s: BookingSession) {
     return { passenger: k + 1, ...(p.name ? { name: p.name } : {}), ...(p.age ? { age: p.age } : {}), ...(p.gender ? { gender: p.gender } : {}),
       ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}), ...(p.foodPreference ? { foodPreference: p.foodPreference } : {}), missing: miss };
   });
+  // P39.2: optional details this train + class actually offer and the user has not answered yet (ask once)
+  const alsoAsk: string[] = [];
+  for (let k = 0; k < count; k++) for (const f of optionalToAsk(s, (s.passengers || [])[k])) alsoAsk.push(`passenger${k + 1}.${f}`);
   const missing: string[] = [];
   if (!s.origin) missing.push('origin');
   if (!s.destination) missing.push('destination');
@@ -101,6 +105,9 @@ export function bookingPreparationView(s: BookingSession) {
     origin: s.origin ?? null, destination: s.destination ?? null, journeyDate: s.date ?? null,
     train: t ? { number: String(t.number || t.trainNumber), name: t.name || t.trainName } : null,
     class: s.selectedClass ?? null, passengerCount: count || null, passengers, missing,
+    // P39.2: berth choices of the selected class + meal status from provider data (NOT_CHECKED → GET_TRAIN_INFO)
+    ...((): { passengerOptions?: ReturnType<typeof passengerOptionsView> } => { const o = passengerOptionsView(s); return o ? { passengerOptions: o } : {}; })(),
+    ...(alsoAsk.length ? { alsoAsk } : {}),
     // matching provider result for the CURRENT train/class/date/route (not a value — never reuse an old fare/availability)
     availabilityCheck: DEP_VIEW[availabilityStatus(s).status], fareCheck: DEP_VIEW[fareStatus(s).status],
     review, confirmation: confirmationStatusOf(s), handoff: s.handoffSession?.status ?? s.handoff?.status ?? null

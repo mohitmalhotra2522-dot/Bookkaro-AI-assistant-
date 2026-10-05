@@ -5,7 +5,9 @@
  *   name            required  non-empty letters (2–40 chars), no digits
  *   age             required  integer 1–120
  *   gender          required  enum MALE | FEMALE | OTHER
- *   berthPreference optional  enum BerthPreference (never asked for)
+ *   berthPreference optional  enum BerthPreference (P39.2: asked in chat only for classes with berth choices)
+ *   foodPreference  optional  enum VEG | NON_VEG | NO_FOOD (P39.2: only when provider data says catering — gated by
+ *                             passenger-options.ts with the session; this validator checks the enum only)
  *
  * Anything else proposed by the LLM (phone, email, aadhaar, password, OTP …)
  * is NOT part of the contract: it is dropped and reported by key name only
@@ -14,15 +16,16 @@
  * LLM extraction is untrusted: every value goes through this validator before
  * it can reach BookingSession.
  */
-import type { Passenger, Gender, BerthPreference } from '@shared/entities';
+import type { Passenger, Gender, BerthPreference, FoodPreference } from '@shared/entities';
 import { PASSENGER_REQUIRED_FIELDS } from '@shared/constants';
 import { resolvePassengerAge, resolvePassengerGender } from '../ai/agent/passenger-resolvers';
 
-export type PassengerField = 'name' | 'age' | 'gender' | 'berthPreference';
-export const SCHEMA_FIELDS: ReadonlySet<string> = new Set(['name', 'age', 'gender', 'berthPreference']);
+export type PassengerField = 'name' | 'age' | 'gender' | 'berthPreference' | 'foodPreference';
+export const SCHEMA_FIELDS: ReadonlySet<string> = new Set(['name', 'age', 'gender', 'berthPreference', 'foodPreference']);
 
 const BERTHS: BerthPreference[] = ['WINDOW', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER', 'NO_PREFERENCE'];
 const GENDERS: Gender[] = ['MALE', 'FEMALE', 'OTHER'];
+const FOODS: FoodPreference[] = ['VEG', 'NON_VEG', 'NO_FOOD'];
 
 /** Words that must never be accepted as a passenger name (railway / command / secret words). */
 const NOT_A_NAME = /\b(hai|hain|galat|sahi|theek|karo|kardo|train|fare|ticket|class|availability|date|kal|parso|seat|pnr|station|book|booking|cancel|confirm|haan|nahi|passenger|passengers|naam|name|age|umar|gender|male|female|otp|password|captcha|pin|cvv|upi|card|token|cookie|delhi|amritsar|ludhiana|chandigarh|jalandhar|change|remove|hata|add)\b/i;
@@ -35,7 +38,7 @@ export interface PassengerFieldError {
 
 export interface PassengerValidationResult {
   /** Canonical, valid values only. */
-  valid: Partial<Pick<Passenger, 'name' | 'age' | 'gender' | 'berthPreference'>>;
+  valid: Partial<Pick<Passenger, 'name' | 'age' | 'gender' | 'berthPreference' | 'foodPreference'>>;
   errors: PassengerFieldError[];
   /** Keys outside the passenger contract (dropped). Key names only. */
   rejectedFields: string[];
@@ -71,6 +74,12 @@ export class PassengerValidator {
           const b = String(v).toUpperCase().replace(/\s+/g, '_') as BerthPreference;
           if (BERTHS.includes(b)) out.valid.berthPreference = b;
           else out.errors.push({ field: 'berthPreference', code: 'INVALID_PASSENGER_DETAILS', message: 'Berth preference samajh nahi aayi.' });
+          break;
+        }
+        case 'foodPreference': {
+          const f = String(v).toUpperCase().trim().replace(/[\s-]+/g, '_').replace(/^NONVEG$/, 'NON_VEG').replace(/^NOFOOD$/, 'NO_FOOD') as FoodPreference;
+          if (FOODS.includes(f)) out.valid.foodPreference = f;
+          else out.errors.push({ field: 'foodPreference', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ke khane ki choice Veg, Non-veg ya No food batayein.` });
           break;
         }
       }

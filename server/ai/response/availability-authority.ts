@@ -138,6 +138,7 @@ const THIS_TRAIN_RE = /\b(is|iss|us|uss|yeh|ye|this|that)\s+(train|gaadi|gadi)\b
 const TRAIN_NUM_RE = /\b\d{5}\b/g;
 const DAY_RE = /\b(aaj|today|kal|tomorrow|parso|parson|day after tomorrow)\b/i;
 const SEAT_WORD_RE = /\b(seats?|berths?)\b/i;
+const BERTH_PREF_RE = /\b(?:(?:side\s+)?(?:lower|middle|upper)|side)\s+berths?\b|\bberths?\s+(?:preferences?|choices?|options?|pasand)\b/gi;
 const HYPOTHETICAL_RE = /\b(jaise|example|for example|e\.g\.|maan\s+(lo|lijiye|lijie)|suppose|say|cancel\w*|cancellation|chart\s+ban\w*|upgrade|move\s+up|aage\s+badh\w*|kam\s+ho\w*)\b/i;
 const DEFINITE_PROMISE_RE = /\b(milega|milegi|milenge|you\s*'?ll\s+get|you\s+will\s+get|aapko\s+\w+\s+mil\s+(gaya|gayi)|abhi|currently|right\s+now)\b/i;
 
@@ -153,7 +154,10 @@ export function isClassEnumeration(t: string): boolean {
 
 /** Linguistic classification only — says WHAT a sentence is, never whether it is true. */
 export function classifyAvailabilityClaim(t: string, origin: 'USER' | 'ASSISTANT' = 'ASSISTANT'): AvailabilityClassification {
-  const text = String(t || '');
+  // P39.2: asking for / noting a passenger's BERTH PREFERENCE ("12926 3A mein berth preference batayein", "Lower berth
+  // note kiya") is not seat-availability vocabulary. Only these phrases are neutralised — "available", "khaali", seat /
+  // status words and codes in the same sentence are still classified exactly as before.
+  const text = String(t || '').replace(BERTH_PREF_RE, 'preference');
   const neg = NEG_STATE_RE.test(text);
   if (!AVAIL_WORD_RE.test(text) && !neg) return 'NONE';
   const code = STATUS_NUM_RE.test(text);

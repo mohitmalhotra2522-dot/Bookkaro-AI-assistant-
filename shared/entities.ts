@@ -106,7 +106,7 @@ export interface Passenger {
   age?: number;
   gender?: Gender;
   berthPreference?: BerthPreference;
-  /** P38: set ONLY from the passenger form, and only for a train whose provider data says catering is included. */
+  /** P38/P39.2: from the passenger form or a validated chat proposal — only for a train whose provider data says catering is included. */
   foodPreference?: FoodPreference;
   manuallyEdited?: boolean;
   missingFields?: ('name' | 'age' | 'gender' | 'berthPreference')[];
@@ -171,6 +171,8 @@ export interface BookingSession {
   // Ephemeral cache of most recent tool results for response enrichment (never
   // treated as authoritative booking state).
   lastTrainInfo?: any;
+  /** P39.2: provider facilities fetched by the passenger form for `trainNumber` (no values beyond catering / pantry flags). */
+  trainFacilities?: { trainNumber: string; catering: boolean | null; pantry: boolean | null; provider: string | null; dataSource: 'LIVE' | 'MOCK' | null };
   lastTimetable?: any;
 
   // ---- Multi-turn context hardening (Prompt 8) ----
@@ -253,7 +255,8 @@ export interface BookingSession {
   /** Current short-lived handoff session (READY / EXPIRED / INVALIDATED / FAILED). */
   handoffSession?: BookingHandoffSession;
   /** P39: user-controlled IRCTC handoff (client view only — no passenger values, no bridge token). */
-  irctcHandoff?: import('./irctc-handoff').IrctcHandoffView;
+  /** P39: statuses / field names only — the user-facing message is never persisted on the session. */
+  irctcHandoff?: Omit<import('./irctc-handoff').IrctcHandoffView, 'message'>;
   /** Status history of handoff sessions (snapshots never mutated). */
   handoffSessionHistory?: Array<{ handoffSessionId: string; bookingHandoffId: string; status: HandoffSessionStatus; statusReason?: string; at: string }>;
 

@@ -28,6 +28,7 @@ import { createServerSTT, createServerTTS, voiceProviderStatus } from './voice/l
 import { registerVoiceRoutes } from './voice/live/voice-routes';
 import { createElevenLabsBatchSTT } from './voice/stt/elevenlabs-batch-stt';
 import { applyForm, buildFormSpec, fetchTrainFacilities, formNotReady, validateForm } from './booking/passenger-form';
+import { awaitTrainFacilities, prefetchTrainFacilities } from './booking/train-facilities-prefetch';
 import { enabledWebConnectors, webCapabilityMatrix } from './railway/providers/web/web-providers';
 import { IRCTC_BRIDGE_TOKEN_HEADER } from '@shared/irctc-handoff';
 import { mockIrctcEnabled, renderMockIrctc, MOCK_IRCTC_SCENARIOS } from './irctc/mock/mock-irctc';
@@ -91,6 +92,9 @@ server.post('/api/chat', async (request, reply) => {
   }
   // Prompt 18: TEXT and STT transcripts share the SAME turn engine → orchestrator → runtime pipeline
   // Prompt 34 (§3): an interim / empty transcript is refused BEFORE a turn exists (422 — no LLM, no tool, no state)
+  // P39.2: catering flags for the selected train (meal question) — bounded wait, never blocks / fails the turn
+  const sessionOf = () => (stateManager.hasSession(sessionId) ? stateManager.getSession(sessionId) : undefined);
+  await awaitTrainFacilities(sessionOf, sessionId);
   let result;
   try { result = await turnEngine.processTurn(sessionId, text, mode === 'VOICE' ? 'VOICE' : 'TEXT', {
     interruptPrevious: bargeIn === true,
@@ -104,6 +108,7 @@ server.post('/api/chat', async (request, reply) => {
     if (e instanceof VoiceTranscriptRejectedError) return reply.status(422).send({ sessionId, error: e.code, message: e.message });
     throw e;
   }
+  void prefetchTrainFacilities(sessionOf, sessionId);   // P39.2: a train + class selected this turn → fetch once for the next turn
   const ctx = result.context;
   if (result.error?.code === 'SESSION_VERSION_CONFLICT') reply.status(409);
   return reply.send({
@@ -165,6 +170,15 @@ server.get('/api/session/:id/turn-events', async (request, reply) => {
  * catering info for the selected train (fetched fresh from the provider that produced the results); POST applies the
  * form as an explicit user edit after deterministic validation. Values are never logged.
  */
+/** P39.2: the form's fresh provider facilities also tell the chat whether a meal choice exists (keyed by train number). */
+function rememberFacilities(id: string, f: Awaited<ReturnType<typeof fetchTrainFacilities>>) {
+  if (f.error || !stateManager.hasSession(id)) return;
+  const s: any = stateManager.getSession(id);
+  const t: any = s.selectedTrain;
+  const trainNumber = String(t?.number || t?.trainNumber || '');
+  if (trainNumber) s.trainFacilities = { trainNumber, catering: f.catering, pantry: f.pantry, provider: f.provider, dataSource: f.dataSource };
+}
+
 server.get('/api/session/:id/passenger-form', async (request, reply) => {
   const { id } = request.params as any;
   if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
@@ -172,6 +186,7 @@ server.get('/api/session/:id/passenger-form', async (request, reply) => {
   const nr = formNotReady(s);
   if (nr) return reply.status(nr.status).send({ code: nr.code, message: nr.message });
   const facilities = await fetchTrainFacilities(s);
+  rememberFacilities(id, facilities);
   return reply.send(buildFormSpec(stateManager.getSession(id), facilities));
 });
 
@@ -187,6 +202,7 @@ server.post('/api/session/:id/passenger-form', async (request, reply) => {
   }
   // catering is re-checked fresh from the provider on every submit (never trusted from the client)
   const facilities = await fetchTrainFacilities(s);
+  rememberFacilities(id, facilities);
   const v = validateForm(body, stateManager.getSession(id), facilities);
   if (!v.ok) return reply.status(v.error.status).send({ code: v.error.code, message: v.error.message, fieldErrors: v.error.fieldErrors });
   if (stateManager.getSession(id).sessionVersion !== s.sessionVersion) {

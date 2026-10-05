@@ -301,7 +301,9 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
         trainRef, classRaw: STR('class as said, e.g. "CC", "AC", "sleeper"'),
         passengersCountRaw: STR('passenger count as said'), passengersDelta: { type: 'number' },
         passengerChanges: { type: 'array', items: { type: 'object', properties: { passengerIndex: { type: 'number' }, changes: { type: 'object', properties: {
-          name: { type: 'string' }, age: { type: 'number' }, gender: { type: 'string' }, berthPreference: { type: 'string' } } } } } },
+          name: { type: 'string' }, age: { type: 'number' }, gender: { type: 'string' },
+          berthPreference: { type: 'string', enum: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'], description: 'only a choice listed in context.bookingPreparation.passengerOptions.berth.options' },
+          foodPreference: { type: 'string', enum: ['VEG', 'NON_VEG', 'NO_FOOD'], description: 'only when context.bookingPreparation.passengerOptions.food.status is OFFERED' } } } } } },
         correctionTarget: STR('origin|destination|date|passengers|train|class'), correctionValueRaw: STR('corrected value as said'),
         affirmation: { type: 'boolean' }, newJourney: { type: 'boolean' },
         selectionPurpose: { type: 'string', enum: ['INFORMATION', 'BOOKING'], description: 'Why a train/class is selected: INFORMATION = only to answer an availability / fare question (no booking started); BOOKING = the user wants to book.' },

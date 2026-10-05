@@ -17,6 +17,7 @@ import { MAX_PASSENGERS } from '@shared/constants';
 import type { PassengerCollectionState, PassengerCollectionView } from '@shared/booking-preparation';
 import type { PassengerRef, PassengerUpdateRaw, OrchestratorErrorCode } from '../ai/decisions/agent-decision';
 import { canonicalName, passengerValidator, type PassengerFieldError } from './passenger-validator';
+import { gateOptionalField, berthLabel, foodLabel } from './passenger-options';
 
 export type RefResolution =
   | { ok: true; passenger: Passenger; index: number }
@@ -33,7 +34,7 @@ export interface UpdateOutcome {
 }
 
 const ORD = ['Pehle', 'Doosre', 'Teesre', 'Chauthe', 'Paanchve', 'Chhathe'];
-const FIELD_LABEL: Record<string, string> = { name: 'naam', age: 'umar', gender: 'gender', berthPreference: 'berth preference' };
+const FIELD_LABEL: Record<string, string> = { name: 'naam', age: 'umar', gender: 'gender', berthPreference: 'berth preference', foodPreference: 'khane ki choice' };
 const GENDER_LABEL: Record<string, string> = { MALE: 'male', FEMALE: 'female', OTHER: 'other' };
 
 export const passengerLabel = (p: Passenger | undefined, index: number) => p?.name || `Passenger ${index + 1}`;
@@ -208,6 +209,14 @@ export class PassengerCollection {
       const label = passengerLabel(p, target.index);
       // 2) validate (untrusted)
       const v = passengerValidator.validatePartial(fields, label);
+      // P39.2: berth only from the SELECTED class's choices, meal only when provider data says catering is included
+      // (same rules as the P38 form) — a value that is not offered is dropped with a reason, never stored
+      for (const k of ['berthPreference', 'foodPreference'] as const) {
+        const val = (v.valid as any)[k];
+        if (val === undefined) continue;
+        const g = gateOptionalField(s, k, String(val));
+        if (!g.ok) { delete (v.valid as any)[k]; if (!g.silent && !out.notes.includes(g.message)) out.notes.push(g.message); }
+      }
       out.rejectedFields.push(...v.rejectedFields);
       out.errors.push(...v.errors);
       // 3) write — explicit updates may overwrite (announced); implicit ones only fill gaps
@@ -254,10 +263,12 @@ export class PassengerCollection {
 }
 
 /** Hinglish possessive with correct gender agreement: "ka naam", "ki umar", "ka gender". */
-function poss(k: string): string { return `${k === 'age' ? 'ki' : 'ka'} ${FIELD_LABEL[k]}`; }
+function poss(k: string): string { return k === 'foodPreference' ? FIELD_LABEL[k] : `${k === 'age' ? 'ki' : 'ka'} ${FIELD_LABEL[k]}`; }
 
 function show(k: string, v: any): string {
   if (k === 'gender') return GENDER_LABEL[v] || String(v).toLowerCase();
+  if (k === 'berthPreference') return berthLabel(String(v));
+  if (k === 'foodPreference') return foodLabel(String(v));
   return String(v);
 }
 

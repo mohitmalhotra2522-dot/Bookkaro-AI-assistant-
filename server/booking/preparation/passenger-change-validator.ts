@@ -1,7 +1,8 @@
 /**
  * PROMPT 19 — Parts 13–14: PassengerChangeValidator.
  *
- * The LLM may PROPOSE `{ passengerIndex, changes: { name, age, gender, berthPreference } }`. This validator
+ * The LLM may PROPOSE `{ passengerIndex, changes: { name, age, gender, berthPreference, foodPreference } }`
+ * (P39.2: berth / meal are additionally gated per class / catering in PassengerCollection.applyUpdates). This validator
  * decides — the proposal never reaches BookingSession unless:
  *   - passengerIndex exists in the CURRENT passenger list         else INVALID_PASSENGER_INDEX
  *   - every field is part of the existing Passenger contract     else INVALID_PASSENGER_FIELD
@@ -20,7 +21,7 @@ const SENSITIVE_KEY = /(pass(word)?|pwd|otp|captcha|cvv|cvc|card|upi|pin|bank|to
 export interface PassengerChangeProposal { passengerIndex: number; changes: Record<string, unknown> }
 
 export type PassengerChangeValidation =
-  | { ok: true; passengerIndex: number; passengerId: string; changes: Partial<Record<'name' | 'age' | 'gender' | 'berthPreference', any>> }
+  | { ok: true; passengerIndex: number; passengerId: string; changes: Partial<Record<'name' | 'age' | 'gender' | 'berthPreference' | 'foodPreference', any>> }
   | { ok: false; code: 'INVALID_PASSENGER_INDEX' | 'INVALID_PASSENGER_FIELD' | 'INVALID_PASSENGER_VALUE' | 'SENSITIVE_DATA_REJECTED'; passengerIndex: number; fields: string[]; message: string };
 
 export class PassengerChangeValidator {
@@ -37,7 +38,7 @@ export class PassengerChangeValidator {
     const unknown = keys.filter(k => !SCHEMA_FIELDS.has(k));
     if (unknown.length) {
       return { ok: false, code: 'INVALID_PASSENGER_FIELD', passengerIndex: idx, fields: unknown,
-        message: 'Passenger ke liye sirf naam, umar, gender aur berth preference liye ja sakte hain.' };
+        message: 'Passenger ke liye sirf naam, umar, gender, berth preference aur khane ki choice liye ja sakte hain.' };
     }
     const at = resolveIndexNumber(s, idx);
     if (!at || !at.ok) {

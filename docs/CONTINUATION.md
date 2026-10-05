@@ -348,6 +348,31 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   / Continue / Pay are **highlighted, never clicked**; user edits always win (pause + ask); a passenger page showing a
   different train than the review → nothing filled, paused (TRAIN_DIFFERENT_ON_PAGE) until the user taps Resume.
   Mock-data handoffs are refused on real IRCTC. No `pagehide` "flow ended" (navigation also fires it).
+- **P39.1 (user report: passenger details not filled on IRCTC)** — v0.39.1: a CSS-hidden login form made the passenger
+  page detect as LOGIN (visibility now uses computed style); the name field is `<p-autocomplete formcontrolname=
+  "passengerName">` wrapping a plain input (wrapper formcontrolname is now part of the descriptor); IRCTC journey
+  defaults (today's date, last search) are replaceable unless the user edited them (passenger fields stay strict);
+  assistant pauses are page-scoped; retries while Angular renders; "+ Add Passenger" only after the row count has been
+  stable for 2.5 s; "Fill again" button + metadata-only diagnostics line; `/nget/` route fallback. MockIRCTC now has
+  23 scenarios (`irctc-home-defaults`, `irctc-passenger-real`, `irctc-passenger-late`).
+- **P39.2 (user report: "LLM form open hone par details khud nahi pooch rha")** — the agent now ASKS passenger details in
+  chat / voice (name, age, gender + berth preference only for classes with berths, meal Veg / Non-veg / No food only
+  when the provider schedule says catering); answers go into `s.passengers` and the passenger form shows them
+  prefilled (form stays as an alternative). Pieces: `server/booking/passenger-options.ts` (berth options per class from
+  the standard IR layout, `foodStatusOf`, `gateOptionalField` — a value not offered is dropped with a reason, never
+  stored); `foodPreference` accepted end-to-end (validator, collection, change-validator, tool schema, prompt);
+  context `bookingPreparation.passengerOptions` + top-level `alsoAsk` (never per-passenger keys — p33 [2] toEquals the
+  per-passenger shape); `server/booking/train-facilities-prefetch.ts` — once train + class are selected the backend
+  fetches that train's catering flags once (same `fetchTrainFacilities` the form uses, provider of the results), fire-
+  and-forget after the turn, awaited ≤3 s before the next turn; failure → NOT_CHECKED/UNKNOWN → no meal offered.
+  turn-applier: SHOW_REVIEW while COLLECTING_PASSENGER_DETAILS is no longer refused (preparation runs after the tool
+  loop and decides: review if every gate passes, else the next missing detail) — before this, "details + review" in
+  one turn always answered "Review ke liye abhi details poori nahi hain". Also fixed p33 unit [18] (P39 handoff
+  `message` was persisted on the session; `sync()` now strips it — text lives in API view / card only).
+  Known: p33 e2e G3 [21] fails since P39 — the spec-mandated READY handoff text names CAPTCHA/OTP and that test scans
+  turn responses for those words (reword e.g. "login, security checks…" if the user wants). Tests:
+  `tests/unit/p39-2-passenger-chat.test.ts` (14). Live Muse check (3 flows, 3A berth / CC meal / 2A no-catering) → all
+  reached a correct review.
 - **Real IRCTC DOM was never inspected** (Akamai 403 from the sandbox). MockIRCTC (20 scenarios,
   `server/irctc/mock/mock-irctc.ts`) is a reconstruction; selectors use labels / placeholders / formcontrolname /
   ARIA, not fixed ids. G5 (real IRCTC up to, not including, the paid booking) is **user-run**.

@@ -460,7 +460,7 @@ const App: React.FC = () => {
                 <div className="bk-chat__dock-inner">
                   {canOpenPaxForm && !isLoading && (
                     <div className="bk-formcta">
-                      <span>{ctxAny?.selectedTrain?.number} · {ctxAny?.selectedClass} — passenger details form mein bharein</span>
+                      <span>{ctxAny?.selectedTrain?.number} · {ctxAny?.selectedClass} — passenger details chat / voice mein bataiye ya form mein bharein</span>
                       <button type="button" className="bk-btn bk-btn--primary bk-btn--sm" onClick={openPaxForm}>Passenger form</button>
                     </div>
                   )}

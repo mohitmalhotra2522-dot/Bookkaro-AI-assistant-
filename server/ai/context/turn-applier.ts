@@ -494,8 +494,8 @@ export class ContextualTurnApplier {
       })();
       if (!resolved) return fail('INVALID_PASSENGER_INDEX', 'Kis passenger ki detail badalni hai? Passenger number batayein.');
       // Prompt 19 (Part 14): a field outside the Passenger contract is rejected — never silently mapped to "name"
-      if (!['name', 'age', 'gender', 'berthPreference'].includes(e.passengerFieldChange.field)) {
-        return fail('INVALID_PASSENGER_FIELD', 'Passenger ke liye sirf naam, umar, gender aur berth preference liye ja sakte hain.');
+      if (!['name', 'age', 'gender', 'berthPreference', 'foodPreference'].includes(e.passengerFieldChange.field)) {
+        return fail('INVALID_PASSENGER_FIELD', 'Passenger ke liye sirf naam, umar, gender, berth preference aur khane ki choice liye ja sakte hain.');
       }
       const field = e.passengerFieldChange.field;
       s.lastPassengerRefId = resolved.passenger.id;
@@ -533,7 +533,12 @@ export class ContextualTurnApplier {
           out.notes.push(ctx.mode === 'VOICE' ? again.voiceText : again.text);
           out.applied.push('REVIEW_PRESENTED');
         }
-      } else if (![BookingState.PASSENGERS_READY].includes(s.bookingState)) {
+      } else if (![BookingState.PASSENGERS_READY].includes(s.bookingState)
+        // P39.2: while passenger details are being collected, this turn's details (same decision or an earlier round of
+        // the same turn — "Rahul 32 male lower …, review dikhao") may complete the set, but booking preparation only
+        // runs AFTER the tool loop. So the request is not refused here: preparation decides — review if every gate
+        // passes, else it asks the exact next missing detail. Nothing is skipped; only the premature refusal is.
+        && s.bookingState !== BookingState.COLLECTING_PASSENGER_DETAILS) {
         return fail('BOOKING_NOT_READY', 'Review ke liye abhi details poori nahi hain.');
       }
     }
@@ -706,7 +711,7 @@ export class ContextualTurnApplier {
     passengerCollection.ensureSlots(s);
     const r = passengerCollection.applyUpdates(s, e.passengerUpdates || []);
     const notes = [...r.notes];
-    if (r.rejectedFields.length) notes.push('Main passengers ke liye sirf naam, umar aur gender hi leta hoon — baaki jaankari store nahi ki.');
+    if (r.rejectedFields.length) notes.push('Main passengers ke liye sirf naam, umar, gender, berth preference aur khane ki choice hi leta hoon — baaki jaankari store nahi ki.');
     if (r.refError && !r.changed) return { error: { code: r.refError.code, message: r.refError.message }, notes, applied: [] };
     if (r.refError) notes.push(r.refError.message);
     if (!r.changed && r.errors.length) {
