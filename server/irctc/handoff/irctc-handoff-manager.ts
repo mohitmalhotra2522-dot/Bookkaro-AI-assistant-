@@ -9,11 +9,11 @@
  *   confirmation page was detected; a flow that ends after the final step without it is BOOKING_STATUS_UNKNOWN.
  * - Never sets BookingSession COMPLETE and never touches the booking state machine.
  */
-import { randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import type { BookingSession } from '@shared/entities';
 import {
   IRCTC_FILLABLE_FIELDS, IRCTC_HANDOFF_TTL_MS, IRCTC_MAX_PASSENGERS, IRCTC_PAGE_KINDS, IRCTC_TERMINAL_STATUSES, IRCTC_TEXT, IRCTC_USER_ACTIONS,
-  irctcStatusMessage, type IrctcFillableField, type IrctcHandoffErrorCode, type IrctcHandoffEvent, type IrctcHandoffSnapshot,
+  IRCTC_HANDOFF_SCHEMA_VERSION, irctcIntegrityPayload, irctcStatusMessage, type IrctcFillableField, type IrctcHandoffErrorCode, type IrctcHandoffEvent, type IrctcHandoffSnapshot,
   type IrctcHandoffStatus, type IrctcHandoffView, type IrctcLanguage, type IrctcPageKind
 } from '@shared/irctc-handoff';
 import { reviewFingerprint } from '../../booking/review-builder';
@@ -36,7 +36,7 @@ interface IrctcHandoffRecord {
   createdAt: number;
   expiresAt: number;
   updatedAt: number;
-  data: Omit<IrctcHandoffSnapshot, 'status' | 'language' | 'message' | 'handoffId' | 'createdAt' | 'expiresAt' | 'notConfirmed' | 'userActions'>;
+  data: Omit<IrctcHandoffSnapshot, 'status' | 'language' | 'message' | 'handoffId' | 'createdAt' | 'expiresAt' | 'notConfirmed' | 'userActions' | 'schemaVersion' | 'sourceReviewVersion' | 'integrity'>;
   notConfirmed: NotConfirmed[];
   filledFields: Set<IrctcFillableField>;
   userOverrides: Set<IrctcFillableField>;
@@ -293,10 +293,13 @@ export class IrctcHandoffManager {
   }
 
   private snapshotOf(rec: IrctcHandoffRecord): IrctcHandoffSnapshot {
-    return {
+    const base = {
       handoffId: rec.handoffId, status: rec.status, createdAt: new Date(rec.createdAt).toISOString(), expiresAt: new Date(rec.expiresAt).toISOString(),
-      language: rec.language, ...structuredClone(rec.data), userActions: IRCTC_USER_ACTIONS, notConfirmed: rec.notConfirmed.map(n => ({ ...n })), message: this.message(rec)
+      language: rec.language, ...structuredClone(rec.data), userActions: IRCTC_USER_ACTIONS, notConfirmed: rec.notConfirmed.map(n => ({ ...n })), message: this.message(rec),
+      schemaVersion: IRCTC_HANDOFF_SCHEMA_VERSION, sourceReviewVersion: rec.reviewVersion
     };
+    // P39.3: integrity over the validated payload, keyed by this handoff's bridge token (no new secret / env var)
+    return { ...base, integrity: createHmac('sha256', rec.bridgeToken).update(irctcIntegrityPayload(base)).digest('hex') };
   }
 
   /**

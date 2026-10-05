@@ -373,6 +373,21 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   turn responses for those words (reword e.g. "login, security checks…" if the user wants). Tests:
   `tests/unit/p39-2-passenger-chat.test.ts` (14). Live Muse check (3 flows, 3A berth / CC meal / 2A no-catering) → all
   reached a correct review.
+- **P39.3 (IRCTC handoff + real browser autofill completion, extension v0.39.3)** — additive only. Backend `snapshotOf`
+  adds `schemaVersion`, `sourceReviewVersion` (= record reviewVersion) and `integrity` = HMAC-SHA256(bridgeToken,
+  `irctcIntegrityPayload`) (shared/irctc-handoff.ts: `canonicalJson`, `IRCTC_INTEGRITY_FIELDS`, error-code list).
+  New `extension/irctc-handoff-guard.js` (exact host `www.irctc.co.in` + `/nget/`, or mock `/api/dev/mock-irctc[/…]`;
+  strict schema; binding handoffId + reviewVersion; expiry; WebCrypto HMAC) — loaded first by the IRCTC content
+  script and by background.js (`importScripts`). Assist page posts `reviewVersion`; BK_REGISTER requires it; refusals =
+  `STALE_IRCTC_HANDOFF` + reason and the registration is dropped. BK_GET_SNAPSHOT / BK_EVENT only from approved
+  IRCTC senders. irctc-core: PrimeNG p-dropdown (async panel), async station flow (focus/keydown/input/keyup, exact
+  "- CODE", settle re-check), p-calendar re-verify, language "preferred language" dialog (buttons scoped to it),
+  TRAIN_LIST before HOME_SEARCH + `app-train-avl-enq`, bare class tabs, date-cell highlight, passenger placeholder
+  "Full Name as per Govt. ID", maxlength (never truncates), post-fill re-read; additive `rep.errors` (typed codes) and
+  `rep.stopped` (station/date failure → Search not highlighted). `rep.skipped` reasons unchanged. Real-like mock pages
+  in `server/irctc/mock/mock-irctc-real.ts` (`MOCK_IRCTC_REAL_SCENARIOS`; the original 23 untouched). Tests:
+  `tests/unit/p39-3-irctc-autofill.test.ts` (16, real timers) + `tests/integration/p39-3-irctc-handoff-guard.test.ts` (6).
+  G5 (real IRCTC) is user-run only.
 - **Real IRCTC DOM was never inspected** (Akamai 403 from the sandbox). MockIRCTC (20 scenarios,
   `server/irctc/mock/mock-irctc.ts`) is a reconstruction; selectors use labels / placeholders / formcontrolname /
   ARIA, not fixed ids. G5 (real IRCTC up to, not including, the paid booking) is **user-run**.
@@ -401,3 +416,7 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
 3. Wait for the user's prompt. Audit, then implement after IMPLEMENT.
 4. Add `tests/unit/pNN-*.test.ts` + `tests/integration/pNN-*-e2e.test.ts`. Run G1/G2/G3 once each.
 5. Update this file (history row, new invariants). Commit. Build the zip (with `dist/` + `docs/`). Report. STOP.
+- **P39.3 verification (extension v0.39.4)** — smallest additive fix: date fill fires one `keydown` before setting the
+  value (PrimeNG Calendar `isKeydown` guard); mock p-calendar emulates the guard (test [8] fails without the fix).
+  User test package: `bookkaro-irctc-user-test-package.zip` (guide, result form, env template — no secrets).
+  G5 real IRCTC = USER VERIFICATION REQUIRED.

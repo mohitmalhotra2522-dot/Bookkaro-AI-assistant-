@@ -111,6 +111,13 @@ export interface IrctcHandoffSnapshot {
   userActions: readonly string[];
   notConfirmed: Array<{ field: IrctcFillableField; passengerIndex?: number; reason: string }>;
   message: string;
+  /** P39.3 — payload contract version (the extension rejects other versions). */
+  schemaVersion: number;
+  /** P39.3 — the confirmed review version this handoff was built from (the extension binds to it at registration). */
+  sourceReviewVersion: number;
+  /** P39.3 — HMAC-SHA256 (key = this handoff's bridge token) over `irctcIntegrityPayload(snapshot)`; a modified
+   *  payload fails verification in the extension (STALE_IRCTC_HANDOFF / INTEGRITY_FAILED). */
+  integrity: string;
 }
 
 /** Client view stored on the session / pushed as the irctc_handoff card (no passenger values, no token). */
@@ -188,4 +195,45 @@ export function irctcStatusMessage(status: IrctcHandoffStatus): string {
     case 'STALE_HANDOFF': return IRCTC_TEXT.STALE_HANDOFF;
     case 'STOPPED': return IRCTC_TEXT.STOPPED;
   }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// P39.3 — handoff integrity + autofill contract (additive; mirrored in extension/irctc-handoff-guard.js)
+
+export const IRCTC_HANDOFF_SCHEMA_VERSION = 1;
+/** The ONLY host the extension autofills (exact match, no wildcard) and its app path. */
+export const IRCTC_APPROVED_HOST = 'www.irctc.co.in';
+export const IRCTC_APPROVED_PATH_PREFIX = '/nget/';
+
+/** Why a handoff is refused by the extension — always reported as STALE_IRCTC_HANDOFF + reason. */
+export type StaleIrctcHandoffReason =
+  | 'EXPIRED' | 'UNKNOWN_HANDOFF' | 'REVIEW_VERSION_MISMATCH' | 'HANDOFF_MISMATCH' | 'SESSION_MISMATCH'
+  | 'SCHEMA_INVALID' | 'INTEGRITY_FAILED' | 'STALE_HANDOFF';
+
+/** Typed autofill errors the extension reports (metadata only — never field values). */
+export const IRCTC_AUTOFILL_ERROR_CODES = [
+  'STALE_IRCTC_HANDOFF', 'UNAUTHORIZED_IRCTC_HOST', 'LANGUAGE_SELECTION_FAILED',
+  'FROM_STATION_AUTOFILL_FAILED', 'TO_STATION_AUTOFILL_FAILED', 'DATE_AUTOFILL_FAILED', 'CLASS_AUTOFILL_FAILED',
+  'QUOTA_AUTOFILL_FAILED', 'TRAIN_AUTOFILL_FAILED', 'PASSENGER_ROW_MISSING', 'PASSENGER_FIELD_REJECTED'
+] as const;
+export type IrctcAutofillErrorCode = typeof IRCTC_AUTOFILL_ERROR_CODES[number];
+
+/** Snapshot fields covered by the integrity HMAC (validated booking data + binding metadata). */
+export const IRCTC_INTEGRITY_FIELDS = ['schemaVersion', 'handoffId', 'sourceReviewVersion', 'createdAt', 'expiresAt', 'mockData',
+  'journey', 'train', 'travelClass', 'quota', 'passengers'] as const;
+
+/** Deterministic JSON (sorted keys, undefined → null) — identical in the backend and the extension. */
+export function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
+  if (v && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).sort().map(k => `${JSON.stringify(k)}:${canonicalJson(o[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(v === undefined ? null : v);
+}
+
+export function irctcIntegrityPayload(s: Pick<IrctcHandoffSnapshot, typeof IRCTC_INTEGRITY_FIELDS[number]>): string {
+  const o: Record<string, unknown> = {};
+  for (const k of IRCTC_INTEGRITY_FIELDS) o[k] = (s as any)[k];
+  return canonicalJson(o);
 }

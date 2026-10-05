@@ -30,7 +30,7 @@ Safety rules (enforced in `irctc-core.js`, tested in `tests/unit/p39-irctc-hando
 Without the extension, the **IRCTC Assist** page in BookKaro shows every value with copy buttons.
 
 ## Local testing with MockIRCTC
-With the dev server (`npm run dev`), open `http://localhost:3000/api/dev/mock-irctc` (20 scenarios). MockIRCTC is
+With the dev server (`npm run dev`), open `http://localhost:3000/api/dev/mock-irctc` (23 + 10 real-like scenarios). MockIRCTC is
 never served in production. The real IRCTC DOM could not be inspected from the build sandbox (HTTP 403), so the
 detection is semantic (labels / placeholders / visible text); verify on the real site yourself and stop before payment.
 
@@ -46,3 +46,32 @@ detection is semantic (labels / placeholders / visible text); verify on the real
   page fills normally.
 - If the IRCTC passenger page shows a different train than your BookKaro review, nothing is filled until you
   press **Resume**.
+
+## v0.39.4 — date picker keydown (verification fix)
+
+IRCTC's journey date is a PrimeNG Calendar whose typed-input handler ignores `input` events not preceded by a
+keydown (and re-formats from its old model on blur). The date fill now dispatches one `keydown` before setting the
+value; the value is still re-read after the picker settles and `DATE_AUTOFILL_FAILED` is raised if IRCTC changed it.
+The real-like mock calendar emulates the same guard. Real IRCTC: USER VERIFICATION REQUIRED.
+
+## v0.39.3 — handoff guard + real IRCTC (PrimeNG) autofill
+
+- **Approved page only:** fills ONLY on `https://www.irctc.co.in/nget/*` (exact host, no wildcard) or the local MockIRCTC
+  (`http://localhost|127.0.0.1/api/dev/mock-irctc/...`). Anywhere else the content script stops (no box, nothing sent).
+- **Handoff check (every IRCTC step):** strict schema, bound to the confirmed review version, expiry, and an HMAC
+  integrity check (key = this handoff's bridge token). Any mismatch → `STALE_IRCTC_HANDOFF` (+ reason: EXPIRED /
+  REVIEW_VERSION_MISMATCH / SESSION_MISMATCH / UNKNOWN_HANDOFF / SCHEMA_INVALID / INTEGRITY_FAILED / STALE_HANDOFF)
+  and nothing is filled. Create a new handoff in BookKaro.
+- **Real IRCTC controls:** language Alert dialog ("preferred language"), PrimeNG station autocomplete (async list, exact
+  "- CODE" only), `p-calendar` date (re-read after IRCTC validates it), `p-dropdown` class / quota (async panel),
+  train list with bare class tabs + date cells (highlighted, never clicked), mobile passenger rows ("Full Name as per
+  Govt. ID").
+- **Typed errors** in the grey line: `FROM_STATION_AUTOFILL_FAILED`, `TO_STATION_AUTOFILL_FAILED`, `DATE_AUTOFILL_FAILED`,
+  `CLASS_AUTOFILL_FAILED`, `QUOTA_AUTOFILL_FAILED`, `TRAIN_AUTOFILL_FAILED`, `PASSENGER_ROW_MISSING#n`,
+  `PASSENGER_FIELD_REJECTED#n` (metadata only). A station / date that IRCTC does not confirm stops the journey step:
+  nothing is guessed and Search is not highlighted.
+- Real-like MockIRCTC pages: `real-language-alert`, `real-search`, `real-search-decoy-stations`,
+  `real-search-station-rejected`, `real-search-date-rejected`, `real-train-list`, `real-train-list-expanded`,
+  `real-passenger-mobile`, `real-passenger-mobile-2`, `real-passenger-rejecting`.
+- Chrome on Android has no extensions: use desktop Chrome / Edge / Brave (or an Android browser that supports MV3
+  extensions) for the autofill; otherwise the Assist page copy buttons.

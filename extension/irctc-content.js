@@ -9,9 +9,13 @@
 'use strict';
 (function () {
   if (window.__bookkaroIrctcAssist) return;
+  // P39.3: exact approved host only (https://www.irctc.co.in/nget/* or the local MockIRCTC) — anything else: STOP, no overlay
+  const Guard = window.BookKaroHandoffGuard;
+  const HOST_CHECK = Guard ? Guard.isApprovedIrctcPage(location.href) : { ok: false, code: 'UNAUTHORIZED_IRCTC_HOST' };
+  if (!HOST_CHECK.ok) return;
   window.__bookkaroIrctcAssist = true;
   const Core = window.BookKaroIrctcCore;
-  const IS_REAL_IRCTC = /(^|\.)irctc\.co\.in$/.test(location.hostname);
+  const IS_REAL_IRCTC = HOST_CHECK.kind === 'REAL';
   const FILL_PAGES = new Set(['HOME_SEARCH', 'TRAIN_LIST', 'PASSENGER']);
   const MSG = {
     LOGIN: 'IRCTC login required. Please enter your User ID and Password.',
@@ -22,8 +26,21 @@
     CONFIRMATION: 'IRCTC confirmation page detect hua — ticket details IRCTC par check kijiye.',
     FAILURE: 'IRCTC par booking fail dikhi — status IRCTC par check kijiye.',
     SESSION_EXPIRED: 'IRCTC session expire ho gaya — dobara login kijiye.',
-    MOCK_ON_REAL: 'Ye handoff MOCK railway data se bana hai — real IRCTC par fill nahi kiya jaayega.'
+    MOCK_ON_REAL: 'Ye handoff MOCK railway data se bana hai — real IRCTC par fill nahi kiya jaayega.',
+    UNAUTHORIZED_IRCTC_HOST: 'Ye approved IRCTC page nahi hai — BookKaro yahan kuch fill nahi karega.'
   };
+  // P39.3: why a handoff was refused (STALE_IRCTC_HANDOFF) — nothing is filled from a refused handoff
+  const STALE_MSG = {
+    EXPIRED: 'Ye IRCTC handoff expire ho gaya hai. BookKaro mein review dobara confirm karke naya handoff banaiye.',
+    UNKNOWN_HANDOFF: 'Ye handoff BookKaro ko nahi mila. BookKaro mein “Continue to IRCTC” dobara dabaiye.',
+    REVIEW_VERSION_MISMATCH: 'Booking review badal gaya hai — purana handoff use nahi hoga. BookKaro mein naya review confirm kijiye.',
+    HANDOFF_MISMATCH: 'Handoff match nahi hua — BookKaro mein “Continue to IRCTC” dobara dabaiye.',
+    SESSION_MISMATCH: 'Is booking ke liye naya handoff ban chuka hai — purana use nahi hoga. BookKaro tab se dobara kholiye.',
+    SCHEMA_INVALID: 'Handoff data valid nahi hai — kuch fill nahi kiya. BookKaro mein dobara try kijiye.',
+    INTEGRITY_FAILED: 'Handoff data badla hua mila — security ke liye kuch fill nahi kiya. BookKaro mein dobara try kijiye.',
+    STALE_HANDOFF: 'Booking details badal gayi hain — purana handoff use nahi hoga. BookKaro mein naya review confirm kijiye.'
+  };
+  let refusal = null;        // { code, reason } — set once; only “Fill again” (or a new handoff) retries
 
   const state = Core.newState();
   let snapshot = null;
@@ -63,7 +80,7 @@
   $('pause').onclick = () => { paused = true; $('pause').hidden = true; $('resume').hidden = false; say('Assistant paused.'); send({ type: 'PAUSED' }); };
   $('resume').onclick = () => { if (trainMismatchPending) { state.trainMismatchAccepted = true; trainMismatchPending = false; } paused = false; $('pause').hidden = false; $('resume').hidden = true; lastFillKey = ''; send({ type: 'RESUMED' }); tick(); };
   $('again').onclick = () => {
-    paused = false; autoPaused = false; trainMismatchPending = false; lastFillKey = ''; fillAttempts = {};
+    paused = false; autoPaused = false; trainMismatchPending = false; lastFillKey = ''; fillAttempts = {}; refusal = null; snapshot = null; lastPage = null;
     $('pause').hidden = false; $('resume').hidden = true; tick();
   };
   $('stop').onclick = () => { stopped = true; say('Assistant band. IRCTC par jo fill hua hai woh aap khud check kijiye.', ''); send({ type: 'STOPPED' }); observer.disconnect(); };
@@ -75,6 +92,8 @@
 
   async function loadSnapshot() {
     const r = await getSnapshot();
+    if (!r.ok && r.code === 'STALE_IRCTC_HANDOFF') { refusal = { code: r.code, reason: r.reason }; say(STALE_MSG[r.reason] || STALE_MSG.STALE_HANDOFF, `STALE_IRCTC_HANDOFF · ${r.reason}`); return null; }
+    if (!r.ok && r.code === 'UNAUTHORIZED_IRCTC_HOST') { refusal = { code: r.code }; say(MSG.UNAUTHORIZED_IRCTC_HOST, r.code); return null; }
     if (!r.ok) { say(r.code === 'NO_ACTIVE_HANDOFF' ? 'Koi active BookKaro handoff nahi. BookKaro mein review confirm karke “Continue to IRCTC” dabaiye.' : `Handoff load nahi hua (${r.code}).`); return null; }
     return r.body;
   }
@@ -87,7 +106,15 @@
     if (busy) { pendingTick = true; return; }
     busy = true;
     try {
+      if (refusal) return;
+      // SPA route changes: still the approved host / app path?
+      if (!Guard.isApprovedIrctcPage(location.href).ok) { say(MSG.UNAUTHORIZED_IRCTC_HOST, 'UNAUTHORIZED_IRCTC_HOST'); return; }
       if (!snapshot) { snapshot = await loadSnapshot(); if (!snapshot) return; }
+      // expiry is checked on every tick (not only when loaded)
+      if (!TERMINAL.has(snapshot.status) && Date.parse(snapshot.expiresAt) <= Date.now()) {
+        refusal = { code: 'STALE_IRCTC_HANDOFF', reason: 'EXPIRED' }; snapshot = null;
+        say(STALE_MSG.EXPIRED, 'STALE_IRCTC_HANDOFF · EXPIRED'); return;
+      }
       if (snapshot.status === 'BOOKING_STATUS_UNKNOWN') {
         // only IRCTC's own outcome page can still resolve an unknown outcome — nothing is filled any more
         const outcome = Core.detectPage(document);
@@ -101,6 +128,11 @@
       if (snapshot.mockData && IS_REAL_IRCTC) { say(MSG.MOCK_ON_REAL, 'MOCK DATA'); return; }
       const page = Core.detectPage(document);
       if (page !== lastPage) {
+        // P39.3: a new IRCTC step → re-fetch + re-verify the handoff (schema / binding / expiry / integrity)
+        const fresh = await loadSnapshot();
+        if (!fresh) { snapshot = null; return; }
+        snapshot = fresh;
+        if (TERMINAL.has(snapshot.status)) { say(snapshot.message, snapshot.status); return; }
         lastPage = page; lastFillKey = ''; fillAttempts = {}; rowsSeen = -1;
         // an assistant pause belongs to the page it happened on (a user Pause stays until Resume)
         if (autoPaused) { paused = false; autoPaused = false; trainMismatchPending = false; $('pause').hidden = false; $('resume').hidden = true; }
@@ -126,7 +158,8 @@
       for (const ev of Core.reportEvents(rep)) await send(ev);
       // metadata-only diagnostics (field keys + reasons, never values) — helps the user report what IRCTC showed
       const diag = `${page} · rows ${Core.passengerNameInputs(document).length}/${snapshot.passengers.length} · filled ${rep.filled.length}` +
-        (rep.skipped.length ? ` · not filled: ${rep.skipped.map(x => `${x.field}:${x.reason}`).join(', ')}` : '');
+        (rep.errors && rep.errors.length ? ` · errors: ${rep.errors.map(x => `${x.code}${x.passengerIndex ? '#' + x.passengerIndex : ''}:${x.reason}`).join(', ')}`
+          : (rep.skipped.length ? ` · not filled: ${rep.skipped.map(x => `${x.field}:${x.reason}`).join(', ')}` : ''));
       say(MSG[page] || snapshot.message, diag);
       // IRCTC is still rendering (rows / selects not there yet) → retry a few times
       const retryable = rep.skipped.some(x => /FIELD_NOT_PRESENT|ROW_MISSING|VALUE_NOT_CONFIRMED|SUGGESTION_NOT_FOUND/.test(x.reason));
@@ -154,8 +187,16 @@
           const view = r.ok && r.body && r.body.view;
           say(view && view.status === 'READY_FOR_USER_BOOK' ? MSG.READY : (view ? view.message : MSG.READY), diag);
         } else if (page === 'TRAIN_LIST') say('Train aur class highlight ki gayi hai — “Book Now” aap khud tap karein.', page);
+      } else if (page === 'TRAIN_LIST' && rep.filled.indexOf('train') >= 0) {
+        say(`Train ${snapshot.train.number} highlight ki gayi hai — class ${snapshot.travelClass.code} aur date aap khud tap karein, phir “Book Now”.`, diag);
+      } else if (page === 'TRAIN_LIST') {
+        say(`Train ${snapshot.train.number} is list mein nahi mili (TRAIN_AUTOFILL_FAILED) — doosri train nahi chuni gayi.`, diag);
       }
-      if (page === 'HOME_SEARCH') say(rep.skipped.length ? `Kuch fields aap khud bhariye: ${rep.skipped.map(s => s.field).join(', ')}. Phir Search tap karein.` : 'From / To / Date / Class fill ho gaye — Search aap khud tap karein.', diag);
+      if (page === 'HOME_SEARCH' && rep.stopped) {
+        // station / date not verified on IRCTC → stop here; nothing guessed, Search not highlighted
+        const what = rep.stopped === 'FROM_STATION_AUTOFILL_FAILED' ? 'From station' : rep.stopped === 'TO_STATION_AUTOFILL_FAILED' ? 'To station' : 'Journey date';
+        say(`${what} IRCTC par confirm nahi hua (${rep.stopped}) — BookKaro ne koi andaaza nahi lagaya. Ise aap khud chuniye, phir Search tap karein.`, diag);
+      } else if (page === 'HOME_SEARCH') say(rep.skipped.length ? `Kuch fields aap khud bhariye: ${rep.skipped.map(s => s.field).join(', ')}. Phir Search tap karein.` : 'From / To / Date / Class fill ho gaye — Search aap khud tap karein.', diag);
       if (page === 'PASSENGER' && !rep.filled.length && !rep.trainOnPage && !rep.overrides.length)
         say('Passenger fields abhi fill nahi ho paaye — page poora load hone par “Fill again” dabaiye. Na ho to neeche ki line BookKaro team ko bhejiye.', diag);
     } finally {
@@ -167,15 +208,22 @@
   let languageDone = false;
   async function handleLanguage(page) {
     if (languageDone) return;
-    languageDone = true;
     const want = snapshot.language === 'hi' ? 'hi' : 'en';
     const ctl = Core.findLanguageControl(document, want);
-    if (page === 'LANGUAGE' || (want === 'hi' && ctl)) {
+    if (page === 'LANGUAGE') {
+      // P39.3: the language dialog — click the wanted button inside it (once); done only after an actual click
+      languageDone = true;
       if (ctl) { ctl.click(); await send({ type: 'LANGUAGE_SELECTED', language: want }); return; }
       await send({ type: 'LANGUAGE_SELECTOR_MISSING' });
       return;
     }
-    if (want === 'hi' && !ctl) await send({ type: 'LANGUAGE_SELECTOR_MISSING' });
+    // search page without a dialog: only a Hindi preference needs the header toggle; English = IRCTC default (the dialog may
+    // still appear later, so nothing is marked done here)
+    if (want === 'hi') {
+      languageDone = true;
+      if (ctl) { ctl.click(); await send({ type: 'LANGUAGE_SELECTED', language: want }); }
+      else await send({ type: 'LANGUAGE_SELECTOR_MISSING' });
+    }
   }
 
   let timer = null;

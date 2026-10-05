@@ -11,6 +11,8 @@
  * Preference / Food Choice, Continue, captcha, OTP, Pay & Book). Real-site behaviour is verified by the user (G5).
  */
 
+import { MOCK_IRCTC_REAL_SCENARIOS, MOCK_IRCTC_REAL_SCRIPT } from './mock-irctc-real';   // P39.3 (that module imports only the type back)
+
 export interface MockIrctcScenario { id: string; title: string; expectPage: string; html: string }
 
 const CLASS_OPTIONS = ['All Classes', 'Anubhuti Class (EA)', 'AC First Class (1A)', 'Vistadome AC (EV)', 'Exec. Chair Car (EC)', 'AC 2 Tier (2A)',
@@ -152,15 +154,19 @@ const esc = (s: string) => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;
 
 /** Full HTML page for one scenario (or the index). The small inline script only emulates suggestion / dropdown lists. */
 export function renderMockIrctc(id: string | null, opts: { train?: string } = {}): string {
-  const found = id ? MOCK_IRCTC_SCENARIOS.find(x => x.id === id) : null;
+  // P39.3: real-like PrimeNG pages live in a separate list (mock-irctc-real.ts); both are served + listed
+  const found = id ? (MOCK_IRCTC_SCENARIOS.find(x => x.id === id) || MOCK_IRCTC_REAL_SCENARIOS.find(x => x.id === id)) : null;
   // optional ?train=NNNNN: the passenger / review summary shows that train (default 12014)
-  const sc = found && opts.train && /^\d{5}$/.test(opts.train) && found.id !== 'train-list' && found.id !== 'train-list-missing-train'
-    ? { ...found, html: found.html.split('AMRITSAR SHTABDI (12014)').join(`MOCK TRAIN (${opts.train})`) } : found;
-  const nav = MOCK_IRCTC_SCENARIOS.map((x, i) => `<li><a href="/api/dev/mock-irctc/${x.id}">${i + 1}. ${esc(x.title)}</a> <code>${x.expectPage}</code></li>`).join('');
+  const sc = found && opts.train && /^\d{5}$/.test(opts.train) && !/train-list/.test(found.id)
+    ? { ...found, html: found.html.split('AMRITSAR SHTABDI (12014)').join(`MOCK TRAIN (${opts.train})`).split('MOCK SUPERFAST (12904)').join(`MOCK TRAIN (${opts.train})`) } : found;
+  const nav = [...MOCK_IRCTC_SCENARIOS, ...MOCK_IRCTC_REAL_SCENARIOS].map((x, i) => `<li><a href="/api/dev/mock-irctc/${x.id}">${i + 1}. ${esc(x.title)}</a> <code>${x.expectPage}</code></li>`).join('');
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>MockIRCTC — ${esc(sc?.title || 'scenarios')}</title>
 <style>body{font-family:system-ui,sans-serif;margin:0;padding:0 12px 40px}.mock-banner{background:#b91c1c;color:#fff;padding:8px 12px;margin:0 -12px 12px;font-weight:700}
 input,select,.p-dropdown{display:block;margin:6px 0;padding:6px;min-width:240px}.p-dropdown{border:1px solid #999}.passenger-row{border:1px solid #ddd;padding:8px;margin:8px 0}
+.ui-helper-hidden-accessible{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}.ui-dropdown{border:1px solid #999;padding:6px;margin:6px 0;min-width:240px;cursor:pointer}
+.ui-dialog{position:fixed;top:20%;left:10%;right:10%;background:#fff;border:1px solid #333;padding:12px;z-index:10}.ui-widget-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9}
+app-train-avl-enq{display:block;border:1px solid #ccc;padding:8px;margin:8px 0}.class-tabs span{display:inline-block;padding:4px 10px;border:1px solid #888;margin:2px}
 .train-block{border:1px solid #ccc;padding:8px;margin:8px 0}.pre-avl{display:inline-block;border:1px solid #aaa;padding:4px 8px;margin:4px}button{padding:8px 16px;margin:6px 0}</style></head>
 <body data-mock-irctc="${sc ? sc.id : 'index'}"><div class="mock-banner" data-mock-banner>MOCK IRCTC — development only. Nothing here books a ticket or takes payment.</div>
 ${sc ? sc.html : `<h1>MockIRCTC scenarios</h1><ol style="list-style:none;padding:0">${nav}</ol>`}
@@ -174,5 +180,6 @@ document.addEventListener('click',function(e){var li=e.target.closest&&e.target.
   var a=e.target.closest&&e.target.closest('.add-passenger');if(a){e.preventDefault();var rows=document.querySelector('.passenger-rows');var n=rows.children.length+1;
   var c=rows.children[0].cloneNode(true);c.dataset.passengerRow=n;c.querySelector('span').textContent='Passenger '+n;Array.prototype.forEach.call(c.querySelectorAll('input'),function(i){i.value='';});rows.appendChild(c);}
 });
-</script></body></html>`;
+</script>
+<script data-mock-real>${MOCK_IRCTC_REAL_SCRIPT}</script></body></html>`;
 }

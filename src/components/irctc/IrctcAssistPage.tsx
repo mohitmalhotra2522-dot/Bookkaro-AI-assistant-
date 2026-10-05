@@ -50,7 +50,7 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
   };
   const sendToExtension = () => {
     if (!access) return;
-    window.postMessage({ source: 'bookkaro-app', type: 'BK_IRCTC_HANDOFF', handoffId: access.view.handoffId, bridgeToken: access.bridgeToken }, window.location.origin);
+    window.postMessage({ source: 'bookkaro-app', type: 'BK_IRCTC_HANDOFF', handoffId: access.view.handoffId, bridgeToken: access.bridgeToken, reviewVersion: access.view.reviewVersion }, window.location.origin);
   };
   const setLanguage = async (language: 'en' | 'hi') => { await irctcHandoffAction(sessionId, { action: 'language', language }); load(); };
   const endedWithoutConfirmation = async () => {

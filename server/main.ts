@@ -32,6 +32,7 @@ import { awaitTrainFacilities, prefetchTrainFacilities } from './booking/train-f
 import { enabledWebConnectors, webCapabilityMatrix } from './railway/providers/web/web-providers';
 import { IRCTC_BRIDGE_TOKEN_HEADER } from '@shared/irctc-handoff';
 import { mockIrctcEnabled, renderMockIrctc, MOCK_IRCTC_SCENARIOS } from './irctc/mock/mock-irctc';
+import { MOCK_IRCTC_REAL_SCENARIOS } from './irctc/mock/mock-irctc-real';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -299,7 +300,7 @@ if (mockIrctcEnabled(process.env)) {
   server.get('/api/dev/mock-irctc', async (_, reply) => reply.type('text/html').send(renderMockIrctc(null)));
   server.get('/api/dev/mock-irctc/:scenario', async (request, reply) => {
     const id = String((request.params as any).scenario || '');
-    if (!MOCK_IRCTC_SCENARIOS.some(x => x.id === id)) return reply.status(404).send({ code: 'UNKNOWN_SCENARIO' });
+    if (!MOCK_IRCTC_SCENARIOS.some(x => x.id === id) && !MOCK_IRCTC_REAL_SCENARIOS.some(x => x.id === id)) return reply.status(404).send({ code: 'UNKNOWN_SCENARIO' });
     return reply.type('text/html').send(renderMockIrctc(id, { train: String((request.query as any)?.train || '') }));
   });
 }
