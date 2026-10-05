@@ -32,6 +32,11 @@
   let lastPage = null;
   let lastFillKey = '';
   let busy = false;
+  let pendingTick = false;   // a mutation arrived while busy → run once more afterwards (Angular renders late)
+  let autoPaused = false;    // paused by the assistant (user edit / other train) — scoped to the current page
+  let fillAttempts = {};     // page key → retries while IRCTC is still rendering rows
+  let rowsSeen = -1, rowsStableSince = 0;   // "+ Add Passenger" only after the rendered row count stopped changing
+  const ROWS_STABLE_MS = 2500;
 
   // ---- overlay (shadow DOM; page CSS / scripts cannot restyle or read it) ------------------------------------------
   const host = document.createElement('div');
@@ -47,7 +52,7 @@
     <div class="box" role="status" aria-live="polite"><div class="t">BookKaro IRCTC Assist</div>
     <div class="m" id="msg">Handoff load ho raha hai…</div><div class="s" id="st"></div>
     <ul><li>Login, CAPTCHA, OTP — aap khud</li><li>Final Book / Continue — aap khud</li><li>Payment — aap khud</li></ul>
-    <button class="p" id="pause">Pause</button><button class="r" id="resume" hidden>Resume</button><button class="x" id="stop">Stop</button></div>`;
+    <button class="p" id="pause">Pause</button><button class="r" id="again" title="Is page ke fields dobara fill karein">Fill again</button><button class="r" id="resume" hidden>Resume</button><button class="x" id="stop">Stop</button></div>`;
   const $ = (id) => root.getElementById(id);
   const say = (m, st) => { $('msg').textContent = m; if (st !== undefined) $('st').textContent = st; };
   (document.body || document.documentElement).appendChild(host);
@@ -57,6 +62,10 @@
 
   $('pause').onclick = () => { paused = true; $('pause').hidden = true; $('resume').hidden = false; say('Assistant paused.'); send({ type: 'PAUSED' }); };
   $('resume').onclick = () => { if (trainMismatchPending) { state.trainMismatchAccepted = true; trainMismatchPending = false; } paused = false; $('pause').hidden = false; $('resume').hidden = true; lastFillKey = ''; send({ type: 'RESUMED' }); tick(); };
+  $('again').onclick = () => {
+    paused = false; autoPaused = false; trainMismatchPending = false; lastFillKey = ''; fillAttempts = {};
+    $('pause').hidden = false; $('resume').hidden = true; tick();
+  };
   $('stop').onclick = () => { stopped = true; say('Assistant band. IRCTC par jo fill hua hai woh aap khud check kijiye.', ''); send({ type: 'STOPPED' }); observer.disconnect(); };
 
   // the user's own edits always win (trusted events only — our own synthetic events are not trusted)
@@ -74,7 +83,8 @@
   const TERMINAL = new Set(['COMPLETED', 'BOOKING_FAILED', 'BOOKING_STATUS_UNKNOWN', 'EXPIRED', 'STALE_HANDOFF', 'STOPPED']);
 
   async function tick() {
-    if (busy || stopped) return;
+    if (stopped) return;
+    if (busy) { pendingTick = true; return; }
     busy = true;
     try {
       if (!snapshot) { snapshot = await loadSnapshot(); if (!snapshot) return; }
@@ -91,7 +101,9 @@
       if (snapshot.mockData && IS_REAL_IRCTC) { say(MSG.MOCK_ON_REAL, 'MOCK DATA'); return; }
       const page = Core.detectPage(document);
       if (page !== lastPage) {
-        lastPage = page; lastFillKey = '';
+        lastPage = page; lastFillKey = ''; fillAttempts = {}; rowsSeen = -1;
+        // an assistant pause belongs to the page it happened on (a user Pause stays until Resume)
+        if (autoPaused) { paused = false; autoPaused = false; trainMismatchPending = false; $('pause').hidden = false; $('resume').hidden = true; }
         const r = await send({ type: 'PAGE_DETECTED', page });
         if (r.ok && r.body && r.body.view) { snapshot.status = r.body.view.status; snapshot.message = r.body.view.message; }
         if (r.code === 'HANDOFF_TERMINAL' || r.code === 'STALE_HANDOFF') { snapshot = await loadSnapshot(); if (snapshot) say(snapshot.message, snapshot.status); return; }
@@ -107,16 +119,31 @@
       const key = `${page}:${Core.passengerNameInputs(document).length}`;
       if (key === lastFillKey) return;
       lastFillKey = key;
-      const rep = await Core.fillPage(document, page, snapshot, state, { allowAddRows: true });
+      const rowsNow = Core.passengerNameInputs(document).length;
+      if (rowsNow !== rowsSeen) { rowsSeen = rowsNow; rowsStableSince = Date.now(); }
+      const allowAddRows = page === 'PASSENGER' && Date.now() - rowsStableSince >= ROWS_STABLE_MS;
+      const rep = await Core.fillPage(document, page, snapshot, state, { allowAddRows });
       for (const ev of Core.reportEvents(rep)) await send(ev);
+      // metadata-only diagnostics (field keys + reasons, never values) — helps the user report what IRCTC showed
+      const diag = `${page} · rows ${Core.passengerNameInputs(document).length}/${snapshot.passengers.length} · filled ${rep.filled.length}` +
+        (rep.skipped.length ? ` · not filled: ${rep.skipped.map(x => `${x.field}:${x.reason}`).join(', ')}` : '');
+      say(MSG[page] || snapshot.message, diag);
+      // IRCTC is still rendering (rows / selects not there yet) → retry a few times
+      const retryable = rep.skipped.some(x => /FIELD_NOT_PRESENT|ROW_MISSING|VALUE_NOT_CONFIRMED|SUGGESTION_NOT_FOUND/.test(x.reason));
+      if (retryable && !rep.trainOnPage && (fillAttempts[key] || 0) < 4) {
+        fillAttempts[key] = (fillAttempts[key] || 0) + 1;
+        // missing rows: wait until the row count has been stable long enough to use "+ Add Passenger"
+        const delay = rep.skipped.some(x => x.reason === 'ROW_MISSING') ? ROWS_STABLE_MS + 200 : 1500;
+        setTimeout(() => { if (lastFillKey === key) { lastFillKey = ''; tick(); } }, delay);
+      }
       if (rep.trainOnPage) {
         // a different train than the confirmed review: stop and ask — never prefill silently
-        paused = true; trainMismatchPending = true; $('pause').hidden = true; $('resume').hidden = false;
+        paused = true; autoPaused = true; trainMismatchPending = true; $('pause').hidden = true; $('resume').hidden = false;
         say(`IRCTC page par train ${rep.trainOnPage} hai, lekin BookKaro review ${snapshot.train.number} ke liye hai. Passenger details fill nahi ki — sahi train chuniye, ya Resume dabakar isi train par fill karwaiye.`, page);
         return;
       }
       if (rep.overrides.length) {
-        paused = true; $('pause').hidden = true; $('resume').hidden = false;
+        paused = true; autoPaused = true; $('pause').hidden = true; $('resume').hidden = false;
         say(`Aapne ${rep.overrides.join(', ')} khud badla hai — overwrite nahi kiya. Resume par baaki fields fill hongi.`);
         return;
       }
@@ -125,11 +152,16 @@
         if (page === 'PASSENGER') {
           const r = await send({ type: 'FINAL_CONTROL_HIGHLIGHTED', page });
           const view = r.ok && r.body && r.body.view;
-          say(view && view.status === 'READY_FOR_USER_BOOK' ? MSG.READY : (view ? view.message : MSG.READY), page);
+          say(view && view.status === 'READY_FOR_USER_BOOK' ? MSG.READY : (view ? view.message : MSG.READY), diag);
         } else if (page === 'TRAIN_LIST') say('Train aur class highlight ki gayi hai — “Book Now” aap khud tap karein.', page);
       }
-      if (page === 'HOME_SEARCH') say(rep.skipped.length ? `Kuch fields aap khud bhariye: ${rep.skipped.map(s => s.field).join(', ')}. Phir Search tap karein.` : 'From / To / Date / Class fill ho gaye — Search aap khud tap karein.', page);
-    } finally { busy = false; }
+      if (page === 'HOME_SEARCH') say(rep.skipped.length ? `Kuch fields aap khud bhariye: ${rep.skipped.map(s => s.field).join(', ')}. Phir Search tap karein.` : 'From / To / Date / Class fill ho gaye — Search aap khud tap karein.', diag);
+      if (page === 'PASSENGER' && !rep.filled.length && !rep.trainOnPage && !rep.overrides.length)
+        say('Passenger fields abhi fill nahi ho paaye — page poora load hone par “Fill again” dabaiye. Na ho to neeche ki line BookKaro team ko bhejiye.', diag);
+    } finally {
+      busy = false;
+      if (pendingTick) { pendingTick = false; clearTimeout(timer); timer = setTimeout(tick, 300); }
+    }
   }
 
   let languageDone = false;

@@ -21,10 +21,15 @@
   function lower(s) { return norm(s).toLowerCase(); }
 
   function isVisible(el) {
+    var win = el && el.ownerDocument && el.ownerDocument.defaultView;
     for (var n = el; n && n.nodeType === 1; n = n.parentElement) {
       if (n.hidden || n.getAttribute('aria-hidden') === 'true') return false;
       var st = n.style;
       if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+      // CSS-class hidden (real IRCTC hides dialogs / templates with stylesheet rules, not inline styles)
+      if (win && win.getComputedStyle) {
+        try { var cs = win.getComputedStyle(n); if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) return false; } catch (e) { /* ignore */ }
+      }
     }
     return true;
   }
@@ -37,11 +42,21 @@
     return out;
   }
 
+  /** formcontrolname of a wrapping component that holds exactly this one input (IRCTC: <p-autocomplete formcontrolname="passengerName">). */
+  function wrapperControlName(el) {
+    if (el.getAttribute('formcontrolname') || !el.parentElement || !el.parentElement.closest) return '';
+    var w = el.parentElement.closest('[formcontrolname]');
+    if (!w || w.tagName === 'FORM' || w.querySelectorAll('input, select').length !== 1) return '';
+    return w.getAttribute('formcontrolname') || '';
+  }
+
   /** Semantic descriptor of a control: attributes + label (lower-case). */
   function descriptor(el) {
     var a = ['id', 'name', 'placeholder', 'aria-label', 'autocomplete', 'formcontrolname', 'title', 'type'];
     var parts = [];
     for (var i = 0; i < a.length; i++) { var v = el.getAttribute(a[i]); if (v) parts.push(v); }
+    var w = wrapperControlName(el);
+    if (w) parts.push(w);
     parts.push(labelText(el));
     return lower(parts.join(' '));
   }
@@ -57,12 +72,16 @@
   function visibleAll(doc, sel) { return all(doc, sel).filter(isVisible); }
   function controlText(el) { return norm(el.textContent || el.value || el.getAttribute('aria-label')); }
 
+  function isPassengerNameInput(el) {
+    if (isForbidden(el)) return false;
+    var d = descriptor(el);
+    if (/infant|child below|nominee/.test(d)) return false;
+    var ph = lower(el.getAttribute('placeholder'));
+    return /passenger ?name|passengername/.test(d) || /^(passenger )?name\b/.test(ph);
+  }
+
   function passengerNameInputs(doc) {
-    return visibleAll(doc, 'input').filter(function (el) {
-      if (isForbidden(el)) return false;
-      var d = descriptor(el);
-      return /passenger ?name|passengername/.test(d) || lower(el.getAttribute('placeholder')) === 'name';
-    });
+    return visibleAll(doc, 'input').filter(isPassengerNameInput);
   }
 
   function findStationInput(doc, which) {
@@ -111,6 +130,17 @@
     if (findLanguageDialog(doc)) return 'LANGUAGE';
     if (findStationInput(doc, 'from') && findStationInput(doc, 'to')) return 'HOME_SEARCH';
     if (buttons(doc).some(function (b) { return /^book now$/i.test(controlText(b)); }) && /\(\d{5}\)/.test(text)) return 'TRAIN_LIST';
+    return pageFromUrl(doc);
+  }
+
+  /** IRCTC route names (www.irctc.co.in/nget/...) — used only when the DOM did not decide. */
+  function pageFromUrl(doc) {
+    var path = '';
+    try { path = lower((doc.defaultView && doc.defaultView.location && doc.defaultView.location.pathname) || ''); } catch (e) { path = ''; }
+    if (!/\/nget\//.test(path)) return 'UNKNOWN';
+    if (/psgninput|pax-?info|passenger/.test(path)) return 'PASSENGER';
+    if (/train-list/.test(path)) return 'TRAIN_LIST';
+    if (/train-search/.test(path)) return 'HOME_SEARCH';
     return 'UNKNOWN';
   }
 
@@ -185,6 +215,7 @@
   /** The user's own value wins: an edited control, or a pre-existing value we did not put there. */
   function userOwned(el, state, target, code) {
     if (state.userEdited.has(el)) return true;
+    if (state.pageDefaultsReplaceable) return false;   // journey page: untouched values are IRCTC defaults
     var mine = state.filled.get(el);
     if (el.tagName === 'SELECT' || el.getAttribute('role') === 'combobox') {
       var cur = currentChoice(el);
@@ -206,7 +237,11 @@
     if (!el) { rep.skip(field, 'FIELD_NOT_PRESENT'); return false; }
     if (isForbidden(el)) { rep.skip(field, 'FIELD_FORBIDDEN'); return false; }
     if (userOwned(el, state, value)) { rep.override(field); return false; }
-    if (norm(el.value) !== String(value)) setNativeValue(el, String(value));
+    if (norm(el.value) !== String(value)) {
+      setNativeValue(el, String(value));
+      var Ev = (el.ownerDocument.defaultView && el.ownerDocument.defaultView.Event) || Event;
+      el.dispatchEvent(new Ev('blur', { bubbles: false })); el.dispatchEvent(new Ev('focusout', { bubbles: true }));
+    }
     if (norm(el.value) !== String(value)) { rep.skip(field, 'VALUE_NOT_CONFIRMED'); return false; }
     state.filled.set(el, String(value)); rep.ok(field); return true;
   }
@@ -242,7 +277,7 @@
   function rowContainer(nameInput) {
     var n = nameInput.parentElement;
     while (n && n.parentElement) {
-      var names = Array.prototype.slice.call(n.querySelectorAll('input')).filter(function (i) { var d = descriptor(i); return /passenger ?name|passengername/.test(d) || lower(i.getAttribute('placeholder')) === 'name'; });
+      var names = Array.prototype.slice.call(n.querySelectorAll('input')).filter(isPassengerNameInput);
       if (names.length > 1) return null;
       if (Array.prototype.slice.call(n.querySelectorAll('input')).some(function (i) { return /\bage\b|passengerage/.test(descriptor(i)); })) return n;
       n = n.parentElement;
@@ -304,11 +339,14 @@
     var rep = new Report(page);
     state = state || newState();
     if (page === 'HOME_SEARCH') {
+      state.pageDefaultsReplaceable = true;
+      try {
       await fillStation(doc, findStationInput(doc, 'from'), 'from', snapshot.journey.from, state, rep, opts);
       await fillStation(doc, findStationInput(doc, 'to'), 'to', snapshot.journey.to, state, rep, opts);
       fillText(findDateInput(doc), 'date', snapshot.journey.dateIrctc, state, rep);
       fillChoice(findChoice(doc, /class/), 'travelClass', snapshot.travelClass.label, snapshot.travelClass.code, state, rep);
       fillChoice(findChoice(doc, /quota/), 'quota', snapshot.quota.label, null, state, rep);
+      } finally { state.pageDefaultsReplaceable = false; }
       // the Search button is highlighted for the user, never clicked (they check what was filled first)
       rep.finalControl = findFinalControl(doc, 'HOME_SEARCH');
       return rep;
@@ -367,7 +405,7 @@
     FORBIDDEN: FORBIDDEN, descriptor: descriptor, isForbidden: isForbidden, isVisible: isVisible, detectPage: detectPage,
     findStationInput: findStationInput, findDateInput: findDateInput, findChoice: findChoice, findSuggestion: findSuggestion,
     findLanguageDialog: findLanguageDialog, findLanguageControl: findLanguageControl, findAddPassengerControl: findAddPassengerControl,
-    findFinalControl: findFinalControl, passengerNameInputs: passengerNameInputs, trainBlock: trainBlock, pageTrainNumbers: pageTrainNumbers,
+    findFinalControl: findFinalControl, passengerNameInputs: passengerNameInputs, trainBlock: trainBlock, pageTrainNumbers: pageTrainNumbers, pageFromUrl: pageFromUrl, isPassengerNameInput: isPassengerNameInput,
     newState: newState, fillPage: fillPage, reportEvents: reportEvents, highlight: highlight, choose: choose
   };
 });

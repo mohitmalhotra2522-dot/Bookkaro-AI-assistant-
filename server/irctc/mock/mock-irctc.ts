@@ -1,5 +1,5 @@
 /**
- * P39 — MockIRCTC: 20 local pages that imitate the VISIBLE structure of the IRCTC booking flow, for developing and
+ * P39 — MockIRCTC: 23 local pages that imitate the VISIBLE structure of the IRCTC booking flow, for developing and
  * testing the BookKaro extension / irctc-core without touching irctc.co.in (which returns 403 to automated clients).
  *
  * Clearly MOCK: every page carries a MOCK banner, nothing is booked, no payment exists, and the "final" buttons only
@@ -26,14 +26,15 @@ const ariaDropdown = (id: string, label: string, options: string[], selected: st
   <span class="p-dropdown-label">${selected}</span>
   <ul class="p-dropdown-items" role="listbox" hidden>${options.map(o => `<li role="option" aria-label="${o}">${o}</li>`).join('')}</ul></div>`;
 
-function searchForm(opts: { aria?: boolean; suggestions?: string[] } = {}): string {
+function searchForm(opts: { aria?: boolean; suggestions?: string[]; values?: { from?: string; to?: string; date?: string } } = {}): string {
+  const v = (x?: string) => (x ? ` value="${x}"` : '');
   const sugg = (opts.suggestions || STATIONS).map(x => `<li role="option" class="ui-autocomplete-list-item">${x}</li>`).join('');
   return `<form class="search-form" aria-label="Book Ticket"><h2>BOOK TICKET</h2>
-  <span class="p-autocomplete"><input id="origin" role="searchbox" aria-label="Enter From station. Input is Mandatory." placeholder="From*" autocomplete="off" class="ui-inputtext"></span>
+  <span class="p-autocomplete"><input id="origin" role="searchbox" aria-label="Enter From station. Input is Mandatory." placeholder="From*" autocomplete="off" class="ui-inputtext"${v(opts.values?.from)}></span>
   <ul class="ui-autocomplete-items" role="listbox" data-for="origin" hidden>${sugg}</ul>
-  <span class="p-autocomplete"><input id="destination" role="searchbox" aria-label="Enter To station. Input is Mandatory." placeholder="To*" autocomplete="off" class="ui-inputtext"></span>
+  <span class="p-autocomplete"><input id="destination" role="searchbox" aria-label="Enter To station. Input is Mandatory." placeholder="To*" autocomplete="off" class="ui-inputtext"${v(opts.values?.to)}></span>
   <ul class="ui-autocomplete-items" role="listbox" data-for="destination" hidden>${sugg}</ul>
-  <span class="p-calendar"><input id="jDate" aria-label="Journey Date(dd/mm/yyyy)" placeholder="DD/MM/YYYY" class="ui-inputtext"></span>
+  <span class="p-calendar"><input id="jDate" aria-label="Journey Date(dd/mm/yyyy)" placeholder="DD/MM/YYYY" class="ui-inputtext"${v(opts.values?.date)}></span>
   ${opts.aria ? ariaDropdown('journeyClass', 'Select Class', CLASS_OPTIONS, 'All Classes') + ariaDropdown('journeyQuota', 'Select Quota', QUOTAS, 'GENERAL')
     : select('id="journeyClass" aria-label="Select Class"', CLASS_OPTIONS) + select('id="journeyQuota" aria-label="Select Quota"', QUOTAS)}
   <button type="submit" class="search_btn train_Search">Search</button></form>`;
@@ -61,6 +62,39 @@ function passengerPage(rows: string[], o: { addLink?: boolean } = {}): string {
   return `<div class="passenger-page"><h3>Passenger Details</h3><div class="train-summary">AMRITSAR SHTABDI (12014) | AC Chair car (CC) | GENERAL</div>
   <div class="passenger-rows">${rows.join('')}</div>
   ${o.addLink ? '<a href="#" class="add-passenger" role="button">+ Add Passenger</a>' : ''}
+  <div class="contact"><label for="mobileNumber">Mobile Number</label><input id="mobileNumber" formcontrolname="mobileNumber" aria-label="Mobile Number" value="+91 98XXXXXX10" readonly></div>
+  <fieldset class="payment-mode"><legend>Payment Mode</legend>
+    <label><input type="radio" name="paymentType" value="cards"> Pay through Credit &amp; Debit Cards / Net Banking / Wallets</label>
+    <label><input type="radio" name="paymentType" value="upi"> Pay through BHIM/UPI</label></fieldset>
+  <button type="submit" class="train_Search btnDefault" data-final="continue" onclick="this.ownerDocument.body.dataset.finalClicked='continue'">Continue</button></div>`;
+}
+
+/**
+ * Structure documented by public IRCTC autofill scripts (2023–2025): the name field is a PrimeNG
+ * <p-autocomplete formcontrolname="passengerName"> wrapping a plain <input placeholder="…Name">, selects carry CODE
+ * values (M / F / T, LB / WS, V / N / D) with readable option text, one <app-passenger> per row. The page also keeps
+ * a CSS-hidden login dialog and a hidden infant section in the DOM.
+ */
+function codeSelect(fcn: string, label: string, opts: Array<[string, string]>): string {
+  return `<select formcontrolname="${fcn}" class="form-control">${[['', label] as [string, string], ...opts].map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>`;
+}
+function realPassengerRow(i: number): string {
+  return `<app-passenger><div class="ui-g passenger-block" id="psgn-${i}">
+    <p-autocomplete formcontrolname="passengerName" class="ng-pristine ng-invalid"><span class="ui-autocomplete ui-widget">
+      <input type="text" class="ui-autocomplete-input ui-inputtext ui-widget" autocomplete="off" placeholder="Passenger Name" maxlength="16" aria-autocomplete="list"></span></p-autocomplete>
+    <input type="number" formcontrolname="passengerAge" placeholder="Age" class="form-control" min="1" max="125">
+    ${codeSelect('passengerGender', 'Gender', [['M', 'Male'], ['F', 'Female'], ['T', 'Transgender']])}
+    ${codeSelect('passengerBerthChoice', 'No Preference', [['WS', 'Window Side']])}
+    ${codeSelect('passengerFoodChoice', 'Food Choice', [['V', 'Veg'], ['N', 'Non Veg'], ['D', 'No Food']])}
+  </div></app-passenger>`;
+}
+function realPassengerPage(rows: string): string {
+  return `<style>.d-none{display:none!important}</style>
+  <div class="d-none"><app-login><input type="text" formcontrolname="userid" placeholder="User Name"><input type="password" formcontrolname="password" placeholder="Password"></app-login></div>
+  <div class="passenger-page"><h3>Passenger Details</h3><div class="train-summary">AMRITSAR SHTABDI (12014) | AC Chair car (CC) | GENERAL</div>
+  <div class="passenger-rows">${rows}</div>
+  <a href="#" class="add-passenger" role="button">+ Add Passenger</a>
+  <div class="d-none infant-section"><input type="text" formcontrolname="infantName" placeholder="Name"><input type="number" placeholder="Age"></div>
   <div class="contact"><label for="mobileNumber">Mobile Number</label><input id="mobileNumber" formcontrolname="mobileNumber" aria-label="Mobile Number" value="+91 98XXXXXX10" readonly></div>
   <fieldset class="payment-mode"><legend>Payment Mode</legend>
     <label><input type="radio" name="paymentType" value="cards"> Pay through Credit &amp; Debit Cards / Net Banking / Wallets</label>
@@ -103,7 +137,11 @@ export const MOCK_IRCTC_SCENARIOS: readonly MockIrctcScenario[] = Object.freeze(
     <button type="button" class="btn-primary" data-final="pay" onclick="this.ownerDocument.body.dataset.finalClicked='pay'">Pay &amp; Book</button></div>`),
   S('confirmation', 'IRCTC booking confirmation page (MOCK)', 'CONFIRMATION', `<div class="confirmation"><h2>Booking Confirmed</h2><p>Your ticket has been booked successfully. (MOCK page — nothing was booked.)</p></div>`),
   S('booking-failed', 'Booking failure page', 'FAILURE', `<div class="failure"><h2>Transaction Failed</h2><p>Booking failed. Any amount debited will be refunded. (MOCK)</p></div>`),
-  S('session-expired', 'IRCTC session expired', 'SESSION_EXPIRED', `<div class="expired"><h2>Session Expired</h2><p>Your session has expired. Please login again.</p></div>`)
+  S('session-expired', 'IRCTC session expired', 'SESSION_EXPIRED', `<div class="expired"><h2>Session Expired</h2><p>Your session has expired. Please login again.</p></div>`),
+  S('irctc-home-defaults', 'Home — IRCTC defaults already filled (today\'s date, last searched stations)', 'HOME_SEARCH', `${header()}${searchForm({ values: { from: 'LUDHIANA JN - LDH', to: 'CHANDIGARH - CDG', date: '05/10/2026' } })}`),
+  S('irctc-passenger-real', 'Passenger form — real IRCTC structure (p-autocomplete name, code-valued selects, hidden login + infant)', 'PASSENGER', realPassengerPage([1, 2].map(realPassengerRow).join(''))),
+  S('irctc-passenger-late', 'Passenger form — 2nd row rendered late (Angular progressive render)', 'PASSENGER', `${realPassengerPage(realPassengerRow(1))}<script>setTimeout(function () {
+    document.querySelector('.passenger-rows').insertAdjacentHTML('beforeend', ${JSON.stringify(realPassengerRow(2))}); }, 1500);</script>`)
 ]);
 
 export function mockIrctcEnabled(env: NodeJS.ProcessEnv): boolean {

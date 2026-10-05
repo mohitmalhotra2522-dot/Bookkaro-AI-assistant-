@@ -33,3 +33,16 @@ Without the extension, the **IRCTC Assist** page in BookKaro shows every value w
 With the dev server (`npm run dev`), open `http://localhost:3000/api/dev/mock-irctc` (20 scenarios). MockIRCTC is
 never served in production. The real IRCTC DOM could not be inspected from the build sandbox (HTTP 403), so the
 detection is semantic (labels / placeholders / visible text); verify on the real site yourself and stop before payment.
+
+## Troubleshooting (v0.39.1)
+
+- **Passenger details fill nahi hui?** Check that `chrome://extensions` shows version **0.39.1**. If not, press the
+  ↻ Reload icon on "BookKaro IRCTC Assist", then open the IRCTC tab again.
+- Press **Fill again** in the BookKaro box once the IRCTC passenger page has fully loaded.
+- The small grey line in the box shows *metadata only*, for example
+  `PASSENGER · rows 1/2 · filled 3 · not filled: passengerBerth:OPTION_NOT_FOUND`.
+  If something is still not filled, send that line (no names or ages are in it).
+- If you edited a field yourself, BookKaro does not overwrite it and pauses on that page only. The next IRCTC
+  page fills normally.
+- If the IRCTC passenger page shows a different train than your BookKaro review, nothing is filled until you
+  press **Resume**.

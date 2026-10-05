@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BookKaro IRCTC Assist",
-  "version": "0.39.0",
+  "version": "0.39.1",
   "description": "Pre-fills IRCTC journey and passenger forms from your confirmed BookKaro review. You log in, solve CAPTCHA, enter OTP, tap the final Book/Continue and pay yourself.",
   "minimum_chrome_version": "110",
   "permissions": ["storage"],

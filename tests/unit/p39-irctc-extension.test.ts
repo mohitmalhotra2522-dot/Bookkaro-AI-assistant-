@@ -39,8 +39,8 @@ const val = (sel: string, i = 0) => (document.querySelectorAll(sel)[i] as HTMLIn
 beforeEach(() => { document.body.innerHTML = ''; });
 
 describe('P39 G4 — page detection over the 20 MockIRCTC scenarios', () => {
-  it('[1] there are exactly 20 scenarios and each is detected as its documented page kind', () => {
-    expect(MOCK_IRCTC_SCENARIOS).toHaveLength(20);
+  it('[1] there are exactly 23 scenarios and each is detected as its documented page kind', () => {
+    expect(MOCK_IRCTC_SCENARIOS).toHaveLength(23);
     const got = MOCK_IRCTC_SCENARIOS.map(s => { load(s.id); return [s.id, Core.detectPage(document)]; });
     expect(got).toEqual(MOCK_IRCTC_SCENARIOS.map(s => [s.id, s.expectPage]));
     document.body.innerHTML = '<div>Some other page</div>';
@@ -225,5 +225,57 @@ describe('P39 G4 — the passenger page must belong to the reviewed train', () =
     // matching train (mock ?train=) fills straight away
     document.body.innerHTML = (renderMockIrctc('passenger-single', { train: '12497' }).match(/<body[^>]*>([\s\S]*)<\/body>/) || [])[1] || '';
     expect(Core.pageTrainNumbers(document)).toContain('12497');
+  });
+});
+
+describe('P39.1 — real IRCTC structure (user report: passenger details not auto-filled)', () => {
+  it('[15] real passenger page: hidden login form / infant row do not confuse detection; p-autocomplete name + code-valued selects are filled', async () => {
+    const clicks = load('irctc-passenger-real');
+    expect(Core.detectPage(document)).toBe('PASSENGER');                  // was LOGIN: CSS-hidden <input type=password>
+    expect(Core.passengerNameInputs(document)).toHaveLength(2);           // hidden infant "Name" input not counted
+    const rep = await Core.fillPage(document, 'PASSENGER', snap({ passengers: pax(2) }), Core.newState(), noWait);
+    expect(rep.overrides).toEqual([]);
+    expect(rep.skipped).toEqual([]);
+    expect(rep.filled).toEqual(expect.arrayContaining(['passengerName', 'passengerAge', 'passengerGender']));
+    const names = Array.from(document.querySelectorAll('p-autocomplete[formcontrolname="passengerName"] input')).map((i: any) => i.value);
+    expect(names).toEqual(['Rahul Sharma', 'Neha Sharma']);
+    expect(Array.from(document.querySelectorAll('input[formcontrolname="passengerAge"]')).map((i: any) => i.value)).toEqual(['30', '31']);
+    expect(Array.from(document.querySelectorAll('select[formcontrolname="passengerGender"]')).map((x: any) => x.value)).toEqual(['M', 'F']);
+    expect((document.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('');
+    expect((document.querySelector('input[formcontrolname="infantName"]') as HTMLInputElement).value).toBe('');
+    expect(rep.finalControl?.textContent).toBe('Continue');
+    expect(clicks).toEqual([]);
+  });
+
+  it('[16] journey page defaults (today\'s date, last searched stations) are replaced — only a real user edit pauses', async () => {
+    load('irctc-home-defaults');
+    const rep = await Core.fillPage(document, 'HOME_SEARCH', snap(), Core.newState(), noWait);
+    expect(rep.overrides).toEqual([]);
+    expect(rep.filled.sort()).toEqual(['date', 'from', 'quota', 'to', 'travelClass']);
+    expect(val('#origin')).toBe('AMRITSAR JN - ASR');
+    expect(val('#destination')).toBe('NEW DELHI - NDLS');
+    expect(val('#jDate')).toBe('06/10/2026');
+    // a field the USER changed (trusted input event recorded by the content script) still wins
+    load('irctc-home-defaults');
+    const st = Core.newState();
+    st.userEdited.add(document.querySelector('#jDate'));
+    const rep2 = await Core.fillPage(document, 'HOME_SEARCH', snap(), st, noWait);
+    expect(rep2.overrides).toEqual(['date']);
+    expect(val('#jDate')).toBe('05/10/2026');
+    // passenger fields stay strict: a pre-existing passenger value is never replaced
+    load('passenger-user-edited');
+    expect((await Core.fillPage(document, 'PASSENGER', snap(), Core.newState(), noWait)).overrides).toEqual(['passengerName']);
+  });
+
+  it('[17] IRCTC route fallback only decides when the DOM does not; non-IRCTC paths stay UNKNOWN', () => {
+    const fake = (path: string) => ({ defaultView: { location: { pathname: path } } });
+    expect(Core.pageFromUrl(fake('/nget/booking/psgninput'))).toBe('PASSENGER');
+    expect(Core.pageFromUrl(fake('/nget/booking/train-list'))).toBe('TRAIN_LIST');
+    expect(Core.pageFromUrl(fake('/nget/train-search'))).toBe('HOME_SEARCH');
+    expect(Core.pageFromUrl(fake('/nget/payment/bkgPaymentOptions'))).toBe('UNKNOWN');
+    expect(Core.pageFromUrl(fake('/api/dev/mock-irctc/otp'))).toBe('UNKNOWN');
+    load('irctc-passenger-late');                                          // 2nd row not rendered yet
+    expect(Core.passengerNameInputs(document)).toHaveLength(1);
+    expect(Core.detectPage(document)).toBe('PASSENGER');
   });
 });
