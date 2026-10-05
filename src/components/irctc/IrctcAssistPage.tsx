@@ -93,7 +93,7 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
               <ul className="bk-irctc__checklist">
                 {s.userActions.map(a => <li key={a}><IconLock size={14} /> {a}</li>)}
               </ul>
-              <p className="bk-meta">BookKaro kabhi password, OTP, CAPTCHA, card / UPI PIN nahi maangta. Final Book / Continue button sirf highlight hota hai — click aap karte hain.</p>
+              <p className="bk-meta">BookKaro kabhi password, OTP, CAPTCHA, card / UPI PIN nahi maangta. Extension IRCTC par Search, aapki train / class / date aur train list ka “Book Now” khud tap karta hai; login ke baad passenger Continue / final Book aur payment sirf highlight — click aap karte hain.</p>
             </section>
 
             {!terminal && (

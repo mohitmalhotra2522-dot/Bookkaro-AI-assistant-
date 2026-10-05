@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { getPassengerForm, submitPassengerForm, type PassengerFormSpec, type PassengerFormInput } from '../../lib/api';
 import { IconAlert, IconClose, IconInfo, IconPlus, IconTrain, IconUsers } from '../icons/Icons';
 import { formatDate } from '../../lib/format';
+import { irctcAgeCategory } from './irctc-age-category';
 
 /**
  * P38 — IRCTC-style passenger details page (full screen).
@@ -12,9 +13,10 @@ import { formatDate } from '../../lib/format';
  * when offered). Nothing is calculated or invented here.
  */
 const BERTH_LABEL: Record<string, string> = {
-  NO_PREFERENCE: 'No preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side lower', SIDE_UPPER: 'Side upper', SIDE_MIDDLE: 'Side middle', WINDOW: 'Window side', CABIN: 'Cabin', COUPE: 'Coupe'
+  // exact IRCTC passenger-form texts (labels_en.json: noPreference / LB / MB / UB / SL / SU / SM / WS / CB / CP)
+  NO_PREFERENCE: 'No Preference', LOWER: 'Lower', MIDDLE: 'Middle', UPPER: 'Upper', SIDE_LOWER: 'Side Lower', SIDE_UPPER: 'Side Upper', SIDE_MIDDLE: 'Side Middle', WINDOW: 'Window Side', CABIN: 'Cabin', COUPE: 'Coupe'
 };
-const FOOD_LABEL: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non-veg', NO_FOOD: 'No food' };
+const FOOD_LABEL: Record<string, string> = { VEG: 'Veg', NON_VEG: 'Non Veg', NO_FOOD: 'No Food/Beverages' };   // IRCTC V / N / NF
 const GENDERS: Array<[string, string]> = [['MALE', 'Male'], ['FEMALE', 'Female'], ['OTHER', 'Transgender']];
 
 type Row = { name: string; age: string; gender: string; berthPreference: string; foodPreference: string };
@@ -149,7 +151,11 @@ export const PassengerFormPage: React.FC<Props> = ({ sessionId, onClose, onSaved
             {rows.map((r, i) => (
               <section key={i} className="bk-card bk-pform__pax" aria-label={`Passenger ${i + 1}`}>
                 <div className="bk-section-head">
-                  <h3 style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><IconUsers size={17} /> Passenger {i + 1}</h3>
+                  <h3 style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}><IconUsers size={17} /> Passenger {i + 1}
+                    {irctcAgeCategory(r.age) && (
+                      <span className={`bk-tag ${irctcAgeCategory(r.age)!.kind === 'ADULT' ? 'bk-tag--navy' : 'bk-tag--warn'}`} data-testid={`pax-${i}-category`}>{irctcAgeCategory(r.age)!.label}</span>
+                    )}
+                  </h3>
                   {rows.length > 1 && (
                     <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm" onClick={() => setRows(rs => rs.filter((_, j) => j !== i))} disabled={busy}>Remove</button>
                   )}
@@ -179,6 +185,10 @@ export const PassengerFormPage: React.FC<Props> = ({ sessionId, onClose, onSaved
                     {err(i, 'gender') && <span className="bk-field__err">{err(i, 'gender')}</span>}
                   </div>
                 </div>
+
+                {irctcAgeCategory(r.age)?.note && (
+                  <div className="bk-pform__note" role="note"><IconInfo size={15} /> <span>{irctcAgeCategory(r.age)!.note}</span></div>
+                )}
 
                 {berthOptions.length > 0 && (
                   <label className="bk-field">

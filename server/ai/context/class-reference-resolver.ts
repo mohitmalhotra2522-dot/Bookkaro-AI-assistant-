@@ -18,7 +18,8 @@ export function canonicalClassToken(raw: string): string | null {
   if (/ (executive|exec chair|ec) /.test(t)) return 'EC';
   if (/ (second sitting|2s|ds) /.test(t)) return '2S';
   if (/ (sleeper|sl) /.test(t)) return 'SL';
-  if (/ (3a|3ac|3 ac|third ac|3 tier|3e) /.test(t)) return '3A';
+  if (/ (3e|3 e|3ae|3 economy|ac economy|ac 3 economy|3 tier economy|economy) /.test(t)) return '3E';   // AC 3 Economy is its own class — never 3A
+  if (/ (3a|3ac|3 ac|third ac|3 tier) /.test(t)) return '3A';
   if (/ (2a|2ac|2 ac|second ac|2 tier) /.test(t)) return '2A';
   if (/ (1a|1ac|1 ac|first ac|first class ac) /.test(t)) return '1A';
   if (/ (cc) /.test(t)) return 'CC';

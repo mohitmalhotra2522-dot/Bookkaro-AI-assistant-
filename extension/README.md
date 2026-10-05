@@ -6,14 +6,15 @@ forms with that **validated, non-sensitive** data. **You** do everything sensiti
 | Extension does | You do (always) |
 |---|---|
 | From / To (picks the suggestion ending in `- CODE`), journey date, class, quota GENERAL | IRCTC login — User ID + Password |
-| Highlights your train + class in the train list | Tap **Search** and **Book Now** |
+| Taps **Search** (only after From / To / Date / Class were verified); in the list taps **your** train's class (IRCTC “Refresh”), the journey date and **Book Now** | — |
 | Passenger Name / Age / Gender / Berth / Food (only options the page offers) | CAPTCHA |
-| Highlights the final **Continue / Pay** control — **never clicks it** | OTP |
+| Highlights the passenger **Continue** / final **Pay** control — **never clicks it** | OTP |
 | Language choice (English / हिंदी) if the page offers a selector | Final Book / Continue tap, Payment |
 
 Safety rules (enforced in `irctc-core.js`, tested in `tests/unit/p39-irctc-handoff.test.ts`):
 - Never touches password / OTP / CAPTCHA / card / CVV / UPI / PIN / bank / login / mobile / email fields.
-- Never clicks Book Now, passenger Continue, review Continue, OTP Submit or Pay & Book.
+- Never clicks passenger Continue, review Continue, OTP Submit or Pay & Book. (Search and the train-list Book Now are
+  navigation before login — tapped once, for the reviewed train / class / date only; v0.39.5, user-requested.)
 - Never overwrites a value you typed — the assistant pauses instead (overlay **Resume** continues).
 - Every value is read back; anything that did not stick is reported `IRCTC_FIELD_NOT_CONFIRMED` for you to fill.
 - Reports to BookKaro are metadata only (page kind, field names) — never field values or credentials.
@@ -75,3 +76,13 @@ The real-like mock calendar emulates the same guard. Real IRCTC: USER VERIFICATI
   `real-passenger-mobile`, `real-passenger-mobile-2`, `real-passenger-rejecting`.
 - Chrome on Android has no extensions: use desktop Chrome / Edge / Brave (or an Android browser that supports MV3
   extensions) for the autofill; otherwise the Assist page copy buttons.
+
+## v0.39.5 — real IRCTC passenger layout + auto Search / Book Now (user-requested)
+- **Berth / food fix:** on www.irctc.co.in `<app-passenger>` keeps Name / Age / Gender in one `<span>` and Berth / Food in
+  sibling `<div>`s, so the old row lookup never found them. They are now looked up inside the passenger component.
+- IRCTC option **values** are used when the visible text differs (Hindi page; food “No Food/Beverages”):
+  berth LB MB UB SL SU SM WS CB CP, food V N D, gender M F T. IRCTC's untouched food default is not treated as a user edit.
+- **Auto-advance:** journey page → Search (only when every journey field verified, no user edit); train list → for the
+  reviewed train only: class tab (availability refresh) → journey-date cell → Book Now once IRCTC enables it. Pause / Stop
+  halt it. REGRET / not bookable (Book Now disabled), train / class / date missing → stops with a message, nothing guessed.
+- Login, CAPTCHA, OTP, passenger Continue, final Book and payment stay with the user.

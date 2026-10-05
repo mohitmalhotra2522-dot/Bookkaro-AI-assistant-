@@ -441,3 +441,21 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   SU Side Upper, SM Side Middle, WS Window Side, CB Cabin, CP Coupe.
 - Change: added `SIDE_MIDDLE` (IRCTC SM, "Side Middle") for 3E only; constants comment cites the IRCTC source; form note
   says IRCTC decides per train. Extension unchanged (labels already exact; unknown option → field reported, never substituted).
+
+## v0.39.5 — 3E selection, IRCTC-accurate passenger form, berth autofill on real IRCTC, auto Search / Book Now
+- **3E → 3A bug:** `canonicalClassToken` mapped `3e` to `3A`; 3E (AC 3 Economy) now has its own rule before 3A.
+- **Berth / food not filled on www.irctc.co.in:** IRCTC `<app-passenger>` (BookingModule chunk `8-es2015.d29198c5a744dd83df7f.js`)
+  keeps Name/Age/Gender in a `<span>` and Berth/Food in sibling `<div>`s → `rowContainer()` never contained them. Now looked up in
+  `passengerScope()` (the `app-passenger` component when it holds exactly one row). IRCTC option VALUES are a fallback when the text
+  differs (`pageOptionLabel`: berth LB MB UB SL SU SM WS CB CP, food V N D, gender M F T — Hindi page, food "No Food/Beverages").
+  IRCTC's untouched food default ("No Food/Beverages" / "Catering Service Option") is not treated as a user edit.
+- **Auto-advance (user-requested):** `Core.autoAdvance()` (separate from `fillPage`, which stays highlight-only): journey Search
+  only after From/To/Date/Class verified with no error/user edit; train list → reviewed train only: class tab (IRCTC "Refresh")
+  → wait for the journey-date `.pre-avl` cell → tap → wait until IRCTC enables "Book Now" (no `disable-book`) → tap once (one more
+  only after IRCTC login returned to the list). REGRET / missing train / class / date → stop with a message. Pause/Stop halt it.
+  Passenger Continue, CAPTCHA, OTP, final Book, payment untouched. Manifest 0.39.5.
+- **BookKaro passenger form:** `src/components/passengers/irctc-age-category.ts` — age 1–4 "Child · 5 saal se kam (IRCTC: Infant)"
+  with IRCTC's infantMsg rule, 5–11 "Child (5–11)" with the IRCTC "Opt Berth" note, 12+ Adult (display only, no logic/API change).
+  Berth/food labels = exact IRCTC texts.
+- Tests: new `tests/unit/p39-5-irctc-real-dom.test.ts` (13, fixtures copied from IRCTC templates; old core fails [1]–[5]).
+  G3 (real Chromium + v0.39.5): `/home/user/p39_verify/e2e/e2e_verify_v0395.py` 23/23.

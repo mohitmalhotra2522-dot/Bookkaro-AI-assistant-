@@ -3,8 +3,10 @@
  *
  * Watches the VISIBLE page, pre-fills supported fields from the BookKaro snapshot (irctc-core.js), highlights the
  * next control the USER must tap, and reports metadata-only progress. A shadow-DOM overlay offers Pause / Resume /
- * Stop at all times. It never clicks Search-result "Book Now", passenger "Continue", review "Continue", OTP "Submit"
- * or "Pay & Book"; never touches login / CAPTCHA / OTP / payment fields; never overwrites the user's own edits.
+ * Stop at all times. v0.39.5 (user-requested): taps journey Search (all journey fields verified) and, for the reviewed
+ * train only, its class tab / date cell / train-list "Book Now" (navigation before login — nothing booked or paid).
+ * It never clicks passenger "Continue", review "Continue", OTP "Submit" or "Pay & Book"; never touches login / CAPTCHA /
+ * OTP / payment fields; never overwrites the user's own edits.
  */
 'use strict';
 (function () {
@@ -68,7 +70,7 @@
     ul{margin:4px 0 0 16px;padding:0;font-size:11px;opacity:.85}</style>
     <div class="box" role="status" aria-live="polite"><div class="t">BookKaro IRCTC Assist</div>
     <div class="m" id="msg">Handoff load ho raha hai…</div><div class="s" id="st"></div>
-    <ul><li>Login, CAPTCHA, OTP — aap khud</li><li>Final Book / Continue — aap khud</li><li>Payment — aap khud</li></ul>
+    <ul><li>Search, train / class / date, Book Now — BookKaro</li><li>Login, CAPTCHA, OTP — aap khud</li><li>Passenger Continue / final Book — aap khud</li><li>Payment — aap khud</li></ul>
     <button class="p" id="pause">Pause</button><button class="r" id="again" title="Is page ke fields dobara fill karein">Fill again</button><button class="r" id="resume" hidden>Resume</button><button class="x" id="stop">Stop</button></div>`;
   const $ = (id) => root.getElementById(id);
   const say = (m, st) => { $('msg').textContent = m; if (st !== undefined) $('st').textContent = st; };
@@ -81,6 +83,7 @@
   $('resume').onclick = () => { if (trainMismatchPending) { state.trainMismatchAccepted = true; trainMismatchPending = false; } paused = false; $('pause').hidden = false; $('resume').hidden = true; lastFillKey = ''; send({ type: 'RESUMED' }); tick(); };
   $('again').onclick = () => {
     paused = false; autoPaused = false; trainMismatchPending = false; lastFillKey = ''; fillAttempts = {}; refusal = null; snapshot = null; lastPage = null;
+    state.auto = null; state.loginSeen = false;   // an explicit "Fill again" may tap Search / Book Now once more
     $('pause').hidden = false; $('resume').hidden = true; tick();
   };
   $('stop').onclick = () => { stopped = true; say('Assistant band. IRCTC par jo fill hua hai woh aap khud check kijiye.', ''); send({ type: 'STOPPED' }); observer.disconnect(); };
@@ -141,6 +144,7 @@
         if (r.code === 'HANDOFF_TERMINAL' || r.code === 'STALE_HANDOFF') { snapshot = await loadSnapshot(); if (snapshot) say(snapshot.message, snapshot.status); return; }
       }
       say(MSG[page] || snapshot.message, `${page} · ${snapshot.train.number} ${snapshot.travelClass.code} · ${snapshot.passengers.length} pax`);
+      if (page === 'LOGIN') state.loginSeen = true;
       if (paused) return;
       if (page === 'LANGUAGE' || page === 'HOME_SEARCH') await handleLanguage(page);
       if (!FILL_PAGES.has(page)) {
@@ -191,6 +195,21 @@
         say(`Train ${snapshot.train.number} highlight ki gayi hai — class ${snapshot.travelClass.code} aur date aap khud tap karein, phir “Book Now”.`, diag);
       } else if (page === 'TRAIN_LIST') {
         say(`Train ${snapshot.train.number} is list mein nahi mili (TRAIN_AUTOFILL_FAILED) — doosri train nahi chuni gayi.`, diag);
+      }
+      // v0.39.5: navigation taps (Search → class / date → Book Now) — only on a verified page, stops on Pause / Stop
+      if ((page === 'HOME_SEARCH' || page === 'TRAIN_LIST') && !paused && !stopped) {
+        const adv = await Core.autoAdvance(document, page, snapshot, rep, state, { shouldStop: () => paused || stopped });
+        const AUTO_MSG = {
+          TRAIN_NOT_IN_LIST: `Train ${snapshot.train.number} is list mein nahi mili — BookKaro ne doosri train nahi chuni.`,
+          CLASS_NOT_IN_TRAIN: `Class ${snapshot.travelClass.code} is train ki list mein nahi dikhi — class aap khud chuniye.`,
+          DATE_NOT_SHOWN: `${snapshot.travelClass.code} ki availability IRCTC par nahi aayi — class par “Refresh” aap khud tap karein.`,
+          BOOK_NOW_DISABLED: `IRCTC ne “Book Now” enable nahi kiya${adv.status ? ` (${adv.status})` : ''} — availability dekhkar aap khud decide karein.`
+        };
+        if (page === 'HOME_SEARCH' && adv.clicked.indexOf('search') >= 0) { say('From / To / Date / Class verify ho gaye — BookKaro ne Search tap kiya.', diag); return; }
+        if (page === 'TRAIN_LIST' && adv.clicked.indexOf('bookNow') >= 0) {
+          say(`Train ${snapshot.train.number} · ${snapshot.travelClass.code} · ${adv.status || 'date'} select karke “Book Now” tap kiya. Ab IRCTC login (User ID + Password) aap khud karein.`, diag); return;
+        }
+        if (page === 'TRAIN_LIST' && AUTO_MSG[adv.stopped]) { say(AUTO_MSG[adv.stopped], `${diag} · ${adv.stopped}`); return; }
       }
       if (page === 'HOME_SEARCH' && rep.stopped) {
         // station / date not verified on IRCTC → stop here; nothing guessed, Search not highlighted

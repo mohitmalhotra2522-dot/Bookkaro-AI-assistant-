@@ -5,6 +5,10 @@
  *  - Only VISIBLE, normal page controls are used. No private APIs, no network calls, no cookies / storage access.
  *  - Never touches a password / OTP / CAPTCHA / card / CVV / UPI / PIN / bank / login / mobile / email field.
  *  - Never clicks the final Book / Continue / Pay control — it is only highlighted for the USER to tap.
+ *    v0.39.5 (user-requested): autoAdvance() taps only the NAVIGATION controls before login — journey-page Search (after
+ *    every journey field was verified) and, for the reviewed train only, its class tab (IRCTC "Refresh"), the journey-date
+ *    cell and the train-list "Book Now" (opens IRCTC login / passenger page; nothing is booked or paid). Passenger
+ *    Continue, CAPTCHA, OTP, final Book and payment stay with the user.
  *  - Never overwrites a value the user typed or changed (user overrides win; the assistant pauses).
  *  - Every filled value is read back; a value that did not stick is reported as IRCTC_FIELD_NOT_CONFIRMED.
  *  - Reports contain field KEYS and reasons only — never field values.
@@ -291,7 +295,7 @@
     if (el.tagName === 'SELECT' || el.getAttribute('role') === 'combobox' || isPrimeDropdown(el)) {
       var cur = currentChoice(el);
       if (mine !== undefined && cur.text === mine) return false;
-      if (!cur.value || /^(gender|food choice|no preference|all classes|select)/i.test(cur.text)) return false;
+      if (!cur.value || /^(gender|food choice|no preference|all classes|select|catering service option|no food\/beverages)/i.test(cur.text)) return false;
       return !optionMatch(cur.text, target, code);
     }
     var v = norm(el.value);
@@ -367,6 +371,33 @@
     if (ok) { await wait(opts, 300); ok = re.test(norm(el.value)); }   // still the chosen station after the page's own validation settled?
     if (!ok) { rep.skip(field, 'VALUE_NOT_CONFIRMED'); return; }
     state.filled.set(el, norm(el.value)); rep.ok(field);
+  }
+
+  /** v0.39.5: IRCTC option VALUES (www.irctc.co.in passenger form: berthName / foodOptionName pipes, gender select). The visible
+   *  text is language-dependent (Hindi page) and IRCTC's food text differs ("No Food/Beverages"), the value code does not. */
+  var OPTION_CODE = {
+    berth: { 'no preference': '', lower: 'LB', middle: 'MB', upper: 'UB', 'side lower': 'SL', 'side upper': 'SU', 'side middle': 'SM', 'window side': 'WS', cabin: 'CB', coupe: 'CP' },
+    food: { veg: 'V', 'non veg': 'N', 'no food': 'D' },
+    gender: { male: 'M', female: 'F', transgender: 'T' }
+  };
+  /** The option text to choose on this page: our label when the page shows it, else the text of the option whose VALUE is
+   *  IRCTC's code for that label. Unknown → the label unchanged (the normal OPTION_NOT_FOUND report follows). */
+  function pageOptionLabel(el, kind, label) {
+    if (!el || el.tagName !== 'SELECT' || !label) return label;
+    var opts = Array.prototype.slice.call(el.options);
+    if (opts.some(function (o) { return lower(o.textContent) === lower(label); })) return label;
+    var map = OPTION_CODE[kind] || {}, code = map[lower(label)];
+    if (code === undefined) return label;
+    var hit = opts.filter(function (o) { return o.value === code; })[0];
+    return hit ? norm(hit.textContent) : label;
+  }
+
+  /** v0.39.5: the whole passenger component. Real IRCTC <app-passenger>: Name / Age / Gender sit in one <span>, Berth and
+   *  Food in SIBLING <div>s — so berth / food are looked up in the component (only when it holds exactly this one row). */
+  function passengerScope(nameInput, row) {
+    var comp = nameInput.closest ? nameInput.closest('app-passenger') : null;
+    if (comp && Array.prototype.slice.call(comp.querySelectorAll('input')).filter(isPassengerNameInput).length === 1) return comp;
+    return row;
   }
 
   function rowContainer(nameInput) {
@@ -530,10 +561,12 @@
         if (fillText(nameEl, 'passengerName', P.name, state, rep)) touched.push({ el: nameEl, field: 'passengerName', index: p + 1 });
         var ageEl = Array.prototype.slice.call(row.querySelectorAll('input')).filter(function (i) { return /\bage\b|passengerage/.test(descriptor(i)) && !isForbidden(i); })[0];
         if (fillText(ageEl, 'passengerAge', P.age, state, rep)) touched.push({ el: ageEl, field: 'passengerAge', index: p + 1 });
-        var gEl = findChoice(row, /gender/), bEl = findChoice(row, /berth/), fEl = findChoice(row, /food|meal|catering/);
-        if (P.gender) { if (await fillChoiceAsync(doc, gEl, 'passengerGender', P.gender, null, state, rep, opts)) touched.push({ el: gEl, field: 'passengerGender', index: p + 1 }); } else rep.skip('passengerGender', 'NOT_REPRESENTABLE');
-        if (P.berth && await fillChoiceAsync(doc, bEl, 'passengerBerth', P.berth, null, state, rep, opts)) touched.push({ el: bEl, field: 'passengerBerth', index: p + 1 });
-        if (P.food && await fillChoiceAsync(doc, fEl, 'passengerFood', P.food, null, state, rep, opts)) touched.push({ el: fEl, field: 'passengerFood', index: p + 1 });
+        var scope = passengerScope(nameEl, row);
+        var gEl = findChoice(row, /gender/) || findChoice(scope, /gender/), bEl = findChoice(row, /berth/) || findChoice(scope, /berth/),
+          fEl = findChoice(row, /food|meal|catering/) || findChoice(scope, /food|meal|catering/);
+        if (P.gender) { if (await fillChoiceAsync(doc, gEl, 'passengerGender', pageOptionLabel(gEl, 'gender', P.gender), null, state, rep, opts)) touched.push({ el: gEl, field: 'passengerGender', index: p + 1 }); } else rep.skip('passengerGender', 'NOT_REPRESENTABLE');
+        if (P.berth && await fillChoiceAsync(doc, bEl, 'passengerBerth', pageOptionLabel(bEl, 'berth', P.berth), null, state, rep, opts)) touched.push({ el: bEl, field: 'passengerBerth', index: p + 1 });
+        if (P.food && await fillChoiceAsync(doc, fEl, 'passengerFood', pageOptionLabel(fEl, 'food', P.food), null, state, rep, opts)) touched.push({ el: fEl, field: 'passengerFood', index: p + 1 });
       }
       rep.curPax = null;
       // P39.3 verification: re-read every control we set; a value the page rejected / changed is reported, never assumed
@@ -547,6 +580,100 @@
     }
     rep.finalControl = findFinalControl(doc, page, snapshot);
     return rep;
+  }
+
+  // ---------------------------------------------------------------------------------------------------------------
+  // v0.39.5 auto-advance (user-requested): Search → class tab (IRCTC "Refresh") → journey-date cell → "Book Now".
+  // Navigation only, before login. Each control is tapped at most once per handoff; anything unverified → stop + reason.
+
+  function enabled(b) { return !!b && !b.disabled && b.getAttribute('aria-disabled') !== 'true' && !/(^|\s)(disable-book|disabled)(\s|$)/.test(b.className || ''); }
+  function tapTarget(el, block) {
+    var t = el.closest ? el.closest('.pre-avl, [role="button"], [role="tab"], a, button') : null;
+    return t && (!block || block.contains(t)) ? t : el;
+  }
+  function selected(el) { return /(^|\s)selected-class(\s|$)/.test(el.className || '') || el.getAttribute('aria-selected') === 'true'; }
+
+  /** The reviewed class's tab inside the train block ("AC 3 Economy (3E)" / bare "3E") — never a date cell. */
+  function findClassTab(block, code) {
+    var reCode = new RegExp('\\(' + String(code).replace(/[^A-Za-z0-9]/g, '') + '\\)');
+    var leaves = all(block, '*').filter(function (e) { return e.children.length === 0 && isVisible(e); });
+    var leaf = leaves.filter(function (e) { return reCode.test(e.textContent || ''); })[0] || leaves.filter(function (e) { return norm(e.textContent) === code; })[0];
+    return leaf ? tapTarget(leaf, block) : null;
+  }
+
+  /** The availability cell for the journey date ("Tue, 07 Oct" + status) — a .pre-avl / button cell, never the train heading. */
+  function findDateTap(block, dateIso) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateIso || '');
+    if (!m) return null;
+    var re = new RegExp('(^|\\D)' + m[3] + ' ' + MONTHS[Number(m[2]) - 1] + '(\\D|$)', 'i');
+    var cells = all(block, '.pre-avl, [role="button"]').filter(function (c) {
+      var t = norm(c.textContent);
+      return isVisible(c) && re.test(t) && !/\((1A|2A|3A|3E|CC|EC|SL|2S|FC|EA|EV|VS|VC)\)/.test(t) && !c.querySelector('.pre-avl, [role="button"]');
+    });
+    return cells[0] || null;
+  }
+
+  /**
+   * After fillPage(): HOME_SEARCH → tap Search only when From / To / Date / Class were all verified with no error / user edit;
+   * TRAIN_LIST → for the reviewed train only: class tab → wait for the availability → date cell → wait until IRCTC enables
+   * "Book Now" → tap it. Returns { page, clicked: [...], stopped: reason|null, status: availability text|null }.
+   * opts: { wait(ms), shouldStop() → true when the user paused / stopped, timeoutMs }
+   */
+  async function autoAdvance(doc, page, snapshot, rep, state, opts) {
+    opts = opts || {};
+    var out = { page: page, clicked: [], stopped: null, status: null };
+    var halt = function () { return !!(opts.shouldStop && opts.shouldStop()); };
+    state.auto = state.auto || { search: 0, classTap: {}, dateTap: {}, book: 0 };
+    var A = state.auto;
+    if (page === 'HOME_SEARCH') {
+      if (rep.stopped || (rep.errors && rep.errors.length) || rep.overrides.length) { out.stopped = 'JOURNEY_NOT_VERIFIED'; return out; }
+      if (['from', 'to', 'date', 'travelClass'].some(function (f) { return rep.filled.indexOf(f) < 0; })) { out.stopped = 'JOURNEY_NOT_VERIFIED'; return out; }
+      if (A.search >= 1) { out.stopped = 'SEARCH_ALREADY_TAPPED'; return out; }
+      var sb = findFinalControl(doc, 'HOME_SEARCH');
+      if (!enabled(sb)) { out.stopped = 'SEARCH_NOT_FOUND'; return out; }
+      if (halt()) { out.stopped = 'PAUSED'; return out; }
+      A.search++; sb.click(); out.clicked.push('search');
+      return out;
+    }
+    if (page !== 'TRAIN_LIST') return out;
+    var num = snapshot.train.number, code = snapshot.travelClass.code, limit = opts.timeoutMs || 15000;
+    var block = function () { var b = trainBlock(doc, num); return b ? b.block : null; };
+    var blk = block();
+    if (!blk) { out.stopped = 'TRAIN_NOT_IN_LIST'; return out; }
+    // 1) class tab — IRCTC fetches ("Refresh") the availability for that class when it is tapped
+    var cellNow = findDateTap(blk, snapshot.journey.dateIso), tab = findClassTab(blk, code);
+    if (!tab) { out.stopped = 'CLASS_NOT_IN_TRAIN'; return out; }
+    if (!(cellNow && selected(tab))) {
+      if ((A.classTap[num] || 0) >= 2) { out.stopped = 'CLASS_ALREADY_TAPPED'; return out; }
+      if (halt()) { out.stopped = 'PAUSED'; return out; }
+      A.classTap[num] = (A.classTap[num] || 0) + 1; tab.click(); out.clicked.push('class');
+    }
+    // 2) wait for the journey-date cell of that class
+    var cell = null, t0 = Date.now();
+    while (!cell && Date.now() - t0 < limit) {
+      blk = block(); cell = blk && findDateTap(blk, snapshot.journey.dateIso);
+      if (!cell) { if (halt()) { out.stopped = 'PAUSED'; return out; } await wait(opts, 250); }
+    }
+    if (!cell) { out.stopped = 'DATE_NOT_SHOWN'; return out; }
+    out.status = norm(cell.textContent).replace(/^.*?\d{2} [A-Za-z]{3}\s*/, '').slice(0, 40) || null;
+    if (!selected(cell)) {
+      if ((A.dateTap[num] || 0) >= 2) { out.stopped = 'DATE_ALREADY_TAPPED'; return out; }
+      if (halt()) { out.stopped = 'PAUSED'; return out; }
+      A.dateTap[num] = (A.dateTap[num] || 0) + 1; cell.click(); out.clicked.push('date');
+    }
+    // 3) "Book Now" of THIS train, once IRCTC enables it (stays disabled for REGRET / not bookable)
+    var book = null, t1 = Date.now();
+    while (!book && Date.now() - t1 < Math.min(limit, 10000)) {
+      var tb = trainBlock(doc, num);
+      if (tb && enabled(tb.book)) book = tb.book;
+      else { if (halt()) { out.stopped = 'PAUSED'; return out; } await wait(opts, 250); }
+    }
+    if (!book) { out.stopped = 'BOOK_NOW_DISABLED'; return out; }
+    var maxBook = state.loginSeen ? 2 : 1;                       // one more tap only if IRCTC came back here after its login
+    if (A.book >= maxBook) { out.stopped = 'BOOK_NOW_ALREADY_TAPPED'; return out; }
+    if (halt()) { out.stopped = 'PAUSED'; return out; }
+    A.book++; book.click(); out.clicked.push('bookNow');
+    return out;
   }
 
   /** Events for the backend — field keys + reasons only (never values). */
@@ -564,6 +691,8 @@
     findFinalControl: findFinalControl, passengerNameInputs: passengerNameInputs, trainBlock: trainBlock, pageTrainNumbers: pageTrainNumbers, pageFromUrl: pageFromUrl, isPassengerNameInput: isPassengerNameInput,
     newState: newState, fillPage: fillPage, reportEvents: reportEvents, highlight: highlight, choose: choose,
     // P39.3
-    isPrimeDropdown: isPrimeDropdown, choosePrime: choosePrime, findDateCell: findDateCell, typedErrors: typedErrors
+    isPrimeDropdown: isPrimeDropdown, choosePrime: choosePrime, findDateCell: findDateCell, typedErrors: typedErrors,
+    // v0.39.5
+    autoAdvance: autoAdvance, passengerScope: passengerScope, pageOptionLabel: pageOptionLabel, findClassTab: findClassTab, findDateTap: findDateTap
   };
 });
