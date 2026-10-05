@@ -45,7 +45,7 @@ export function createLLMProvider(env: Record<string, string | undefined> = {}, 
   if (!model) return unavailable('MISSING_LLM_MODEL');
   if (!/^https?:\/\/[^\s/]+/i.test(baseUrl)) return unavailable('INVALID_LLM_BASE_URL');
   const t = Number(env.LLM_TIMEOUT_MS);
-  const timeoutMs = Number.isFinite(t) && t >= 1000 && t <= 60000 ? t : 8000;
+  const timeoutMs = Number.isFinite(t) && t >= 1000 && t <= 120000 ? t : 8000;   // per-call cap 120 s (slow hosted models, e.g. Muse)
   const toolMode = String(env.LLM_TOOL_MODE || 'native').trim().toLowerCase() === 'json' ? 'json' : 'native';
   // Prompt 22: no hidden rule-based fallback at runtime — a failed remote call yields the safe LLM_UNAVAILABLE reply
   const provider = new OpenAICompatibleLLMProvider({ apiKey, model, baseUrl, timeoutMs, fetch: o.fetch, toolMode });
