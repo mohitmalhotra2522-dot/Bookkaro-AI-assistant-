@@ -10,11 +10,12 @@
 import { LLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult } from './llm-provider';
 import { MockLLMProvider } from './mock-llm';
 import { OpenAICompatibleLLMProvider, type FetchLike } from './openai-compatible-llm';
+import { FallbackLLMProvider, type LLMFallbackState } from './fallback-llm';
 
 export interface LLMProviderSelection {
   provider: LLMProvider;
   /** Safe description for logs / health (never the key). */
-  info: { providerId: string; model: string | null; configured: boolean; reason: string };
+  info: { providerId: string; model: string | null; configured: boolean; reason: string; fallback?: LLMFallbackState };
 }
 
 /** Prompt 23: stands in for a requested-but-misconfigured real LLM — always unavailable, never answers by itself. */
@@ -27,7 +28,7 @@ export class UnavailableLLMProvider implements LLMProvider {
   async generateSpokenResponse(): Promise<null> { return null; }
 }
 
-export function createLLMProvider(env: Record<string, string | undefined> = {}, o: { fetch?: FetchLike } = {}): LLMProviderSelection {
+export function createLLMProvider(env: Record<string, string | undefined> = {}, o: { fetch?: FetchLike; log?: (e: unknown) => void; now?: () => number } = {}): LLMProviderSelection {
   const kind = String(env.LLM_PROVIDER || 'mock').trim().toLowerCase();
   if (kind === 'mock' || kind === '') {
     const mock = new MockLLMProvider();
@@ -49,5 +50,18 @@ export function createLLMProvider(env: Record<string, string | undefined> = {}, 
   const toolMode = String(env.LLM_TOOL_MODE || 'native').trim().toLowerCase() === 'json' ? 'json' : 'native';
   // Prompt 22: no hidden rule-based fallback at runtime — a failed remote call yields the safe LLM_UNAVAILABLE reply
   const provider = new OpenAICompatibleLLMProvider({ apiKey, model, baseUrl, timeoutMs, fetch: o.fetch, toolMode });
+  // Explicit, user-configured fallback model (same endpoint + key). Unset → the plain provider above, unchanged.
+  const fbModel = String(env.LLM_FALLBACK_MODEL || '').trim();
+  if (fbModel && fbModel !== model) {
+    const ft = Number(env.LLM_FALLBACK_TIMEOUT_MS);
+    const fbTimeoutMs = Number.isFinite(ft) && ft >= 1000 && ft <= 120000 ? ft : 60000;
+    const cd = Number(env.LLM_FALLBACK_COOLDOWN_MS);
+    const cooldownMs = Number.isFinite(cd) && cd >= 0 && cd <= 3600000 ? cd : 300000;
+    const fb = new OpenAICompatibleLLMProvider({ apiKey, model: fbModel, baseUrl, timeoutMs: fbTimeoutMs, fetch: o.fetch, toolMode });
+    const wrapped = new FallbackLLMProvider(provider, fb, { cooldownMs, log: o.log, now: o.now });
+    const info: LLMProviderSelection['info'] = { providerId: provider.providerId, model, configured: true, reason: 'ENV_CONFIGURED' };
+    Object.defineProperty(info, 'fallback', { enumerable: true, get: () => wrapped.state });
+    return { provider: wrapped, info };
+  }
   return { provider, info: { providerId: provider.providerId, model, configured: true, reason: 'ENV_CONFIGURED' } };
 }

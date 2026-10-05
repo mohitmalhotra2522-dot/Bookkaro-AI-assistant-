@@ -37,7 +37,7 @@ import { MOCK_IRCTC_REAL_SCENARIOS } from './irctc/mock/mock-irctc-real';
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
 // incomplete config falls back to the mock. The key is never logged or sent to the client.
-const llmSelection = createLLMProvider(process.env);
+const llmSelection = createLLMProvider(process.env, { log: (e) => console.log(JSON.stringify(e)) });
 const llmProvider = llmSelection.provider;
 const stateManager = new ConversationStateManager();
 const railwayTools = new RailwayToolService();
@@ -449,6 +449,7 @@ await server.listen({ port: PORT, host: '0.0.0.0' });
 console.log(`Railway AI Assistant server running on http://localhost:${PORT}`);
 console.log(`Active railway provider: ${railwayRegistry.getActiveId()} (${railwayRegistry.getActive().label}) [${railwayRegistry.getActiveKind()}]`);
 console.log(`Active LLM provider: ${llmSelection.info.providerId}${llmSelection.info.model ? ` (${llmSelection.info.model})` : ''} — ${llmSelection.info.reason}`);
+if (llmSelection.info.fallback) console.log(`LLM fallback model: ${llmSelection.info.fallback.model} (used only when the primary times out / errors; cooldown ${Math.round(llmSelection.info.fallback.cooldownMs / 1000)}s)`);
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Railway provider chain (RAILWAY_PROVIDER=live): ${liveProviderStatus().filter(p => p.priority).sort((a, b) => a.priority! - b.priority!).map(p => `${p.provider}${p.configured ? '' : '(no key)'}`).join(' → ')}`);
 console.log(`Voice STT (batch): elevenlabs/${batchStt.model} — ${batchStt.configured() ? 'configured' : 'not configured (browser speech fallback)'}`);

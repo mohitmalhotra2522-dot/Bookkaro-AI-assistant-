@@ -420,3 +420,9 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   value (PrimeNG Calendar `isKeydown` guard); mock p-calendar emulates the guard (test [8] fails without the fix).
   User test package: `bookkaro-irctc-user-test-package.zip` (guide, result form, env template — no secrets).
   G5 real IRCTC = USER VERIFICATION REQUIRED.
+- **LLM fallback model (user-requested)** — `LLM_FALLBACK_MODEL=openai/gpt-oss-20b` (same NVIDIA endpoint/key) wraps the
+  primary (`meta/muse-glimmer-30b`) in `server/ai/providers/fallback-llm.ts`, only when the env var is set. Switches on
+  LLM_TIMEOUT / NETWORK / RATE_LIMITED / HTTP errors (never on abort/auth/bad response); 5-min cooldown
+  (`LLM_FALLBACK_COOLDOWN_MS`), fallback timeout `LLM_FALLBACK_TIMEOUT_MS` (60 s). Visible: log
+  `{"llm":{"event":"LLM_FALLBACK_USED",...}}`, `/api/health` `llm.fallback` state, turn diagnostics `model`. Both fail →
+  normal LLM_UNAVAILABLE. Per-call timeout cap is 120 s (`2b36ddc`). Tests: `tests/unit/llm-fallback.test.ts` (7).
