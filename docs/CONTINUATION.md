@@ -101,6 +101,7 @@ Env:
 | UI | `b9d292a` | full mobile-first UI/UX rebuild (frontend only) |
 | 36-C.1.1 | `b2afeca` | voice layer: TTS renderer, concise fact-weighted speech, STT fallback setting |
 | 37 | see `git log` | LLM-native DIRECT multi-provider railway tools (`railcore_*`, `railradar_*`), no hidden failover — see §6d |
+| 38 | see `git log` | Devanagari names/numbers, long messages (held passengers), agent token budget, IRCTC-like passenger form (berth/food from real data), eRail + RailYatri web connectors (unverified) — see §6e |
 
 ## 5. Standing rules (user-mandated; keep for every prompt)
 
@@ -276,6 +277,31 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
 - **Tests:** `tests/integration/p37-provider-tools.test.ts` (14 scenarios).
 - **Known limitation:** with parallel same-route searches, the session/cards show the list from the search that
   completed LAST. The LLM still receives both results separately.
+
+## 6e. P38 — Hindi/Devanagari, IRCTC-like passenger form, web connectors (eRail / RailYatri)
+- **Devanagari**: `shared/devanagari-numbers.ts` maps ०–९ and the words एक…दस (+ unit words) to ASCII — a *validation* aid for
+  LLM-proposed counts (`passenger-count.ts`, `grounding.ts`), not an intent parser. `canonicalName` accepts `\p{M}` (matras).
+  The system prompt tells the LLM to transliterate Devanagari names to editable English (IRCTC needs Latin names).
+- **Long messages**: passenger changes given before train+class exist are *held* (`session.heldPassengerChanges`, keyed
+  by journey) and applied automatically once both are selected (`turn-applier.ts`); the context shows
+  `heldUntilTrainAndClassSelected`.
+- **Token budget**: `MAX_TOKENS_AGENT` 1400 → 3200 (env `LLM_MAX_TOKENS_AGENT`, clamp 800–8000). Muse (reasoning model)
+  spent all 1400 on reasoning for Devanagari multi-passenger turns → `finish_reason=length`, no tool call → LLM_UNAVAILABLE.
+  Not a step limit / guard.
+- **Passenger form** (`server/booking/passenger-form.ts`; `GET/POST /api/session/:id/passenger-form`;
+  UI `src/components/passengers/PassengerFormPage.tsx`, full-screen `bk-pform`):
+  berth options only from the class layout (`BERTH_OPTIONS_BY_CLASS`; seat classes CC/EC/2S… → none);
+  food (`VEG`/`NON_VEG`/`NO_FOOD`) only when the train's provider schedule says `catering: true` (RailCore schedule
+  flags; `/routes/trains has_pantry` contradicts them — not used). Names must be Latin; server `fieldErrors`;
+  409 on stale `sessionVersion`. `foodPreference` flows to review, snapshot, execution request and IRCTC handoff payload
+  (conditional spreads only).
+- **Web connectors** (`server/railway/providers/web/web-providers.ts`): `erail_search` (eRail `getTrains.aspx`; trains,
+  timings, run days, classes; NO fare / availability — robots disallows `/Rail/getAvailability.aspx`) and
+  `railyatri_live_status` (`__NEXT_DATA__.ltsData`; crowd-sourced, may be stale). Results carry
+  `verification: UNVERIFIED_WEB` + label `WEB (eRail/RailYatri) — unverified`. The LLM decides when to use them (no automatic
+  switch). ConfirmTkt stays PROVIDER_NOT_IMPLEMENTED (robots + private API). Booking review stays API-only.
+- Tests: `tests/unit/p38-hindi-form-web.test.ts` (20). Live harness outside the repo: `/home/user/p38/` (`g3.py`,
+  `cases-final.json`, `form_test.py`).
 
 ## 7. Practical gotchas
 
