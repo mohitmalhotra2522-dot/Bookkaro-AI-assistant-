@@ -53,6 +53,9 @@
   let busy = false;
   let pendingTick = false;   // a mutation arrived while busy → run once more afterwards (Angular renders late)
   let autoPaused = false;    // paused by the assistant (user edit / other train) — scoped to the current page
+  let searchRetries = {};    // v0.39.7: HOME_SEARCH re-verify rounds before handing Search to the user
+  const SEARCH_RETRIES = 6;
+  const VER = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return '?'; } })();
   let fillAttempts = {};     // page key → retries while IRCTC is still rendering rows
   let rowsSeen = -1, rowsStableSince = 0;   // "+ Add Passenger" only after the rendered row count stopped changing
   const ROWS_STABLE_MS = 2500;
@@ -82,7 +85,7 @@
   $('pause').onclick = () => { paused = true; $('pause').hidden = true; $('resume').hidden = false; say('Assistant paused.'); send({ type: 'PAUSED' }); };
   $('resume').onclick = () => { if (trainMismatchPending) { state.trainMismatchAccepted = true; trainMismatchPending = false; } paused = false; $('pause').hidden = false; $('resume').hidden = true; lastFillKey = ''; send({ type: 'RESUMED' }); tick(); };
   $('again').onclick = () => {
-    paused = false; autoPaused = false; trainMismatchPending = false; lastFillKey = ''; fillAttempts = {}; refusal = null; snapshot = null; lastPage = null;
+    paused = false; autoPaused = false; trainMismatchPending = false; lastFillKey = ''; fillAttempts = {}; searchRetries = {}; refusal = null; snapshot = null; lastPage = null;
     state.auto = null; state.loginSeen = false;   // an explicit "Fill again" may tap Search / Book Now once more
     $('pause').hidden = false; $('resume').hidden = true; tick();
   };
@@ -136,14 +139,17 @@
         if (!fresh) { snapshot = null; return; }
         snapshot = fresh;
         if (TERMINAL.has(snapshot.status)) { say(snapshot.message, snapshot.status); return; }
-        lastPage = page; lastFillKey = ''; fillAttempts = {}; rowsSeen = -1;
+        lastPage = page; lastFillKey = ''; fillAttempts = {}; searchRetries = {}; rowsSeen = -1;
         // an assistant pause belongs to the page it happened on (a user Pause stays until Resume)
         if (autoPaused) { paused = false; autoPaused = false; trainMismatchPending = false; $('pause').hidden = false; $('resume').hidden = true; }
         const r = await send({ type: 'PAGE_DETECTED', page });
         if (r.ok && r.body && r.body.view) { snapshot.status = r.body.view.status; snapshot.message = r.body.view.message; }
         if (r.code === 'HANDOFF_TERMINAL' || r.code === 'STALE_HANDOFF') { snapshot = await loadSnapshot(); if (snapshot) say(snapshot.message, snapshot.status); return; }
       }
-      say(MSG[page] || snapshot.message, `${page} · ${snapshot.train.number} ${snapshot.travelClass.code} · ${snapshot.passengers.length} pax`);
+      // v0.39.7: a repeat tick of an already-handled fill page keeps the last outcome on screen (it used to be overwritten
+      // by the generic page message, hiding whether / why Search was tapped)
+      if (FILL_PAGES.has(page) && `${page}:${Core.passengerNameInputs(document).length}` === lastFillKey) return;
+      say(MSG[page] || snapshot.message, `${page} · ${snapshot.train.number} ${snapshot.travelClass.code} · ${snapshot.passengers.length} pax · v${VER}`);
       if (page === 'LOGIN') state.loginSeen = true;
       if (paused) return;
       if (page === 'LANGUAGE' || page === 'HOME_SEARCH') await handleLanguage(page);
@@ -161,7 +167,7 @@
       const rep = await Core.fillPage(document, page, snapshot, state, { allowAddRows });
       for (const ev of Core.reportEvents(rep)) await send(ev);
       // metadata-only diagnostics (field keys + reasons, never values) — helps the user report what IRCTC showed
-      const diag = `${page} · rows ${Core.passengerNameInputs(document).length}/${snapshot.passengers.length} · filled ${rep.filled.length}` +
+      const diag = `v${VER} · ${page} · rows ${Core.passengerNameInputs(document).length}/${snapshot.passengers.length} · filled ${rep.filled.length}` +
         (rep.errors && rep.errors.length ? ` · errors: ${rep.errors.map(x => `${x.code}${x.passengerIndex ? '#' + x.passengerIndex : ''}:${x.reason}`).join(', ')}`
           : (rep.skipped.length ? ` · not filled: ${rep.skipped.map(x => `${x.field}:${x.reason}`).join(', ')}` : ''));
       say(MSG[page] || snapshot.message, diag);
@@ -206,6 +212,17 @@
           BOOK_NOW_DISABLED: `IRCTC ne “Book Now” enable nahi kiya${adv.status ? ` (${adv.status})` : ''} — availability dekhkar aap khud decide karein.`
         };
         if (page === 'HOME_SEARCH' && adv.clicked.indexOf('search') >= 0) { say('From / To / Date / Class verify ho gaye — BookKaro ne Search tap kiya.', diag); return; }
+        if (page === 'HOME_SEARCH' && adv.stopped === 'SEARCH_ALREADY_TAPPED') { say('Search pehle hi tap ho chuka hai — IRCTC train list khul rahi hai.', diag); return; }
+        if (page === 'HOME_SEARCH' && (adv.stopped === 'JOURNEY_NOT_VERIFIED' || adv.stopped === 'SEARCH_NOT_FOUND') && !rep.overrides.length && !rep.stopped) {
+          // IRCTC (mobile) may still be rendering / re-validating: re-fill + re-verify a few times, then hand over with the reason
+          const why = adv.stopped === 'SEARCH_NOT_FOUND' ? 'Search button' : (adv.missing || []).join(', ');
+          searchRetries[key] = (searchRetries[key] || 0) + 1;
+          if (searchRetries[key] <= SEARCH_RETRIES) {
+            say(`Search se pehle IRCTC par ${why} dobara verify kar raha hoon…`, `${diag} · ${adv.stopped} · retry ${searchRetries[key]}/${SEARCH_RETRIES}`);
+            setTimeout(() => { if (lastFillKey === key && !paused && !stopped) { lastFillKey = ''; tick(); } }, 1500);
+          } else say(`IRCTC par ${why} confirm nahi hua, isliye BookKaro ne Search tap nahi kiya. Details check karke Search aap khud tap karein.`, `${diag} · ${adv.stopped}: ${why}`);
+          return;
+        }
         if (page === 'TRAIN_LIST' && adv.clicked.indexOf('bookNow') >= 0) {
           say(`Train ${snapshot.train.number} · ${snapshot.travelClass.code} · ${adv.status || 'date'} select karke “Book Now” tap kiya. Ab IRCTC login (User ID + Password) aap khud karein.`, diag); return;
         }

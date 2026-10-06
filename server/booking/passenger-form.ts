@@ -71,8 +71,8 @@ export async function fetchTrainFacilities(s: BookingSession): Promise<TrainFaci
 
 function foodView(f: TrainFacilitiesView): PassengerFormSpec['food'] {
   const src = f.provider ? `${f.provider}${f.dataSource === 'MOCK' ? ' (MOCK)' : ''}` : null;
-  if (f.catering === true) return { status: 'OFFERED', options: FOOD_PREFERENCES, pantry: f.pantry, source: src, note: 'Is train ke fare mein catering shaamil hai (provider data) — har passenger ke liye khana chuniye.' };
-  if (f.catering === false) return { status: 'NOT_INCLUDED', options: [], pantry: f.pantry, source: src, note: f.pantry === true ? 'Catering fare mein shaamil nahi hai; provider ke hisaab se pantry car hai (khana train mein khareed sakte hain).' : 'Provider data ke hisaab se is train ke fare mein catering shaamil nahi hai.' };
+  if (f.catering === true) return { status: 'OFFERED', options: FOOD_PREFERENCES, pantry: f.pantry, source: src, note: 'IRCTC is train mein booking ke saath khana chunne ka option deta hai — har passenger ke liye khana chuniye.' };
+  if (f.catering === false) return { status: 'NOT_INCLUDED', options: [], pantry: f.pantry, source: src, note: 'IRCTC is train mein booking ke saath khane ka option nahi deta — isliye food preference nahi dikhaya.' };
   return { status: 'UNKNOWN', options: [], pantry: f.pantry, source: src, note: 'Provider ne is train ki catering jaankari nahi di — isliye khane ka option nahi dikhaya.' };
 }
 

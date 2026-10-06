@@ -625,6 +625,24 @@
    * "Book Now" → tap it. Returns { page, clicked: [...], stopped: reason|null, status: availability text|null }.
    * opts: { wait(ms), shouldStop() → true when the user paused / stopped, timeoutMs }
    */
+  /** v0.39.7: what the IRCTC journey form shows RIGHT NOW (read from the page, not from the fill report). Field keys only. */
+  function journeyOnPage(doc, snapshot) {
+    var missing = [];
+    var st = function (which, ref) {
+      var el = findStationInput(doc, which);
+      var re = new RegExp('-\\s*' + ref.code + '(\\s|\\)|$)');
+      if (!el || !re.test(norm(el.value))) missing.push(which);
+    };
+    st('from', snapshot.journey.from); st('to', snapshot.journey.to);
+    var d = findDateInput(doc);
+    if (!d || norm(d.value) !== snapshot.journey.dateIrctc) missing.push('date');
+    var c = findChoice(doc, /class/);
+    if (!c || !optionMatch(currentChoice(c).text, snapshot.travelClass.label, snapshot.travelClass.code)) missing.push('travelClass');
+    var q = findChoice(doc, /quota/);
+    if (q ? lower(currentChoice(q).text) !== lower(snapshot.quota.label) : snapshot.quota.code !== 'GN') missing.push('quota');
+    return { ok: !missing.length, missing: missing };
+  }
+
   async function autoAdvance(doc, page, snapshot, rep, state, opts) {
     opts = opts || {};
     var out = { page: page, clicked: [], stopped: null, status: null };
@@ -632,15 +650,12 @@
     state.auto = state.auto || { search: 0, classTap: {}, dateTap: {}, book: 0 };
     var A = state.auto;
     if (page === 'HOME_SEARCH') {
-      // v0.39.6: only the journey itself gates Search (quota keeps IRCTC's GENERAL default when its dropdown could not be set)
-      var KEY = ['from', 'to', 'date', 'travelClass'];
-      var bad = (rep.errors || []).filter(function (e) { return KEY.indexOf(e.field) >= 0; });
-      if ((rep.errors || []).some(function (e) { return e.field === 'quota'; })) {
-        var qEl = findChoice(doc, /quota/);
-        if (!qEl || lower(currentChoice(qEl).text) !== lower(snapshot.quota.label)) bad.push({ field: 'quota' });   // never search with another quota
-      }
-      if (rep.stopped || bad.length || rep.overrides.length) { out.stopped = 'JOURNEY_NOT_VERIFIED'; return out; }
-      if (['from', 'to', 'date', 'travelClass'].some(function (f) { return rep.filled.indexOf(f) < 0; })) { out.stopped = 'JOURNEY_NOT_VERIFIED'; return out; }
+      // v0.39.7: Search is tapped only when the IRCTC form itself shows exactly the reviewed From / To / Date / Class / Quota
+      // (read back from the page — slow mobile rendering no longer depends on which fields THIS fill round touched), the
+      // fill did not stop on an unverified station / date, and the user did not change anything.
+      if (rep.stopped || rep.overrides.length) { out.stopped = 'JOURNEY_NOT_VERIFIED'; out.missing = rep.overrides.length ? rep.overrides.slice() : [rep.stopped]; return out; }
+      var jv = journeyOnPage(doc, snapshot);
+      if (!jv.ok) { out.stopped = 'JOURNEY_NOT_VERIFIED'; out.missing = jv.missing; return out; }
       if (A.search >= 1) { out.stopped = 'SEARCH_ALREADY_TAPPED'; return out; }
       var sb = findFinalControl(doc, 'HOME_SEARCH');
       if (!enabled(sb)) { out.stopped = 'SEARCH_NOT_FOUND'; return out; }
@@ -706,6 +721,6 @@
     // P39.3
     isPrimeDropdown: isPrimeDropdown, choosePrime: choosePrime, findDateCell: findDateCell, typedErrors: typedErrors,
     // v0.39.5
-    autoAdvance: autoAdvance, passengerScope: passengerScope, pageOptionLabel: pageOptionLabel, findClassTab: findClassTab, findDateTap: findDateTap
+    autoAdvance: autoAdvance, journeyOnPage: journeyOnPage, passengerScope: passengerScope, pageOptionLabel: pageOptionLabel, findClassTab: findClassTab, findDateTap: findDateTap
   };
 });

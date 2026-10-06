@@ -160,7 +160,7 @@ export const IRCTC_TEXT = Object.freeze({
   READY: 'IRCTC handoff tayyar hai. IRCTC kholiye — journey aur passenger details fill ho jaayengi; login, CAPTCHA, OTP, final Book aur payment aap khud karenge.',
   LANGUAGE_SELECTION: 'IRCTC language choose kijiye (English / हिंदी).',
   LANGUAGE_UNAVAILABLE: 'IRCTC page par language selector nahi mila — page jis language mein hai usi mein continue kar rahe hain.',
-  JOURNEY_PAGE: 'IRCTC search form par From / To / Date / Class fill kiye ja rahe hain — Search aap khud tap karein.',
+  JOURNEY_PAGE: 'IRCTC search form par From / To / Date / Class fill kiye ja rahe hain — verify hote hi BookKaro Search tap karega.',
   TRAIN_LIST: 'Train list mein aapki train aur class highlight ki gayi hai — Book Now aap khud tap karein.',
   PASSENGER_PAGE: 'Passenger details fill ki ja rahi hain — koi bhi field aap badal sakte hain.',
   PAUSED: 'Assistant paused hai — aap Resume kar sakte hain.',

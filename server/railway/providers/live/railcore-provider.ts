@@ -4,6 +4,7 @@
  * errors { success:false, error: { code, message, retryable } }. Documented not-found codes: NO_TRAINS_FOUND, TRAIN_NOT_FOUND.
  * RailCore has no PNR operation → CHECK_PNR is UNSUPPORTED here (the failover layer may use a provider that declares it).
  */
+import { irctcFoodChoiceOffered } from '@shared/irctc-catering';
 import type {
   RailwayResponse, SearchTrainsRequest, TrainSearchResultData, NormalizedTrain, ClassOption, TrainInfoRequest, TrainDetails,
   TimetableRequest, AvailabilityRequest, AvailabilityData, FareRequest, FareData, TrackRequest, TrackData
@@ -86,9 +87,11 @@ export class RailCoreProvider extends LiveRailwayProvider {
         classes: (Array.isArray(d.classes) ? d.classes : []).map((c: any) => String(c).toUpperCase()).filter((c: string) => VALID_CLASSES.has(c))
           .map((code: string) => ({ code, availability: null, availabilityStatus: 'UNKNOWN', fare: null, fareCurrency: null } as ClassOption)),
         timetable: stops.map(({ station, stationName, arrival, departure }) => ({ station, stationName, arrival, departure })),
-        // P38: RailCore schedule flags, passed through only when the provider sends a boolean
-        ...(typeof d.catering === 'boolean' || typeof d.pantry === 'boolean'
-          ? { facilities: { ...(typeof d.catering === 'boolean' ? { catering: d.catering } : {}), ...(typeof d.pantry === 'boolean' ? { pantry: d.pantry } : {}) } } : {})
+        // P38: RailCore pantry flag passed through only when the provider sends a boolean.
+        // v0.39.7: `catering` (= IRCTC offers a meal choice at booking) follows IRCTC's pre-paid catering train rule on the
+        // provider's train name — RailCore's own `catering` flag contradicts IRCTC (e.g. 14680 true, 12952 Rajdhani false).
+        ...((() => { const cat = irctcFoodChoiceOffered(str(d.train_name)); return typeof cat === 'boolean' || typeof d.pantry === 'boolean'
+          ? { facilities: { ...(typeof cat === 'boolean' ? { catering: cat } : {}), ...(typeof d.pantry === 'boolean' ? { pantry: d.pantry } : {}) } } : {}; })())
       };
       return { ok: true, data: details, meta: this.meta(t0, s.fresh) };
     });

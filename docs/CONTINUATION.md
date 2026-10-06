@@ -493,3 +493,23 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   meal choices for that field), `askOnlyThis: true` and `saveAnswerWith` (the update_booking_session passengerChanges
   shape for that passenger + field); compose() counts a Hinglish request ("bataiye / batao / boliye / chuniye …") as the
   agent's own question (output de-dup only, not routing).
+
+## v0.39.7 — mobile IRCTC Search auto-tap + food choice only on IRCTC pre-paid catering trains
+
+User report (Android Lemur Browser screenshots): Search not auto-tapped on IRCTC; overlay stuck on "fill kiye ja rahe hain —
+Search aap khud tap karein"; BookKaro form showed food for 14680 (IRCTC has none).
+
+- `extension/irctc-core.js`: new `journeyOnPage(doc, snapshot)` reads From / To / Date / Class / Quota back from the IRCTC
+  form. HOME_SEARCH `autoAdvance` gates Search on it (plus: fill not stopped, no user override, Search not yet tapped)
+  instead of "which fields THIS fill round reported". `out.missing` names the failing fields. Visible-button pick already
+  skips IRCTC's hidden desktop twin (`button.hidden-xs.search_btn`; mobile = `hidden-sm hidden-md hidden-lg`).
+- `extension/irctc-content.js`: a repeat tick of an already-handled fill page returns BEFORE the generic page message
+  (the outcome stays visible); HOME_SEARCH re-fills + re-verifies up to 6× (1.5 s) on JOURNEY_NOT_VERIFIED /
+  SEARCH_NOT_FOUND, then says why Search was not tapped; diagnostics carry `v<manifest version>`.
+- `shared/irctc-handoff.ts` JOURNEY_PAGE text: "… verify hote hi BookKaro Search tap karega."
+- `shared/irctc-catering.ts` `irctcFoodChoiceOffered(trainName)`: Rajdhani / Shatabdi / Duronto / Vande Bharat / Tejas /
+  Gatimaan → true; Jan Shatabdi and everything else → false; empty → null. `railcore-provider.getTrainInfo` sets
+  `facilities.catering` from it. RailCore's schedule `catering` flag is NOT used: it is wrong vs IRCTC (14680 true; 12952
+  Rajdhani, 22488 Vande Bharat, 12030 Shatabdi false). `foodStatusOf` / form / chat are unchanged and follow the flag.
+- `passenger-form.ts` food notes reworded (IRCTC offers / does not offer a meal choice).
+- Manifest 0.39.7. Tests: `tests/unit/p39-7-fixes.test.ts` (8).
