@@ -10,6 +10,30 @@ import { formatClock } from '../../lib/format';
  * BookKaro never asks for an IRCTC password, OTP, CAPTCHA or payment detail.
  */
 const IRCTC_URL = 'https://www.irctc.co.in/nget/train-search';
+
+/**
+ * P40 — inside the BookKaro Android app the native shell injects `window.BookKaroAndroid` (an origin-restricted
+ * WebMessage bridge, BookKaro origin + main frame only). "Continue to IRCTC" then hands the SAME P39.3 handoff
+ * (handoffId + bridgeToken + reviewVersion) to the app, which re-fetches and verifies the signed snapshot natively
+ * and opens its own IRCTC WebView. No extension needed on Android; the browser / desktop-extension path is unchanged.
+ */
+export interface AndroidBridge {
+  postMessage(message: string): void;
+  onmessage?: ((e: { data: unknown }) => void) | null;
+  addEventListener?: (type: 'message', fn: (e: { data: unknown }) => void) => void;
+  removeEventListener?: (type: 'message', fn: (e: { data: unknown }) => void) => void;
+}
+export function androidBridge(w: any = typeof window !== 'undefined' ? window : undefined): AndroidBridge | null {
+  const b = w?.BookKaroAndroid;
+  return b && typeof b.postMessage === 'function' ? (b as AndroidBridge) : null;
+}
+/** Parse one message from the native app — only `source: 'bookkaro-android'` JSON is accepted. */
+export function parseAndroidMessage(data: unknown): { type: string; ok?: boolean; code?: string; reason?: string; status?: string } | null {
+  try {
+    const d: any = typeof data === 'string' ? JSON.parse(data) : null;
+    return d && typeof d === 'object' && d.source === 'bookkaro-android' && typeof d.type === 'string' ? d : null;
+  } catch { return null; }
+}
 const TERMINAL = new Set(['COMPLETED', 'BOOKING_FAILED', 'BOOKING_STATUS_UNKNOWN', 'EXPIRED', 'STALE_HANDOFF', 'STOPPED']);
 
 interface Props { sessionId: string; onClose: () => void }
@@ -19,6 +43,8 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [ext, setExt] = useState<{ ready: boolean; sent?: 'ok' | 'fail'; code?: string }>({ ready: false });
+  const [android] = useState<AndroidBridge | null>(() => androidBridge());
+  const [native, setNative] = useState<{ ready: boolean; busy?: boolean; sent?: 'ok' | 'fail'; code?: string; reason?: string }>({ ready: false });
   const alive = useRef(true);
 
   const load = useCallback(async () => {
@@ -42,8 +68,25 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
     window.postMessage({ source: 'bookkaro-app', type: 'BK_PING' }, window.location.origin);
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
-    return () => { alive.current = false; window.clearInterval(t); window.removeEventListener('message', onMsg); window.removeEventListener('keydown', onKey); };
-  }, [load, onClose]);
+    // P40 — Android app bridge (native replies arrive as JSON strings on the injected object)
+    const onNative = (e: { data: unknown }) => {
+      const d = parseAndroidMessage(e.data);
+      if (!d || !alive.current) return;
+      if (d.type === 'BK_ANDROID_READY') setNative(x => ({ ...x, ready: true }));
+      if (d.type === 'BK_IRCTC_HANDOFF_ACK') {
+        setNative({ ready: true, busy: false, sent: d.ok ? 'ok' : 'fail', code: d.code, reason: d.reason });
+        load();
+      }
+    };
+    if (android) {
+      if (android.addEventListener) android.addEventListener('message', onNative); else android.onmessage = onNative;
+      android.postMessage(JSON.stringify({ source: 'bookkaro-app', type: 'BK_PING' }));
+    }
+    return () => {
+      alive.current = false; window.clearInterval(t); window.removeEventListener('message', onMsg); window.removeEventListener('keydown', onKey);
+      if (android) { if (android.removeEventListener) android.removeEventListener('message', onNative); else if (android.onmessage === onNative) android.onmessage = null; }
+    };
+  }, [load, onClose, android]);
 
   const copy = async (label: string, value: string) => {
     try { await navigator.clipboard.writeText(value); setCopied(label); window.setTimeout(() => setCopied(c => (c === label ? null : c)), 1500); } catch { setCopied(null); }
@@ -51,6 +94,12 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
   const sendToExtension = () => {
     if (!access) return;
     window.postMessage({ source: 'bookkaro-app', type: 'BK_IRCTC_HANDOFF', handoffId: access.view.handoffId, bridgeToken: access.bridgeToken, reviewVersion: access.view.reviewVersion }, window.location.origin);
+  };
+  /** P40 — Android: "Continue to IRCTC" opens the app's native IRCTC WebView with this handoff (no extension step). */
+  const continueInApp = () => {
+    if (!access || !android) return;
+    setNative(x => ({ ...x, busy: true, sent: undefined, code: undefined, reason: undefined }));
+    android.postMessage(JSON.stringify({ source: 'bookkaro-app', type: 'BK_IRCTC_HANDOFF', handoffId: access.view.handoffId, bridgeToken: access.bridgeToken, reviewVersion: access.view.reviewVersion }));
   };
   const setLanguage = async (language: 'en' | 'hi') => { await irctcHandoffAction(sessionId, { action: 'language', language }); load(); };
   const endedWithoutConfirmation = async () => {
@@ -93,7 +142,7 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
               <ul className="bk-irctc__checklist">
                 {s.userActions.map(a => <li key={a}><IconLock size={14} /> {a}</li>)}
               </ul>
-              <p className="bk-meta">BookKaro kabhi password, OTP, CAPTCHA, card / UPI PIN nahi maangta. Extension IRCTC par Search, aapki train / class / date aur train list ka “Book Now” khud tap karta hai; login ke baad passenger Continue / final Book aur payment sirf highlight — click aap karte hain.</p>
+              <p className="bk-meta">BookKaro kabhi password, OTP, CAPTCHA, card / UPI PIN nahi maangta. {android ? 'BookKaro app' : 'Extension'} IRCTC par Search, aapki train / class / date aur train list ka “Book Now” khud tap karta hai; login ke baad passenger Continue / final Book aur payment sirf highlight — click aap karte hain.</p>
             </section>
 
             {!terminal && (
@@ -103,6 +152,22 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
                   <button type="button" className={`bk-btn bk-btn--sm ${v.language === 'en' ? 'bk-btn--primary' : 'bk-btn--ghost'}`} onClick={() => setLanguage('en')}>English</button>
                   <button type="button" className={`bk-btn bk-btn--sm ${v.language === 'hi' ? 'bk-btn--primary' : 'bk-btn--ghost'}`} onClick={() => setLanguage('hi')}>हिंदी</button>
                 </div>
+                {android ? (
+                  <>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
+                      <button type="button" className="bk-btn bk-btn--primary" onClick={continueInApp} disabled={native.busy}>
+                        {native.busy ? 'IRCTC khul raha hai…' : 'Continue to IRCTC'}
+                      </button>
+                    </div>
+                    <p className="bk-meta" style={{ marginTop: 8 }} role="status">
+                      {native.sent === 'fail'
+                        ? (native.code === 'NETWORK_ERROR' ? 'IRCTC open nahi ho pa raha. Please try again.'
+                          : native.code === 'STALE_IRCTC_HANDOFF' ? `Ye IRCTC handoff ab valid nahi hai (${native.reason || 'STALE_IRCTC_HANDOFF'}). Review check karke dobara confirm kijiye.`
+                            : `IRCTC handoff shuru nahi hua (${native.code || 'error'}).`)
+                        : 'BookKaro app IRCTC ko yahin kholega aur aapki details khud fill karega — login, CAPTCHA, OTP aur payment aap karenge.'}
+                    </p>
+                  </>
+                ) : (<>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 10 }}>
                   <button type="button" className="bk-btn bk-btn--ghost" onClick={sendToExtension} disabled={!ext.ready}>
                     {ext.sent === 'ok' ? <><IconCheck size={14} /> Extension ko bhej diya</> : 'Send to extension'}
@@ -113,6 +178,7 @@ export const IrctcAssistPage: React.FC<Props> = ({ sessionId, onClose }) => {
                   {ext.ready ? (ext.sent === 'fail' ? `Extension ne handoff accept nahi kiya (${ext.code || 'error'}).` : 'BookKaro extension mila — bhejne ke baad IRCTC kholiye, details fill ho jaayengi.')
                     : 'BookKaro extension nahi mila — neeche ki details copy karke IRCTC par bhariye (extension/README.md mein install steps).'}
                 </p>
+                </>)}
               </section>
             )}
 

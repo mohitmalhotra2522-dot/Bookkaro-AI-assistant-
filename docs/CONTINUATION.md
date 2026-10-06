@@ -513,3 +513,27 @@ Search aap khud tap karein"; BookKaro form showed food for 14680 (IRCTC has none
   Rajdhani, 22488 Vande Bharat, 12030 Shatabdi false). `foodStatusOf` / form / chat are unchanged and follow the flag.
 - `passenger-form.ts` food notes reworded (IRCTC offers / does not offer a meal choice).
 - Manifest 0.39.7. Tests: `tests/unit/p39-7-fixes.test.ts` (8).
+
+## P40 — Android app shell + native IRCTC WebView (local commit only; NOT pushed, NOT deployed)
+- `android/` holds the Kotlin debug shell; see `android/README.md`.
+  - BookKaro WebView: `MainActivity`. IRCTC WebView: `IrctcActivity`.
+  - Narrow WebMessage bridges `BookKaroAndroid` / `BookKaroIrctc` (origin-restricted, main frame only).
+    There is no `addJavascriptInterface`.
+- It reuses the P39.3 signed handoff unchanged and the UNMODIFIED extension page scripts (copied into the APK at
+  build time). Android behaves exactly like the desktop extension: auto-tap Search, then the class tab, date and
+  Book Now. It never taps passenger Continue, CAPTCHA, OTP, final Book or Payment.
+- Web change: `src/components/irctc/IrctcAssistPage.tsx`.
+  - With `window.BookKaroAndroid` present, "Continue to IRCTC" goes to the native app.
+  - The browser/extension path is unchanged.
+  - This needs a deploy before the installed APK sees it. The deploy is not done yet.
+- Vectors: `scripts/p40-android-vectors.ts` writes `android/app/src/test/resources/p40-handoff-vectors.json`.
+  Re-run it whenever the handoff schema or guard changes.
+- Sandbox notes: no KVM, so the emulator was NOT RUN. Gradle needs ~1 GB, so never run `tsc` or vitest alongside it.
+- G5 (a real device with real IRCTC) = USER VERIFICATION REQUIRED.
+- Rebuild note: the first P40 commit (`a97dc17`) was never pushed and was lost when the workspace went over the
+  ~128 MB snapshot cap. It was rebuilt from the debug APK (manifest / resources / decompiled classes) plus the unchanged
+  JS sources, then re-verified (Gradle JUnit 22/22 + assembleDebug, tsc, vitest p40 17/17, npm run build).
+- Workspace rule: keep `/home/user` under ~100 MB (no stacks of milestone zips). After a reset run
+  `bash /home/user/restore-workspace.sh [--android]` (remote, fetch, npm ci; `--android` = JDK 17 + SDK 34 + Gradle 8.7
+  in `/home/user/.cache/android-toolchain`, `source .../env.sh`). Build the APK with
+  `cd android && ./gradlew --no-daemon testDebugUnitTest assembleDebug` (never alongside tsc / vitest).

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BookKaro</string>
+    <string name="irctc_title">IRCTC</string>
+    <string name="retry">Dobara try karein</string>
+    <string name="back_to_bookkaro">BookKaro par wapas</string>
+    <string name="bookkaro_load_failed">BookKaro open nahi ho pa raha. Internet check karke dobara try kijiye — aapka review safe hai.</string>
+    <string name="irctc_load_failed">IRCTC open nahi ho pa raha. Please try again.</string>
+    <string name="handoff_missing">IRCTC handoff nahi mila ya khatam ho gaya. BookKaro mein review check karke \"Continue to IRCTC\" dobara dabaiye.</string>
+    <string name="webview_too_old">Is phone ka Android System WebView purana hai, isliye IRCTC autofill surakshit tareeke se nahi chal sakta. Play Store se \"Android System WebView\" update kijiye.</string>
+    <string name="autofill_off_here">Ye approved IRCTC page nahi hai — BookKaro yahan kuch fill nahi karega.</string>
+</resources>
