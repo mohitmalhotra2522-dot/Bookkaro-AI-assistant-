@@ -44,6 +44,7 @@ export function useConversationalVoice(o: { sessionId: string | null; processTur
   }, [o.sessionId]);
   const [snap, setSnap] = useState<VoiceAgentSnapshot>(() => agent.snapshot());
   const [sttPhase, setSttPhase] = useState<BatchSttPhase>('IDLE');
+  const [micReady, setMicReady] = useState(false);
   const [inputError, setInputError] = useState<string | null>(null);
   const [sttPreference, setSttPreferenceState] = useState<SttPreference>(loadSttPreference);
   const [sttSource, setSttSource] = useState<SttSource | null>(null);
@@ -65,15 +66,18 @@ export function useConversationalVoice(o: { sessionId: string | null; processTur
       setSnap(agent.snapshot());
     });
     const offPhase = input.batch.onPhase(p => { setSttPhase(p); setSnap(agent.snapshot()); });
+    const offReady = input.batch.onMicReady(setMicReady);
     const offSource = input.onSource(setSttSource);
     // end-of-turn detection runs only while the user-started mic session is open
     const iv = window.setInterval(() => { const st = agent.snapshot(); if (st.listening || st.state === 'USER_SPEAKING') { const p = agent.tick(); if (p) p.catch(() => undefined); } }, 100);
-    return () => { off(); offPhase(); offSource(); window.clearInterval(iv); agent.cancel(); };
+    return () => { off(); offPhase(); offReady(); offSource(); window.clearInterval(iv); agent.cancel(); };
   }, [agent, input]);
   return {
     agent, snapshot: snap,
     /** P36-C: tap-to-talk batch STT phase (RECORDING → TRANSCRIBING), IDLE otherwise. */
     sttPhase,
+    /** P41-STT: RECORDING and the mic is really capturing (before that the UI says "Opening mic…"). */
+    micReady,
     /** Short, safe message for the last voice-input failure (never a raw provider error). */
     inputErrorMessage: sttErrorMessage(inputError),
     batchSttEnabled: batchEnabled,

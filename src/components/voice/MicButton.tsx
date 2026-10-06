@@ -22,6 +22,8 @@ interface Props {
   textFallback?: boolean;
   /** P36-C: batch tap-to-talk phase — RECORDING (tap again to send) / TRANSCRIBING (tap to cancel). */
   sttPhase?: 'IDLE' | 'RECORDING' | 'TRANSCRIBING';
+  /** P41-STT: false while the mic is still opening (RECORDING requested, no audio yet) — don't speak yet. */
+  micReady?: boolean;
   /** P36-C: short, safe voice-input failure message (typing stays available). */
   inputError?: string | null;
   /** Contextual progress label from real turn events (tool STARTED), when available. */
@@ -34,12 +36,13 @@ interface Props {
 
 export const STT_SOURCE_LABEL = { DEVICE: 'Using device speech recognition', ENHANCED: 'Using enhanced speech recognition' } as const;
 
-export type VoiceVisual = 'idle' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'interrupted';
+export type VoiceVisual = 'idle' | 'preparing' | 'listening' | 'transcribing' | 'thinking' | 'speaking' | 'interrupted';
 
 /** Maps the real agent state + STT phase to one visual state (batch STT phases take precedence). */
-export function voiceVisual(p: { isRecording: boolean; agentState?: string; sttPhase?: string }): VoiceVisual {
+export function voiceVisual(p: { isRecording: boolean; agentState?: string; sttPhase?: string; micReady?: boolean }): VoiceVisual {
   if (p.sttPhase === 'TRANSCRIBING') return 'transcribing';
-  if (p.sttPhase === 'RECORDING') return 'listening';
+  // P41-STT: "Listening" only once the mic really captures (explicit false = still opening; undefined = legacy callers)
+  if (p.sttPhase === 'RECORDING') return p.micReady === false ? 'preparing' : 'listening';
   switch (p.agentState) {
     case 'LISTENING': case 'USER_SPEAKING': return 'listening';
     case 'PROCESSING': return 'thinking';
@@ -51,6 +54,7 @@ export function voiceVisual(p: { isRecording: boolean; agentState?: string; sttP
 
 const COPY: Record<VoiceVisual, { title: string; sub: string }> = {
   idle: { title: 'Tap to speak', sub: 'Hindi, Hinglish or English' },
+  preparing: { title: 'Opening mic…', sub: 'Start speaking when it says Listening' },
   listening: { title: 'Listening…', sub: 'Tap again when you’re done' },
   transcribing: { title: 'Understanding…', sub: 'Turning your voice into text' },
   thinking: { title: 'Finding the best option…', sub: 'Tap to interrupt' },
@@ -60,9 +64,9 @@ const COPY: Record<VoiceVisual, { title: string; sub: string }> = {
 
 export const MicButton: React.FC<Props> = ({
   isRecording, isSupported, onStart, onStop, transcript, conversationMode, onToggleConversationMode,
-  agentState, textFallback, sttPhase, inputError, progressLabel, sttSource, onRetrySpeech
+  agentState, textFallback, sttPhase, micReady, inputError, progressLabel, sttSource, onRetrySpeech
 }) => {
-  const v = voiceVisual({ isRecording, agentState, sttPhase });
+  const v = voiceVisual({ isRecording, agentState, sttPhase, micReady });
   const copy = COPY[v];
   const title = v === 'thinking' && progressLabel ? `${progressLabel.replace(/[.…]+$/, '')}…` : copy.title;
   const orbClass = v === 'idle' || v === 'interrupted' ? 'is-idle' : v === 'listening' ? 'is-listening' : v === 'speaking' ? 'is-speaking' : 'is-busy';
@@ -87,9 +91,9 @@ export const MicButton: React.FC<Props> = ({
         </div>
         {isRecording && transcript
           ? <div className="bk-voice__transcript">“{transcript}”</div>
-          : <div className="bk-voice__sub">{sttPhase === 'RECORDING' ? 'Tap again to send' : conversationMode && (v === 'listening' || v === 'speaking') ? (v === 'speaking' ? 'Speak anytime to interrupt' : 'Mic is on — speak naturally') : copy.sub}</div>}
+          : <div className="bk-voice__sub">{v === 'preparing' ? copy.sub : sttPhase === 'RECORDING' ? 'Tap again to send' : conversationMode && (v === 'listening' || v === 'speaking') ? (v === 'speaking' ? 'Speak anytime to interrupt' : 'Mic is on — speak naturally') : copy.sub}</div>}
         {inputError && <div className="bk-voice__error" role="status">{inputError}</div>}
-        {sttSource && (v === 'listening' || v === 'transcribing') && <div className="bk-voice__source">{STT_SOURCE_LABEL[sttSource]}</div>}
+        {sttSource && (v === 'listening' || v === 'preparing' || v === 'transcribing') && <div className="bk-voice__source">{STT_SOURCE_LABEL[sttSource]}</div>}
         {textFallback && (onRetrySpeech
           ? <div className="bk-voice__sub bk-voice__sub--wrap">Couldn’t play the reply — it’s shown as text. <button type="button" className="bk-link" onClick={onRetrySpeech}>Play again</button></div>
           : <div className="bk-voice__sub">Voice replies unavailable — showing text</div>)}

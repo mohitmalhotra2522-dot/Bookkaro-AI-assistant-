@@ -68,6 +68,7 @@ import { classifyAgentTurn } from '../decisions/state-actions';
 import { preparationErrorTypeOf } from '@shared/booking-preparation';
 import { SAFE_ERROR_MESSAGE } from '../tool-runtime/tool-error-normalizer';
 import { naturalResponseComposer, statesExecutionBoundary, type NaturalComposeResult } from '../response/natural-response-composer';
+import { voiceResponseLogRecord, type VoiceResponse } from '../response/voice-response';
 import { speechOf } from '../conversation/assistant-response';
 import { actionLedgerFromSteps, guardActionClaims, type ActionExecution, type ActionClaimDiagnostic } from '../response/action-claims';
 import { guardReferenceClaims, type ReferenceClaimDiagnostic } from '../response/reference-claims';
@@ -143,7 +144,9 @@ export interface AgentTurnResult {
   assistantResponse: AssistantResponse;
   conversationContext: ConversationContext;
   /** Prompt 21: VOICE speech plan (LLM-worded + grounded, or deterministic fallback). */
-  speech?: { segments: string[]; source: 'LLM' | 'FALLBACK'; language: string; fallbackReason?: string };
+  speech?: { segments: string[]; source: 'LLM' | 'FALLBACK'; language: string; fallbackReason?: string;
+    /** Prompt 41: the VoiceResponse contract of this turn (no text duplication — `segments` are the spoken text). */
+    voiceResponse?: Omit<VoiceResponse, 'text' | 'segments' | 'reasons'> };
   /** Prompt 22: the text shown to the user (grounded LLM wording in TEXT and VOICE; backend reply as fallback). */
   assistantText?: string;
 }
@@ -612,10 +615,13 @@ export class ConversationAgentOrchestrator {
           pendingQuestionCode: pendingQuestionCode(sess.pendingInteraction),
           pendingQuestion: pendingQuestionCode(sess.pendingInteraction) ? questionFor(sess.pendingInteraction, sess, 'VOICE') || null : null,
           history: (this.history.get(sessionId) || []).slice(-8) as any, records: this.postBooking.store.getBookingsForSession(sessionId) as any,
-          sensitive: sensitiveInput, timeoutMs: this.naturalSpeechTimeoutMs,
+          sensitive: sensitiveInput, timeoutMs: this.naturalSpeechTimeoutMs, turnId,
           onSegment: mode === 'VOICE' ? opts.onSpeechSegment : undefined
         });
       } catch { /* composition never breaks a turn: deterministic speech is used */ }
+      // Prompt 41 (Part 44): metadata-only voice observability — no transcript / reply text / PII / keys
+      const v = extra.naturalSpeech?.voice;
+      if (v && mode === 'VOICE' && process.env.VOICE_RESPONSE_LOG !== '0') { try { console.log(JSON.stringify(voiceResponseLogRecord(sessionId, v, v.totalComposeMs ?? 0))); } catch { /* observer only */ } }
     }
     return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
       message, error: turnError, rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
@@ -865,6 +871,7 @@ export class ConversationAgentOrchestrator {
       backendActions: x.backendActions || [],
       // Prompt 21: speech provenance (reasons only — never the rejected sentence text / names)
       ...(x.naturalSpeech ? { naturalSpeech: { source: x.naturalSpeech.source, language: x.naturalSpeech.language, segments: x.naturalSpeech.segments.length, rejected: x.naturalSpeech.rejected.map(r => r.reason), fallbackReason: x.naturalSpeech.fallbackReason ?? null, ...(x.naturalSpeech.authoredBy ? { authoredBy: x.naturalSpeech.authoredBy } : {}), ...(x.naturalSpeech.general ? { general: true } : {}), ...(x.naturalSpeech.repaired ? { repaired: x.naturalSpeech.repaired } : {}) } } : {}),
+      ...(x.naturalSpeech?.voice ? { voiceResponse: { path: x.naturalSpeech.voice.path, purpose: x.naturalSpeech.voice.purpose, composerUsed: x.naturalSpeech.voice.composerUsed, fallbackUsed: x.naturalSpeech.voice.fallbackUsed, groundingStatus: x.naturalSpeech.voice.groundingStatus, speechLength: x.naturalSpeech.voice.speechLength, composerLatencyMs: x.naturalSpeech.voice.composerLatencyMs, totalComposeMs: x.naturalSpeech.voice.totalComposeMs ?? null, reasons: x.naturalSpeech.voice.reasons } } : {}),
       resultSetId: (s.searchResults as any)?.resultId ?? s.searchMeta?.resultId ?? null,
       activeJourneyId: this.context.activeJourneyId(a.sessionId),
       interruption: !!x.interruption,
@@ -948,9 +955,11 @@ export class ConversationAgentOrchestrator {
       })(),
       // Prompt 22: what the user reads — the grounded LLM wording (both modes); the backend reply when the LLM wording
       // was unavailable / rejected. responseMessage keeps the authoritative backend reply.
-      assistantText: a.stale ? '' : (x.naturalSpeech?.source === 'LLM' && x.naturalSpeech.text ? x.naturalSpeech.text : a.message),
+      // Prompt 41: in VOICE the screen keeps the validated reply (`screen`); the speech may be a shorter voice brief
+      assistantText: a.stale ? '' : (() => { const scr = x.naturalSpeech?.screen ?? x.naturalSpeech; return scr?.source === 'LLM' && scr.text ? scr.text : a.message; })(),
       conversationContext,
-      ...(!a.stale && x.naturalSpeech ? { speech: { segments: x.naturalSpeech.segments, source: x.naturalSpeech.source, language: x.naturalSpeech.language, ...(x.naturalSpeech.authoredBy ? { authoredBy: x.naturalSpeech.authoredBy } : {}), ...(x.naturalSpeech.fallbackReason ? { fallbackReason: x.naturalSpeech.fallbackReason } : {}) } } : {})
+      ...(!a.stale && x.naturalSpeech ? { speech: { segments: x.naturalSpeech.segments, source: x.naturalSpeech.source, language: x.naturalSpeech.language, ...(x.naturalSpeech.authoredBy ? { authoredBy: x.naturalSpeech.authoredBy } : {}), ...(x.naturalSpeech.fallbackReason ? { fallbackReason: x.naturalSpeech.fallbackReason } : {}),
+        ...(x.naturalSpeech.voice ? { voiceResponse: (({ text: _t, segments: _s, reasons: _r, ...rest }) => rest)(x.naturalSpeech.voice) } : {}) } } : {})
     };
   }
 

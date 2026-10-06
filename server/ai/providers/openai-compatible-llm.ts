@@ -15,7 +15,7 @@ import { webSourceLabel, toWebRailwayResult } from '../../railway/providers/web/
 import { LLMProviderError, isLLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult, type SpokenResponseInput, type SpokenResponseResult } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
 import { providerToolCatalog, providerStatusOf } from '../tools/provider-tools';
-import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, NATIVE_AGENT_SYSTEM_PROMPT } from '../prompts/system-prompt';
+import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, VOICE_BRIEF_PROMPT, NATIVE_AGENT_SYSTEM_PROMPT } from '../prompts/system-prompt';
 import type { AgentTranscriptStep } from './llm-provider';
 import { v4 as uuid } from '../orchestrator/utils';
 import { detectLanguageStyle } from '@shared/voice/language-style';
@@ -166,11 +166,12 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
         passengersCount: input.session.passengersCount ?? null
       },
       toolResults: input.toolResults.map(r => ({ tool: r.toolName, ...(entityOf(r.identity) ? { entity: entityOf(r.identity) } : {}), ok: r.ok, status: r.status, data: trim(r.data), error: r.error?.code })),
-      changes: input.changes, appliedActions: input.appliedActions
+      changes: input.changes, appliedActions: input.appliedActions,
+      ...(input.voiceBrief ? { screenText: String(input.screenText || '').slice(0, 1200) } : {})
     };
     const body = {
       model: this.cfg.model, temperature: this.cfg.temperature ?? 0.6, max_tokens: MAX_TOKENS_SPEECH, stream: !!input.onDelta,
-      messages: [{ role: 'system', content: VOICE_RESPONSE_STYLE_PROMPT }, { role: 'user', content: JSON.stringify(facts) }]
+      messages: [{ role: 'system', content: input.voiceBrief ? VOICE_BRIEF_PROMPT : VOICE_RESPONSE_STYLE_PROMPT }, { role: 'user', content: JSON.stringify(facts) }]
     };
     const res = await this.post(body, input.signal);
     try {

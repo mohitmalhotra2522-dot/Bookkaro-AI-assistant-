@@ -224,7 +224,7 @@ const App: React.FC = () => {
 
   // ───────────────────────── presentation ─────────────────────────
   const snap = conv.snapshot;
-  const visual = voiceVisual({ isRecording: snap.listening, agentState: snap.state, sttPhase: conv.sttPhase });
+  const visual = voiceVisual({ isRecording: snap.listening, agentState: snap.state, sttPhase: conv.sttPhase, micReady: conv.micReady });
   const voiceActive = visual !== 'idle' || snap.conversationMode || !!conv.inputErrorMessage;
   const progressLabel = toolProgressLabel(activeTools, toolActivity);
   const conversation = messages.filter(m => m.id !== 'welcome');
@@ -232,6 +232,7 @@ const App: React.FC = () => {
   const showTrip = tripHasContent(context);
 
   const status: { tone: StatusTone; label: string } =
+    visual === 'preparing' ? { tone: 'busy', label: 'Opening mic' } :
     visual === 'listening' ? { tone: 'busy', label: 'Listening' } :
     visual === 'transcribing' ? { tone: 'busy', label: 'Understanding' } :
     visual === 'speaking' ? { tone: 'busy', label: 'Speaking' } :
@@ -306,7 +307,7 @@ const App: React.FC = () => {
   const voicePanelEl = voiceActive ? (
     <MicButton isRecording={snap.listening} isSupported={snap.sttAvailable} onStart={handleMicStart} onStop={handleMicStop} transcript={snap.partialTranscript}
       conversationMode={snap.conversationMode} onToggleConversationMode={conv.setConversationMode} agentState={snap.state} textFallback={snap.textFallback}
-      sttPhase={conv.sttPhase} inputError={conv.inputErrorMessage} progressLabel={progressLabel}
+      sttPhase={conv.sttPhase} micReady={conv.micReady} inputError={conv.inputErrorMessage} progressLabel={progressLabel}
       sttSource={snap.listening || conv.sttPhase !== 'IDLE' ? conv.sttSource : null}
       onRetrySpeech={snap.textFallback && snap.ttsAvailable ? () => { conv.retrySpeech(); } : undefined} />
   ) : null;

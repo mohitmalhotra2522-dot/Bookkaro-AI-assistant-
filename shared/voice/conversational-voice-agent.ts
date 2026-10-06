@@ -49,6 +49,8 @@ export interface VoiceTurnOutcome {
   state?: string;
   requiresTool?: boolean;
   error?: { code: string; message?: string } | null;
+  /** Prompt 41: VoiceResponse metadata (purpose / factsUsed / question / speechLength / path). Play Again replays `segments`. */
+  voiceResponse?: { purpose: string; factsUsed: Array<{ type: string; value: string }>; question: string | null; speechLength: number; turnId: string | null; path: string; [k: string]: unknown };
 }
 
 /** Prompt 34: `transcript` = structured STT metadata of a spoken turn (absent for typed text in the voice UI). */

@@ -35,6 +35,11 @@ import { actionLedgerFromSteps, guardActionSentence, type ActionLedger, type Act
 import { verifyReferenceClaims, type ReferenceClaimDiagnostic } from './reference-claims';
 import { verifyOutcomeClaims, type OutcomeClaimDiagnostic } from './outcome-claims';
 import { verifyBookingStateClaim } from './booking-state-claims';
+import { DETAILS_NOTE, MUST_KEEP } from '@shared/voice/speech-renderer';
+import {
+  assessSpeechSuitability, voiceResponseGrounding, polishSpeech, extractVoiceFacts, classifyVoicePurpose, voiceComposerTimeoutMs, wordCount,
+  type VoiceResponse, type VoicePath
+} from './voice-response';
 
 export interface NaturalComposeInput {
   llm: LLMProvider;
@@ -82,6 +87,15 @@ export interface NaturalComposeInput {
    * spoke (or the provider has no agent-authored replies). false → no second LLM call; the backend reply is used.
    */
   allowWordingCall?: boolean;
+  /**
+   * Prompt 41 (internal): Path B "voice brief" — ONE short conversational spoken wording of a screen-oriented reply
+   * (same provider / Muse config). Set only by the VOICE wrapper below; never by callers.
+   */
+  voiceBrief?: boolean;
+  /** Prompt 41: the validated reply shown on screen (fact base for the voice brief). */
+  screenText?: string;
+  /** Prompt 41: turn identity carried into the VoiceResponse. */
+  turnId?: string | null;
 }
 
 export interface NaturalComposeResult {
@@ -112,6 +126,10 @@ export interface NaturalComposeResult {
   /** Prompt 28: extended provenance of every accepted sentence (claimId, entity, binding, verification) — internal only.
    *  `provenance` keeps the P25 / P26 shape unchanged. */
   claimProvenance?: ClaimProvenance[];
+  /** Prompt 41: the validated VoiceResponse of this turn (VOICE mode). `text` / `segments` above = what is spoken. */
+  voice?: VoiceResponse;
+  /** Prompt 41: what the screen shows (VOICE mode) — may differ from the speech; same authoritative facts. */
+  screen?: { text: string; source: 'LLM' | 'FALLBACK' };
 }
 
 /** Prompt 28 — per-reply binding diagnostics: how every sentence was bound and which claims crossed entities. */
@@ -248,8 +266,122 @@ function toolViews(steps: any[]): TurnToolResultView[] {
   }));
 }
 
+/** Composer fallbacks after which no voice brief may be composed (safety / authority / guarantee decisions). */
+// (the review / confirmation / blocked-review GUARANTEES are re-applied to the voice brief by composeCore itself)
+// Path C composes only for a deterministic reply chosen for formatting / guarantee reasons — never as a RETRY after the
+// LLM's wording already failed (nothing grounded, no response, timeout, provider error): minimise LLM calls / latency.
+const NO_VOICE_BRIEF = new Set(['EMPTY', 'SENSITIVE_TURN', 'SAFETY_ERROR', 'LLM_UNAVAILABLE', 'LIVE_STATUS_AUTHORITATIVE', 'EXECUTION_BOUNDARY_NOT_STATED',
+  'NOTHING_GROUNDED', 'NO_RESPONSE', 'TIMEOUT', 'PROVIDER_ERROR', 'PROVIDER_NO_SPOKEN_RESPONSE']);
+
 export class NaturalResponseComposer {
+  /**
+   * Prompt 41 — NaturalVoiceResponseComposer entry point. TEXT: unchanged. VOICE: the existing validated reply is
+   * composed first (screen text); then the VOICE view is chosen — Path A (reuse, speech-suitable), Path B / C-composed
+   * (one voice-brief wording call for screen-oriented content, judged by every guard + VoiceResponseGroundingValidator)
+   * or Path C (deterministic speech reused). Any composer failure → the validated short response. Segments are
+   * emitted once, after the choice (P34 §7: TTS receives only final validated text).
+   */
   async compose(i: NaturalComposeInput): Promise<NaturalComposeResult> {
+    if ((i.mode || 'VOICE') !== 'VOICE' || i.voiceBrief) return this.composeCore(i);
+    const t0 = Date.now();
+    const base = await this.composeCore({ ...i, onSegment: undefined });
+    let voice: VoiceResponse;
+    try { voice = await this.voiceView(i, base); }
+    catch { voice = this.voiceOf(i, base, base.segments, base.source === 'LLM' ? 'A_REUSED' : 'C_DETERMINISTIC', false, ['VOICE_VIEW_ERROR'], null, true); }
+    if (i.onSegment) voice.segments.forEach((t, k) => i.onSegment!(k, t));
+    voice.totalComposeMs = Date.now() - t0;
+    const composed = voice.composerUsed;
+    return { ...base, text: voice.text, segments: voice.segments, streamed: voice.segments.length,
+      ...(composed ? { source: 'LLM' as const, wordingCall: true, fallbackReason: undefined } : {}),
+      voice, screen: { text: base.text, source: base.source } };
+  }
+
+  private voiceOf(i: NaturalComposeInput, base: NaturalComposeResult, segs: string[], path: VoicePath, composerUsed: boolean, reasons: string[], composerLatencyMs: number | null, fallbackUsed: boolean): VoiceResponse {
+    const s = i.session;
+    const views = toolViews(i.steps);
+    const segments = segs.filter(x => String(x || '').trim());
+    const text = segments.join(' ');
+    const q = [...segments].reverse().find(x => x.includes('?')) || null;
+    return {
+      text, segments,
+      purpose: classifyVoicePurpose({
+        errorCode: i.error?.code ?? null,
+        confirmationTurn: s.bookingState === BookingState.IRCTC_HANDOFF_READY && i.stateBefore !== BookingState.IRCTC_HANDOFF_READY,
+        reviewTurn: s.bookingState === BookingState.AWAITING_CONFIRMATION, toolNames: views.map(v => String(v.toolName)), toolFailed: views.some(v => !v.ok),
+        pendingType: String(s.pendingInteraction?.type || ''), corrected: i.changes.some(c => c.corrected), appliedActions: i.appliedActions,
+        hasQuestion: !!q, general: !!base.general
+      }),
+      factsUsed: extractVoiceFacts(text), question: q, speechLength: wordCount(text), turnId: i.turnId ?? null,
+      path, composerUsed, fallbackUsed, groundingStatus: base.source === 'LLM' || composerUsed ? 'VALIDATED' : 'FALLBACK', composerLatencyMs, reasons
+    };
+  }
+
+  private async voiceView(i: NaturalComposeInput, base: NaturalComposeResult): Promise<VoiceResponse> {
+    const reuse: VoicePath = base.source === 'LLM' ? 'A_REUSED' : 'C_DETERMINISTIC';
+    const views = toolViews(i.steps);
+    const reasons: string[] = [];
+    const agentText = typeof i.agentText === 'string' && i.agentText.trim() ? i.agentText.trim() : null;
+    const eligible = !!base.text && !(base.fallbackReason && NO_VOICE_BRIEF.has(base.fallbackReason)) && !i.sensitive
+      && !(i.error && (SAFETY.has(i.error.code) || i.error.code === 'LLM_UNAVAILABLE' || i.error.code === 'BOOKING_EXECUTION_DISABLED'))
+      && typeof i.llm.generateSpokenResponse === 'function' && !views.some(v => LIVE_TOOLS.has(String(v.toolName)));
+    if (eligible) {
+      // Path A when the validated reply is speech-suitable AND (agent path) the screen answer it came from was not a
+      // screen-oriented list / long text that the voice would only be reading a cut-off piece of
+      const own = assessSpeechSuitability(base.text);
+      reasons.push(...own.reasons);
+      if (base.authoredBy === 'AGENT' && agentText) reasons.push(...assessSpeechSuitability(agentText).reasons.map(r => `SCREEN_${r}`));
+    }
+    if (base.source === 'FALLBACK' && base.fallbackReason) reasons.push(`BASE_${base.fallbackReason}`);
+    if (!eligible || !reasons.some(r => !r.startsWith('BASE_'))) return this.voiceOf(i, base, polishSpeech(base.segments), reuse, false, reasons, null, false);
+    const c0 = Date.now();
+    let b: NaturalComposeResult | null = null;
+    const budget = voiceComposerTimeoutMs();
+    try {
+      b = await this.composeCore({ ...i, agentText: null, allowWordingCall: true, voiceBrief: true, screenText: base.text, onSegment: undefined,
+        timeoutMs: typeof i.timeoutMs === 'number' ? Math.min(i.timeoutMs, budget) : budget });
+    } catch { b = null; }
+    const ms = Date.now() - c0;
+    if (b && b.source === 'LLM' && b.text) {
+      const s: any = i.session;
+      const g = voiceResponseGrounding.validate(b.text, {
+        texts: [base.text, i.backendReply, i.deterministicSpeech, i.pendingQuestion || ''],
+        data: { trains: s.searchResults?.trains, selectedTrain: s.selectedTrain, selectedClass: s.selectedClass, availability: s.availability, fare: s.fare,
+          review: s.review?.snapshot, passengersCount: s.passengersCount, passengers: (s.passengers || []).length, date: s.date,
+          tools: views.filter(v => v.ok).map(v => v.data) }
+      });
+      const segs = polishSpeech(b.segments);
+      // a voice brief is accepted WHOLE or not at all: if any of its sentences was removed by a guard (invented /
+      // mismatched fact, too long, booking claim …) or only the question is left, the validated reply is spoken
+      const removed = b.rejected.filter(x => x.reason !== 'FRAGMENT');
+      if (removed.length) reasons.push(...[...new Set(removed.map(x => `VOICE_BRIEF_REJECTED_${String(x.reason).split(':')[0]}`))]);
+      else if (!segs.some(x => !x.includes('?'))) reasons.push('VOICE_BRIEF_QUESTION_ONLY');
+      // the brief must CONVEY the turn: when the validated reply carries railway facts, at least one of them is spoken;
+      // a content-free filler ("Ek second…") never replaces the answer
+      else if (extractVoiceFacts(base.text).length && !extractVoiceFacts(segs.join(' ')).some(f => extractVoiceFacts(base.text).some(x => x.type === f.type && x.value === f.value))) reasons.push('VOICE_BRIEF_NO_FACTS');
+      else if (wordCount(segs.join(' ')) < 6 && wordCount(base.text) > wordCount(segs.join(' '))) reasons.push('VOICE_BRIEF_TOO_THIN');
+      else if (g.ok && segs.length) return this.voiceOf(i, base, segs, base.source === 'LLM' ? 'B_COMPOSED' : 'C_COMPOSED', true, reasons, ms, false);
+      if (!g.ok) reasons.push(...g.rejected.map(r => `VOICE_GROUNDING_${r.split(':')[0]}`));
+      else if (!removed.length && !segs.length) reasons.push('COMPOSER_EMPTY');
+    } else reasons.push(`COMPOSER_${b?.fallbackReason || 'ERROR'}`);
+    // fallback: the existing validated short response. If the validated reply itself is screen-oriented (a list the
+    // voice would read out), the existing P36-C.1.1 selection is spoken instead: whole validated sentences only (the
+    // question / boundary sentences kept) + the fact-free "details on screen" note — no LLM, no new fact
+    let fb = base.segments;
+    if (!assessSpeechSuitability(base.text).suitable) {
+      // drop only the list sentence(s) themselves (≥3 trains / ≥4 times / bullets); boundary / failure sentences
+      // (MUST_KEEP) and the question always stay
+      const sents = splitSentences(base.text);
+      const keep = sents.filter(x => MUST_KEEP.test(x) || x.includes('?') || !/MANY_TRAINS|MANY_TIMES|MANY_FARES|LIST_MARKERS|TABLE_OR_JSON|INTERNAL_ID/.test(assessSpeechSuitability(x).reasons.join(' ')));
+      if (keep.length && keep.length < sents.length && keep.some(x => !x.includes('?'))) {
+        const q = keep.length && keep[keep.length - 1].includes('?') ? keep.length - 1 : keep.length;
+        fb = segmentForSpeech([...keep.slice(0, q), DETAILS_NOTE[base.language], ...keep.slice(q)].join(' '));
+        reasons.push('CONCISE_FALLBACK');
+      }
+    }
+    return this.voiceOf(i, base, polishSpeech(fb), reuse, false, reasons, ms, true);
+  }
+
+  private async composeCore(i: NaturalComposeInput): Promise<NaturalComposeResult> {
     // Part 17 — same style as the user; short / name-only replies keep the conversation's earlier style
     const language = detectLanguageStyle(i.userText, i.history.filter(h => h.role === 'user').map(h => h.content));
     const s = i.session;
@@ -279,7 +411,7 @@ export class NaturalResponseComposer {
     // Prompt 25 Part 10: no second LLM call for formatting / polishing / a non-semantic state move
     if (!agentText && i.allowWordingCall === false) return fallback('NO_MATERIAL_CHANGE');
     const mode = i.mode || 'VOICE';
-    const general = !!i.general && !!agentText;
+    const general = !!i.general && (!!agentText || !!i.voiceBrief);
 
     // ---- the authoritative fact base for grounding ----
     const views = toolViews(i.steps);
@@ -325,6 +457,9 @@ export class NaturalResponseComposer {
       : agentText ? (mode === 'TEXT' ? 600 : 260)
       : mode === 'TEXT' ? Math.min(600, Math.max(i.backendReply.length, 160)) : Math.min(260, Math.max(i.backendReply.length, confirmationTurn ? 140 : 90));
     const maxSentences = general ? (mode === 'TEXT' ? 7 : 4) : mode === 'TEXT' ? 5 : 3;
+    // Prompt 41: a voice brief is 1–3 short sentences, ≤ ~50 words (≈300 chars) including the question
+    const maxWords = i.voiceBrief ? 50 : Infinity;
+    const briefMaxLen = 300;
     // ---- Prompt 22: extra authoritative fact sets ----
     const stations = new Set<string>([s.origin, s.destination, ...trains.flatMap(t => [t.origin, t.destination]),
       (s.review as any)?.snapshot?.origin, (s.review as any)?.snapshot?.destination,
@@ -504,7 +639,8 @@ export class NaturalResponseComposer {
       const cap = agentText && question && !hasQ() && !t.includes('?') ? maxSentences - 1 : maxSentences;
       if (accepted.length >= cap) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       const reserve = question && !hasQ() && !t.includes('?') ? question.length + 1 : 0;
-      if ((len() ? len() + 1 : 0) + t.length + reserve > maxLen) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
+      if ((len() ? len() + 1 : 0) + t.length + reserve > (i.voiceBrief ? briefMaxLen : maxLen)) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
+      if (i.voiceBrief && wordCount(accepted.join(' ')) + wordCount(t) + (reserve ? wordCount(question || '') : 0) > maxWords) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       accepted.push(t);
       {
         const p = classifyClaim(t, idx, hits, general);
@@ -543,6 +679,7 @@ export class NaturalResponseComposer {
         passengersCountBefore: i.passengersCountBefore, pendingQuestion: question, pendingQuestionCode: i.pendingQuestionCode,
         backendReply: i.backendReply, toolResults: views, appliedActions: i.appliedActions, changes: i.changes, error: i.error,
         history: i.history.slice(-8), signal: ctrl?.signal,
+        ...(i.voiceBrief ? { voiceBrief: true, screenText: i.screenText || '' } : {}),
         onDelta: (d: string) => { buf += String(d || ''); flushComplete(); }
       });
       out = await Promise.race([

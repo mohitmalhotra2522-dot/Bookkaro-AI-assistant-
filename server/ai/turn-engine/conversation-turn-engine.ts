@@ -392,6 +392,7 @@ export class ConversationTurnEngine {
       // Prompt 22: the text the user reads = grounded LLM wording (TEXT + VOICE); responseMessage when unavailable
       assistantText: response ? maskPnrsInText((r as any).assistantText || response.text) : '', speechText,
       segments: response && mode === 'VOICE' ? (r.speech?.segments?.length ? r.speech.segments.map(maskPnrsInText) : []) : [],
+      ...(response && mode === 'VOICE' && r.speech?.voiceResponse ? { voiceResponse: r.speech.voiceResponse } : {}),
       shouldSpeak: mode === 'VOICE' && !!response && !!speechText, interruptible: true, responsePriority: priority,
       state: sNow.bookingState, requiresTool: recs.length > 0, error: r.error ? { code: r.error.code, message: r.error.message } : null
     };
@@ -408,7 +409,11 @@ export class ConversationTurnEngine {
         toolCount: turn.toolCount, providerCalls: turn.toolResults.length,
         bargeIn: !!opts.interruptPrevious, interrupted: turn.interrupted, stale: turn.superseded, presentation: turn.presentation,
         finalStatus: turn.status, failureCategory: toolFailure ?? (turn.superseded ? 'SUPERSEDED' : null) ?? (r.error?.code ?? null),
-        speechSegments: voice.segments.length, speechSource: r.speech?.source ?? null, totalTurnLatencyMs: turn.totalTurnLatencyMs
+        speechSegments: voice.segments.length, speechSource: r.speech?.source ?? null, totalTurnLatencyMs: turn.totalTurnLatencyMs,
+        // Prompt 41: VoiceResponse metadata (no text)
+        voiceResponseGenerated: !!r.speech?.voiceResponse, composerUsed: r.speech?.voiceResponse?.composerUsed ?? false, voicePath: r.speech?.voiceResponse?.path ?? null,
+        voiceComposerLatencyMs: r.speech?.voiceResponse?.composerLatencyMs ?? null, speechLength: r.speech?.voiceResponse?.speechLength ?? null,
+        voiceFallbackUsed: r.speech?.voiceResponse?.fallbackUsed ?? null, voiceGroundingStatus: r.speech?.voiceResponse?.groundingStatus ?? null
       };
     }
     const publicTurn = this.publicTurn(turn);

@@ -125,6 +125,12 @@ export interface SpokenResponseInput {
   /** Streaming: called with text deltas as they arrive (providers that support streaming). */
   onDelta?: (chunk: string) => void;
   signal?: AbortSignal;
+  /**
+   * Prompt 41: Path B voice brief — the screen already shows `screenText` (validated) + cards; write the SHORT spoken
+   * version of the same facts (VOICE_BRIEF_PROMPT). Absent → the existing spoken / chat wording.
+   */
+  voiceBrief?: boolean;
+  screenText?: string;
 }
 
 export interface SpokenResponseResult { text: string }

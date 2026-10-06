@@ -552,3 +552,41 @@ Search aap khud tap karein"; BookKaro form showed food for 14680 (IRCTC has none
   events `BK_TTS_EVENT start|end|interrupted|error`. No new TTS provider, no network, text never logged. Manifest:
   `<queries>` for `android.intent.action.TTS_SERVICE` (Android 11+ package visibility). No new permission.
 - Tests: JUnit 23/23, vitest p40 17/17 + p40-1 6/6 (simulated), tsc, build. G5 on a real phone = USER VERIFICATION REQUIRED.
+
+## P41 — Natural conversational voice brain + tap-to-talk capture fix (local commit, NOT pushed / deployed)
+
+**Pipeline (unchanged providers; additive):** STT → TurnEngine → ConversationAgentOrchestrator → Muse (tools / BookingSession)
+→ authoritative reply → `NaturalResponseComposer` (existing P21–P35 grounding) → **P41 VOICE view** → existing
+pronunciation (`renderForSpeech`, client) → existing TTS. TEXT mode is untouched.
+
+- `server/ai/response/voice-response.ts` (new): `VoiceResponse` contract `{text, segments, purpose, factsUsed, question,
+  speechLength, turnId, path, composerUsed, fallbackUsed, groundingStatus, composerLatencyMs, reasons}`,
+  `assessSpeechSuitability`, `VoiceResponseGroundingValidator` (train / time / AM-PM / ₹ / class / WL-RAC / PNR / date /
+  bare numbers must already exist in the validated authority; 12014≠12:14, 3A≠3 AM, ₹1,125=₹1125), `polishSpeech`
+  (≤1 leading ack, no "...", no "ji ji"; never drops a question), `classifyVoicePurpose`, `voiceResponseLogRecord`.
+- `natural-response-composer.ts`: `compose()` = VOICE wrapper over the old body (`composeCore`). Paths:
+  **A_REUSED** validated reply already speech-suitable (no LLM call) · **B_COMPOSED** agent answer is screen-oriented
+  (≥3 trains, ≥4 times, bullets, >50 words…) → ONE voice-brief call (`VOICE_BRIEF_PROMPT`, same provider/model,
+  `SpokenResponseInput.voiceBrief/screenText`) judged by every composer guard + the voice validator, accepted WHOLE or
+  not at all (any removed sentence / question-only / no fact of the reply / <6 words → rejected) · **C_DETERMINISTIC /
+  C_COMPOSED** for deterministic replies (compose only for formatting / guarantee fallbacks — never as a retry after
+  NOTHING_GROUNDED / TIMEOUT / PROVIDER_ERROR). Never composed: sensitive, safety errors, LLM_UNAVAILABLE,
+  BOOKING_EXECUTION_DISABLED, live status / PNR. Fallback = validated reply; if that is itself a list → list sentences
+  dropped + "Baaki details screen par hain." (CONCISE_FALLBACK). Review/confirmation guarantees (P33 facts, "book nahi")
+  re-apply to the brief.
+- Orchestrator: VOICE `assistantText` = `naturalSpeech.screen` (screen ≠ speech); `speech.voiceResponse` + turnLog
+  `voiceResponse`; metadata-only console record `{kind:'voice_response', …}` (disable: `VOICE_RESPONSE_LOG=0`).
+  TurnEngine `voice.voiceResponse` + `voiceTurn.{voiceResponseGenerated, composerUsed, voicePath, voiceComposerLatencyMs,
+  speechLength, voiceFallbackUsed, voiceGroundingStatus}`. Budget `VOICE_COMPOSER_TIMEOUT_MS` (default 4500, 500–20000).
+- Play Again = `agent.retrySpeech()` replays the same `segments` (no turn / LLM). Barge-in unchanged.
+- **STT capture fix (web = Android app, same JS):** `pcm-recorder.ts` resumes a suspended AudioContext, `start()` resolves
+  only after the first real audio buffer (≤1.5 s), `stop()` drains ≤2 tail buffers (≤300 ms). `BatchSttSpeechInput.micReady`
+  / `onMicReady`; UI state `preparing` = "Opening mic…" until audio flows (phase stays RECORDING synchronously — p36c tests).
+  Reaches the Android app only after a web deploy (the APK loads the deployed site; APK unchanged = v0.40.1).
+- Tests: `tests/unit/p41-natural-voice.test.ts` (31), `tests/unit/p41-stt-capture.test.ts` (6, happy-dom, SIMULATED).
+  Focused groups: 374/386, the 12 failures are the pre-existing list, byte-identical to the baseline 48e2cb6.
+- G3 (real Muse + live RailCore, 2 runs, 23 VOICE turns): Path A on all Muse turns (Muse already wrote speech-sized
+  replies, 3–54 ms overhead); Path B once (3.9 s, list → 19-word brief); composer timeouts fell back safely. Muse turns
+  took 56–118 s (provider latency) → the visible gpt-oss-20b fallback served later turns. Review / correction /
+  confirmation not reached live (fallback model's passenger collection) → covered by G2 only.
+  REAL_DEVICE_VOICE_TEST = NOT_RUN.

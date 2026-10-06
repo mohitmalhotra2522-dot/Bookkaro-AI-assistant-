@@ -10,6 +10,10 @@ import type { PcmRecorder, PcmRecording } from './batch-speech-input';
 
 export const TARGET_SAMPLE_RATE = 16000;
 export const MAX_RECORDING_MS = 60_000;
+/** P41-STT: start() resolves only once the mic actually delivers audio (or after this ceiling). */
+export const MIC_READY_TIMEOUT_MS = 1500;
+/** P41-STT: on release, wait for the audio still buffered in the graph (≤ 2 callbacks or this ceiling). */
+export const TAIL_DRAIN_MS = 300;
 
 export function pcmRecorderSupported(): boolean {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -47,6 +51,9 @@ export function createPcmRecorder(): PcmRecorder | null {
   let startedAt = 0;
   let limit: number | null = null;
   let closed = false;
+  // P41-STT: resolved by the audio callback — first real audio (mic ready) / tail buffers after release
+  let onFirstAudio: (() => void) | null = null;
+  let drain: { left: number; done: () => void } | null = null;
 
   const release = () => {
     closed = true;
@@ -64,16 +71,39 @@ export function createPcmRecorder(): PcmRecorder | null {
       if (closed) { release(); throw new Error('ABORTED'); }
       const AC = (window as any).AudioContext || (window as any).webkitAudioContext;
       ctx = new AC() as AudioContext;
+      // P41-STT: an AudioContext created after an await (no direct user gesture any more — Android WebView, Safari)
+      // can start 'suspended' → no audio callbacks → the first words are lost. Resume explicitly.
+      if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* best effort */ } }
+      if (closed) { release(); throw new Error('ABORTED'); }
       source = ctx.createMediaStreamSource(stream);
       // ScriptProcessorNode: universally available (incl. Safari) and needs no extra module file
       node = ctx.createScriptProcessor(4096, 1, 1);
-      node.onaudioprocess = (e) => { if (!closed) chunks.push(new Float32Array(e.inputBuffer.getChannelData(0))); };
+      const firstAudio = new Promise<void>(r => { onFirstAudio = r; });
+      node.onaudioprocess = (e) => {
+        if (closed) return;
+        chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        if (onFirstAudio) { const f = onFirstAudio; onFirstAudio = null; f(); }
+        if (drain && --drain.left <= 0) drain.done();
+      };
       source.connect(node);
       node.connect(ctx.destination);
       startedAt = Date.now();
       limit = window.setTimeout(() => onAutoStop(), MAX_RECORDING_MS);
+      // P41-STT: "Listening" is shown only when audio is really flowing (WebView mic start is slower than desktop)
+      let t: number | undefined;
+      await Promise.race([firstAudio, new Promise<void>(r => { t = window.setTimeout(r, MIC_READY_TIMEOUT_MS); })]);
+      if (t !== undefined) clearTimeout(t);
+      if (closed) throw new Error('ABORTED');
     },
     async stop(): Promise<PcmRecording> {
+      // P41-STT: the last ~100–200 ms are still inside the audio graph when the user taps "send" — drain them
+      // (≤ 2 more callbacks, max TAIL_DRAIN_MS) so the end of the sentence is not clipped
+      if (!closed && node && ctx && ctx.state === 'running') {
+        await new Promise<void>(res => {
+          const t = window.setTimeout(() => { drain = null; res(); }, TAIL_DRAIN_MS);
+          drain = { left: 2, done: () => { clearTimeout(t); drain = null; res(); } };
+        });
+      }
       const rate = ctx?.sampleRate || 48000;
       const data = chunks;
       chunks = [];

@@ -32,7 +32,7 @@ function sentencesOf(text: string): string[] {
 const isLabel = (s: string) => /:\s*$/.test(s) && s.split(/\s+/).length <= 4;
 
 /** Sentences that must never be dropped from speech: booking boundary, unverified / failed facts, non-live data. */
-const MUST_KEEP = new RegExp([
+export const MUST_KEEP = new RegExp([
   'abhi enabled nahi', 'enabled nahi', 'not enabled', 'disabled',
   'not booked', 'book nahi', 'booked nahi', 'ticket abhi', 'ticket nahi',
   'verify nahi', 'not verified', 'unverified', 'could not', 'couldn\'t', 'nahi ho paa', 'nahi mil paa',
@@ -40,7 +40,7 @@ const MUST_KEEP = new RegExp([
   'नहीं', 'बुक नहीं'
 ].map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i');
 
-const DETAILS_NOTE: Record<LanguageStyle, string> = {
+export const DETAILS_NOTE: Record<LanguageStyle, string> = {
   HINGLISH: 'Baaki details screen par hain.',
   ENGLISH: 'The rest is on your screen.',
   HINDI: 'बाकी जानकारी स्क्रीन पर है।'

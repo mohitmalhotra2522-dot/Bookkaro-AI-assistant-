@@ -46,6 +46,9 @@ export class BatchSttSpeechInput implements SpeechInput {
   private h: SpeechInputHandlers | null = null;
   private ctl: AbortController | null = null;
   private listeners = new Set<(p: BatchSttPhase) => void>();
+  /** P41-STT: the recorder confirmed audio is flowing (RECORDING is set synchronously on the tap; this follows). */
+  private ready = false;
+  private readyListeners = new Set<(ready: boolean) => void>();
   /** Observability (counts only): uploads made, results discarded as stale. */
   submitted = 0;
   discarded = 0;
@@ -58,6 +61,10 @@ export class BatchSttSpeechInput implements SpeechInput {
   get currentPhase(): BatchSttPhase { return this.phase; }
   onPhase(cb: (p: BatchSttPhase) => void): () => void { this.listeners.add(cb); return () => this.listeners.delete(cb); }
   private setPhase(p: BatchSttPhase) { if (this.phase !== p) { this.phase = p; for (const l of this.listeners) { try { l(p); } catch { /* ui only */ } } } }
+  /** P41-STT: true only while RECORDING and the microphone is really capturing — the UI says "Listening" then. */
+  get micReady(): boolean { return this.phase === 'RECORDING' && this.ready; }
+  onMicReady(cb: (ready: boolean) => void): () => void { this.readyListeners.add(cb); return () => this.readyListeners.delete(cb); }
+  private setReady(r: boolean) { if (this.ready !== r) { this.ready = r; for (const l of this.readyListeners) { try { l(r); } catch { /* ui only */ } } } }
 
   /** Explicit user tap only (called by the agent's listen()). Opens the mic; nothing is uploaded yet. */
   start(h: SpeechInputHandlers, _o: { continuous: boolean; lang: string }): void {
@@ -67,8 +74,11 @@ export class BatchSttSpeechInput implements SpeechInput {
     if (!rec) { h.onError('STT_UNAVAILABLE'); return; }
     const token = (this.deps.newId || defaultId)();
     this.token = token; this.h = h; this.rec = rec;
+    this.setReady(false);
     this.setPhase('RECORDING');
-    rec.start(() => { if (this.token === token) void this.finish(); }).catch((e: any) => {
+    rec.start(() => { if (this.token === token) void this.finish(); }).then(() => {
+      if (this.token === token && this.phase === 'RECORDING') this.setReady(true);
+    }, (e: any) => {
       if (this.token !== token) return;
       this.clear();
       h.onError(e?.name === 'NotAllowedError' || e?.name === 'SecurityError' ? 'MIC_PERMISSION_DENIED' : 'STT_START_FAILED');
@@ -80,6 +90,7 @@ export class BatchSttSpeechInput implements SpeechInput {
     const token = this.token, rec = this.rec, h = this.h;
     if (!token || !rec || !h || this.phase !== 'RECORDING') return;
     this.rec = null;
+    this.setReady(false);
     this.setPhase('TRANSCRIBING');
     let recording: PcmRecording;
     try { recording = await rec.stop(); }
@@ -111,7 +122,7 @@ export class BatchSttSpeechInput implements SpeechInput {
     try { ctl?.abort(); } catch { /* ignore */ }
   }
 
-  private clear() { this.token = null; this.rec = null; this.h = null; this.ctl = null; this.setPhase('IDLE'); }
+  private clear() { this.token = null; this.rec = null; this.h = null; this.ctl = null; this.setReady(false); this.setPhase('IDLE'); }
 }
 
 /**
