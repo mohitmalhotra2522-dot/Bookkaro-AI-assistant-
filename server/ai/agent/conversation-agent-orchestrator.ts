@@ -695,7 +695,7 @@ export class ConversationAgentOrchestrator {
       const stateGuard = guardBookingStateClaims(rt.finalMessage, s);
       entityRejections.push(...stateGuard.removed.map(r => ({ sentence: r.sentence, reason: `BOOKING_STATE_CLAIM:${r.reason}`, binding: 'NONE' })));
       const guarded = stateGuard.text ? factCheck(lifecycleClaimGuard(factGuard(stateGuard.text, rt.steps, mode, s, recordRejections), prepChange)) : '';
-      if (guarded) { parts.push(guarded); llmAsked = /\?/.test(guarded); }
+      if (guarded) { parts.push(guarded); llmAsked = /\?|\b(bataiye|batayein|bataen|batao|boliye|chuniye|likhiye)\b/i.test(guarded); }
       // (a removed booking-state claim is not a failed fact — the backend's own state message follows)
       else if (rejectedClaims.length || entityRejections.some(r => !String(r.reason).startsWith('BOOKING_STATE_CLAIM:'))) parts.push(honestFailureFallback(rt.steps));
     }

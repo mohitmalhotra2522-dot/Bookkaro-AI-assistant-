@@ -45,7 +45,7 @@ describe('v0.39.6 — passenger details one at a time (native agent, real orches
     const h = stack({
       'search': [{ calls: [{ name: 'SEARCH_TRAINS', args: { origin: 'Amritsar', destination: 'Delhi', date: d } }] }, { content: 'Trains mil gayi.' }],
       '12497 CC 1 log': [{ calls: [U('BOOK_TRAIN', 'SELECT_TRAIN', { trainRef: { kind: 'TRAIN_NUMBER', value: '12497' }, classRaw: 'CC', passengersCountRaw: '1', selectionPurpose: 'BOOKING' })] }, { content: 'Passenger 1 ka naam kya hai?' }],
-      'Rahul Sharma': [{ calls: [PAX({ name: 'Rahul Sharma' })] }, { content: 'Noted. Rahul ji ki age kya hai?' }],
+      'Rahul Sharma': [{ calls: [PAX({ name: 'Rahul Sharma' })] }, { content: 'Noted. Rahul ji ki age bataiye.' }],      // a request without "?" counts as its question
       '31': [{ content: 'Age 31 noted. Ab gender bataiye?' }],                                     // claims, but never calls the tool
       'umar 31 hai': [{ calls: [PAX({ age: 31 })] }, { content: 'Theek hai. Window seat chahiye ya koi preference nahi?' }],
     });
@@ -57,10 +57,10 @@ describe('v0.39.6 — passenger details one at a time (native agent, real orches
 
     const r2 = await h.say('Rahul Sharma');
     const v2 = h.views.filter(v => v.user === 'Rahul Sharma');
-    expect(v2[0].context.context.bookingPreparation.nextToAsk).toEqual({ passenger: 1, field: 'name' });
-    expect(v2[v2.length - 1].context.context.bookingPreparation.nextToAsk).toEqual({ passenger: 1, field: 'age' });   // updated after the store
+    expect(v2[0].context.context.bookingPreparation.nextToAsk).toMatchObject({ passenger: 1, field: 'name' });
+    expect(v2[v2.length - 1].context.context.bookingPreparation.nextToAsk).toMatchObject({ passenger: 1, field: 'age' });   // updated after the store
     expect(h.s().passengers[0].name).toBe('Rahul Sharma');
-    expect(String(r2.responseMessage)).toContain('Rahul ji ki age kya hai?');
+    expect(String(r2.responseMessage)).toContain('Rahul ji ki age bataiye.');
     expect(String(r2.responseMessage)).not.toMatch(/umar kitni hai/);
 
     const r3 = await h.say('31');
@@ -70,7 +70,7 @@ describe('v0.39.6 — passenger details one at a time (native agent, real orches
     const r4 = await h.say('umar 31 hai');
     expect(h.s().passengers[0].age).toBe(31);
     const v4 = h.views.filter(v => v.user === 'umar 31 hai');
-    expect(v4[v4.length - 1].context.context.bookingPreparation.nextToAsk).toEqual({ passenger: 1, field: 'berthPreference' });
+    expect(v4[v4.length - 1].context.context.bookingPreparation.nextToAsk).toMatchObject({ passenger: 1, field: 'berthPreference' });
     expect(String(r4.responseMessage)).toContain('Window seat chahiye');
     expect(String(r4.responseMessage)).not.toMatch(/gender — male, female ya other/);
   }, 30000);

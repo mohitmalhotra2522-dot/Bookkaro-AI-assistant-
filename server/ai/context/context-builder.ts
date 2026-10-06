@@ -95,7 +95,10 @@ export function bookingPreparationView(s: BookingSession) {
   // v0.39.6: the next single passenger detail still open, in the order the user asked for (name → age → berth → gender →
   // meal; berth / meal only when this train + class offer them) — passenger 1 is finished before passenger 2. A fact
   // derived from the session; the LLM writes the question.
-  const nextToAsk = nextPassengerDetail(s);
+  const nx = nextPassengerDetail(s);
+  const nxOpts = nx?.field === 'berthPreference' ? passengerOptionsView(s)?.berth.options : nx?.field === 'foodPreference' ? passengerOptionsView(s)?.food.options : undefined;
+  const nextToAsk = nx ? { ...nx, ...(nxOpts?.length ? { options: [...nxOpts] } : {}), askOnlyThis: true,
+    saveAnswerWith: `update_booking_session entities.passengerChanges [{ passengerIndex: ${nx.passenger}, changes: { ${nx.field}: <answer> } }] — before replying` } : null;
   const missing: string[] = [];
   if (!s.origin) missing.push('origin');
   if (!s.destination) missing.push('destination');

@@ -126,13 +126,18 @@ describe('v0.39.6 [3] — step-by-step passenger details (nextToAsk) + no duplic
       [[P('p1', { name: 'Rahul Sharma', age: 31, berthPreference: 'LOWER', gender: 'MALE' }), P('p2')], { passenger: 1, field: 'foodPreference' }],
       [[P('p1', { name: 'Rahul Sharma', age: 31, berthPreference: 'LOWER', gender: 'MALE', foodPreference: 'VEG' }), P('p2', { name: 'Neha Sharma' })], { passenger: 2, field: 'age' }],
     ];
-    for (const [passengers, next] of steps) expect((bookingPreparationView(session({ ...food, passengers })) as any).nextToAsk).toEqual(next);
+    for (const [passengers, next] of steps) expect((bookingPreparationView(session({ ...food, passengers })) as any).nextToAsk).toMatchObject(next);
+    // the next detail carries its own options + how the answer is stored (the LLM still writes the question)
+    const bv: any = (bookingPreparationView(session({ ...food, passengers: [P('p1', { name: 'Rahul Sharma', age: 31 }), P('p2')] })) as any).nextToAsk;
+    expect(bv).toMatchObject({ passenger: 1, field: 'berthPreference', askOnlyThis: true, options: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER'] });
+    expect(bv.saveAnswerWith).toMatch(/passengerIndex: 1, changes: \{ berthPreference/);
+    expect((bookingPreparationView(session({ ...food, passengers: [P('p1')] })) as any).nextToAsk.options).toBeUndefined();
     // no catering info / not offered → no meal step; berth "No preference" counts as answered
     const done1 = P('p1', { name: 'Rahul Sharma', age: 31, berthPreference: 'NO_PREFERENCE', gender: 'MALE' });
-    expect((bookingPreparationView(session({ passengers: [done1, P('p2')] })) as any).nextToAsk).toEqual({ passenger: 2, field: 'name' });
-    expect((bookingPreparationView(session({ lastTrainInfo: { trainNumber: '12014', facilities: { catering: false } }, passengers: [done1, P('p2')] })) as any).nextToAsk).toEqual({ passenger: 2, field: 'name' });
+    expect((bookingPreparationView(session({ passengers: [done1, P('p2')] })) as any).nextToAsk).toMatchObject({ passenger: 2, field: 'name' });
+    expect((bookingPreparationView(session({ lastTrainInfo: { trainNumber: '12014', facilities: { catering: false } }, passengers: [done1, P('p2')] })) as any).nextToAsk).toMatchObject({ passenger: 2, field: 'name' });
     // a class without berth choice (EA) → no berth step
-    expect((bookingPreparationView(session({ selectedClass: 'EA', passengers: [P('p1', { name: 'A B', age: 30 })] , passengersCount: 1})) as any).nextToAsk).toEqual({ passenger: 1, field: 'gender' });
+    expect((bookingPreparationView(session({ selectedClass: 'EA', passengers: [P('p1', { name: 'A B', age: 30 })] , passengersCount: 1})) as any).nextToAsk).toMatchObject({ passenger: 1, field: 'gender' });
     // everything answered → no nextToAsk; existing keys unchanged
     const all = session({ passengersCount: 1, passengers: [done1] });
     const v: any = bookingPreparationView(all);

@@ -488,3 +488,8 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   turn OR nextToAsk is berth / meal). Replies without their own question (mock / deterministic) keep the backend
   question (p9 unchanged). Test `tests/integration/p39-6-passenger-steps.test.ts` (native fake-OpenAI stack; fails on
   the old orchestrator with the exact doubled question). Focused 26 files 371/372 (p23 [8] pre-existing, fails on HEAD).
+  Follow-up 2 (live Muse re-check after a4f9f58: age now stored; "window" answered without a tool call, imperative
+  "…bataiye." without "?" still got the backend question appended): context nextToAsk now also carries `options` (berth /
+  meal choices for that field), `askOnlyThis: true` and `saveAnswerWith` (the update_booking_session passengerChanges
+  shape for that passenger + field); compose() counts a Hinglish request ("bataiye / batao / boliye / chuniye …") as the
+  agent's own question (output de-dup only, not routing).
