@@ -29,7 +29,11 @@ import com.bookkaro.assistant.web.WebViews
  * Finishing this screen clears the handoff (never replayed).
  */
 class IrctcActivity : ComponentActivity() {
-    companion object { const val EXTRA_MOCK = "mock" }
+    companion object {
+        const val EXTRA_MOCK = "mock"
+        const val EXTRA_URL = "url"              // P40.1: IRCTC link tapped on the BookKaro page
+        const val EXTRA_FROM_LINK = "fromLink"
+    }
 
     private val allowMock = AppGraph.allowMock
     private lateinit var web: WebView
@@ -43,6 +47,8 @@ class IrctcActivity : ComponentActivity() {
         val origin = BuildConfig.BOOKKARO_ORIGIN.trimEnd('/')
         val mock = "$origin/api/dev/mock-irctc/real-search"
         if (allowMock && intent.getBooleanExtra(EXTRA_MOCK, false) && IrctcUrlPolicy.isApprovedIrctcPage(mock, true).kind == "MOCK") return mock
+        val link = intent.getStringExtra(EXTRA_URL)
+        if (link != null && IrctcUrlPolicy.isApprovedIrctcPage(link, false).ok) return link
         return IrctcUrlPolicy.IRCTC_START_URL
     }
 
@@ -60,8 +66,9 @@ class IrctcActivity : ComponentActivity() {
             override fun handleOnBackPressed() { if (panel.visibility != View.VISIBLE && web.canGoBack()) web.goBack() else finish() }
         })
 
-        // process recreated / handoff consumed or expired → nothing to open, nothing replayed
-        if (!controller.hasActive()) { panel.show(getString(R.string.handoff_missing), getString(R.string.back_to_bookkaro)) { finish() }; return }
+        // process recreated / handoff consumed or expired → nothing to open, nothing replayed. (An IRCTC link from the
+        // BookKaro page still opens IRCTC here instead of the external browser; without a handoff nothing is filled.)
+        if (!controller.hasActive() && !intent.getBooleanExtra(EXTRA_FROM_LINK, false)) { panel.show(getString(R.string.handoff_missing), getString(R.string.back_to_bookkaro)) { finish() }; return }
         // no secure way to restrict the script + bridge to IRCTC on this WebView → refuse (no insecure fallback)
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT) || !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
             panel.show(getString(R.string.webview_too_old), getString(R.string.back_to_bookkaro)) { finish() }; return
@@ -85,7 +92,7 @@ class IrctcActivity : ComponentActivity() {
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                 val url = request.url.toString()
                 return when (NavigationPolicy.forIrctc(url, controller.lastPage, allowMock)) {
-                    NavigationPolicy.Decision.LOAD_IN_WEBVIEW -> false
+                    NavigationPolicy.Decision.LOAD_IN_WEBVIEW, NavigationPolicy.Decision.OPEN_IRCTC_IN_APP -> false
                     NavigationPolicy.Decision.OPEN_EXTERNAL -> { WebViews.openExternal(this@IrctcActivity, url); true }
                     NavigationPolicy.Decision.BLOCK -> true
                 }

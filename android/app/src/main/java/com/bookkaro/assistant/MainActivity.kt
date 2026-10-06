@@ -24,12 +24,16 @@ import com.bookkaro.assistant.core.IrctcUrlPolicy
 import com.bookkaro.assistant.core.Json
 import com.bookkaro.assistant.core.NavigationPolicy
 import com.bookkaro.assistant.web.AppGraph
+import com.bookkaro.assistant.web.NativeTts
 import com.bookkaro.assistant.web.WebViews
 
 /**
  * P40 — the BookKaro web app (unchanged React app) in a WebView on the HTTPS production URL.
  * Bridge `BookKaroAndroid` (WebMessageListener, BookKaro origin + main frame only): BK_PING → BK_ANDROID_READY;
- * BK_IRCTC_HANDOFF → native fetch + guard of the signed P39.3 snapshot → IrctcActivity. Nothing else.
+ * BK_IRCTC_HANDOFF → native fetch + guard of the signed P39.3 snapshot → IrctcActivity;
+ * P40.1: BK_TTS_SPEAK / BK_TTS_CANCEL → the phone's system TTS (the existing web voice flow's spoken replies; WebView
+ * has no speechSynthesis engine — `bookkaro-tts-shim.js`, BookKaro origin only). Nothing else.
+ * P40.1: IRCTC links from the BookKaro page open the app's own IRCTC WebView, never the external browser.
  * Microphone: only for the BookKaro origin, only after the normal Android runtime permission (existing voice flow).
  */
 class MainActivity : ComponentActivity() {
@@ -37,6 +41,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var web: WebView
     private lateinit var panel: WebViews.MessagePanel
     private var pendingMic: PermissionRequest? = null
+    private var tts: NativeTts? = null
+    private var ttsReply: JavaScriptReplyProxy? = null
 
     private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val req = pendingMic
@@ -60,6 +66,7 @@ class MainActivity : ComponentActivity() {
                 val url = request.url.toString()
                 return when (NavigationPolicy.forBookKaro(url, bookkaroOrigin)) {
                     NavigationPolicy.Decision.LOAD_IN_WEBVIEW -> false
+                    NavigationPolicy.Decision.OPEN_IRCTC_IN_APP -> { openIrctc(url); true }
                     NavigationPolicy.Decision.OPEN_EXTERNAL -> { WebViews.openExternal(this@MainActivity, url); true }
                     NavigationPolicy.Decision.BLOCK -> true
                 }
@@ -90,6 +97,11 @@ class MainActivity : ComponentActivity() {
                 if (!isMainFrame || IrctcUrlPolicy.originOf(sourceOrigin.toString()) != bookkaroOrigin) return@addWebMessageListener
                 onAppMessage(message.data, reply)
             }
+            // speechSynthesis for the existing voice flow — BookKaro origin only, same bridge, speak / cancel only
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                val shim = assets.open("bookkaro-tts-shim.js").bufferedReader(Charsets.UTF_8).use { it.readText() }
+                WebViewCompat.addDocumentStartJavaScript(web, shim, setOf(bookkaroOrigin))
+            }
         }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -107,7 +119,16 @@ class MainActivity : ComponentActivity() {
     private fun onAppMessage(raw: String?, reply: JavaScriptReplyProxy) {
         when (val m = BridgeProtocol.parseApp(raw)) {
             is BridgeProtocol.AppMsg.Ping -> send(reply, mapOf("type" to "BK_ANDROID_READY", "version" to AppGraph.VERSION))
-            is BridgeProtocol.AppMsg.Invalid -> send(reply, mapOf("type" to "BK_IRCTC_HANDOFF_ACK", "ok" to false, "code" to m.code))
+            is BridgeProtocol.AppMsg.Invalid ->
+                if (m.code != "INVALID_TTS") send(reply, mapOf("type" to "BK_IRCTC_HANDOFF_ACK", "ok" to false, "code" to m.code))
+            is BridgeProtocol.AppMsg.TtsSpeak -> {
+                ttsReply = reply
+                val engine = tts ?: NativeTts(this) { id, event ->
+                    ttsReply?.let { r -> if (!isDestroyed) send(r, mapOf("type" to "BK_TTS_EVENT", "id" to id, "event" to event)) }
+                }.also { tts = it }
+                engine.speak(m)
+            }
+            is BridgeProtocol.AppMsg.TtsCancel -> tts?.cancel()
             is BridgeProtocol.AppMsg.Register -> AppGraph.io.execute {
                 val r = AppGraph.controller.register(m)
                 runOnUiThread {
@@ -119,8 +140,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** An IRCTC link tapped on the BookKaro page → the app's IRCTC WebView (autofill only with an active verified handoff). */
+    private fun openIrctc(url: String) {
+        startActivity(Intent(this, IrctcActivity::class.java).putExtra(IrctcActivity.EXTRA_URL, url).putExtra(IrctcActivity.EXTRA_FROM_LINK, true))
+    }
+
     override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); web.saveState(outState) }
     override fun onResume() { super.onResume(); web.onResume() }
     override fun onPause() { web.onPause(); super.onPause() }
-    override fun onDestroy() { web.destroy(); super.onDestroy() }
+    override fun onDestroy() { tts?.shutdown(); tts = null; ttsReply = null; web.destroy(); super.onDestroy() }
 }

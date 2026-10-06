@@ -28,6 +28,25 @@ class BridgeProtocolTest {
         assertEquals("INVALID_MESSAGE", code("{\"source\":\"bookkaro-app\",\"type\":\"BK_PING\",\"pad\":\"" + "x".repeat(BridgeProtocol.MAX_MESSAGE_CHARS) + "\"}"))
     }
 
+    @Test fun appBridgeTtsIsSpeakAndCancelOnlyWithValidatedValues() {
+        val ok = BridgeProtocol.parseApp("""{"source":"bookkaro-app","type":"BK_TTS_SPEAK","id":7,"text":"Aapki train 12497 hai.","lang":"hi-IN","rate":1.05}""")
+        assertEquals(BridgeProtocol.AppMsg.TtsSpeak(7, "Aapki train 12497 hai.", "hi-IN", 1.05), ok)
+        assertFalse("spoken text never printed", ok.toString().contains("12497"))
+        assertEquals(BridgeProtocol.AppMsg.TtsSpeak(8, "Hi", "en", 1.0), BridgeProtocol.parseApp("""{"source":"bookkaro-app","type":"BK_TTS_SPEAK","id":8,"text":"Hi","lang":"en"}"""))
+        assertEquals(BridgeProtocol.AppMsg.TtsCancel, BridgeProtocol.parseApp("""{"source":"bookkaro-app","type":"BK_TTS_CANCEL"}"""))
+        fun code(raw: String) = (BridgeProtocol.parseApp(raw) as BridgeProtocol.AppMsg.Invalid).code
+        val base = """"source":"bookkaro-app","type":"BK_TTS_SPEAK""""
+        assertEquals("INVALID_TTS", code("{$base,\"id\":0,\"text\":\"a\",\"lang\":\"hi-IN\"}"))
+        assertEquals("INVALID_TTS", code("{$base,\"id\":1.5,\"text\":\"a\",\"lang\":\"hi-IN\"}"))
+        assertEquals("INVALID_TTS", code("{$base,\"id\":1,\"text\":\"   \",\"lang\":\"hi-IN\"}"))
+        assertEquals("INVALID_TTS", code("{$base,\"id\":1,\"text\":\"" + "a".repeat(BridgeProtocol.MAX_TTS_CHARS + 1) + "\",\"lang\":\"hi-IN\"}"))
+        assertEquals("INVALID_TTS", code("{$base,\"id\":1,\"text\":\"a\",\"lang\":\"hi-IN; rm -rf\"}"))
+        assertEquals("INVALID_TTS", code("{$base,\"id\":1,\"text\":\"a\",\"lang\":\"hi-IN\",\"rate\":9}"))
+        assertEquals("INVALID_TTS", code("{$base,\"id\":1,\"text\":7,\"lang\":\"hi-IN\"}"))
+        assertEquals("INVALID_MESSAGE", code("""{"type":"BK_TTS_SPEAK","id":1,"text":"a","lang":"hi-IN"}"""))   // no source
+        assertEquals("UNKNOWN_MESSAGE", code("""{"source":"bookkaro-app","type":"BK_TTS_SET_ENGINE","engine":"x"}"""))
+    }
+
     @Test fun irctcBridgeAcceptsOnlyTheFourExtensionMessagesAndMetadataEvents() {
         assertEquals(BridgeProtocol.IrctcMsg.GetSnapshot(1), BridgeProtocol.parseIrctc("""{"id":1,"msg":{"type":"BK_GET_SNAPSHOT"}}"""))
         assertEquals(BridgeProtocol.IrctcMsg.Clear(2), BridgeProtocol.parseIrctc("""{"id":2,"msg":{"type":"BK_CLEAR"}}"""))

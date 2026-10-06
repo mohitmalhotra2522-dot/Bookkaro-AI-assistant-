@@ -514,7 +514,7 @@ Search aap khud tap karein"; BookKaro form showed food for 14680 (IRCTC has none
 - `passenger-form.ts` food notes reworded (IRCTC offers / does not offer a meal choice).
 - Manifest 0.39.7. Tests: `tests/unit/p39-7-fixes.test.ts` (8).
 
-## P40 — Android app shell + native IRCTC WebView (local commit only; NOT pushed, NOT deployed)
+## P40 — Android app shell + native IRCTC WebView (pushed + deployed together with P40.1)
 - `android/` holds the Kotlin debug shell; see `android/README.md`.
   - BookKaro WebView: `MainActivity`. IRCTC WebView: `IrctcActivity`.
   - Narrow WebMessage bridges `BookKaroAndroid` / `BookKaroIrctc` (origin-restricted, main frame only).
@@ -537,3 +537,18 @@ Search aap khud tap karein"; BookKaro form showed food for 14680 (IRCTC has none
   `bash /home/user/restore-workspace.sh [--android]` (remote, fetch, npm ci; `--android` = JDK 17 + SDK 34 + Gradle 8.7
   in `/home/user/.cache/android-toolchain`, `source .../env.sh`). Build the APK with
   `cd android && ./gradlew --no-daemon testDebugUnitTest assembleDebug` (never alongside tsc / vitest).
+
+## P40.1 — Android fixes from the user's device test (v0.40.1, versionCode 41)
+- Reported: "Continue to IRCTC" opened IRCTC in the external browser (no autofill there); no TTS / sound in the app
+  (it worked on the web).
+- IRCTC external: production still served v0.39.7 (no Android branch → the plain "Open IRCTC" `target=_blank` link →
+  OPEN_EXTERNAL). Fixed by deploying the P40 web patch, plus the shell now opens any `https://www.irctc.co.in` link from
+  the BookKaro page in its own IrctcActivity (`NavigationPolicy.Decision.OPEN_IRCTC_IN_APP`, `EXTRA_URL` /
+  `EXTRA_FROM_LINK`). Without an active verified handoff nothing is filled (overlay says so); with one, autofill runs.
+- TTS: the web voice flow uses `speechSynthesis`; Android System WebView has the API but no engine → silent.
+  `android/app/src/main/assets/bookkaro-tts-shim.js` (document-start, BookKaro origin only) gives the UNCHANGED web
+  code speechSynthesis backed by the phone's system TTS (`web/NativeTts.kt`, Android TextToSpeech = the engine Chrome
+  uses) over the same `BookKaroAndroid` bridge: only `BK_TTS_SPEAK {id,text≤3900,lang,rate}` / `BK_TTS_CANCEL`,
+  events `BK_TTS_EVENT start|end|interrupted|error`. No new TTS provider, no network, text never logged. Manifest:
+  `<queries>` for `android.intent.action.TTS_SERVICE` (Android 11+ package visibility). No new permission.
+- Tests: JUnit 23/23, vitest p40 17/17 + p40-1 6/6 (simulated), tsc, build. G5 on a real phone = USER VERIFICATION REQUIRED.

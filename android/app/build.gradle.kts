@@ -20,8 +20,8 @@ android {
         applicationId = "com.bookkaro.assistant"
         minSdk = 26
         targetSdk = 34
-        versionCode = 40
-        versionName = "0.40.0"
+        versionCode = 41
+        versionName = "0.40.1"
         buildConfigField("String", "BOOKKARO_URL", "\"$bookkaroUrl\"")
         buildConfigField("String", "BOOKKARO_ORIGIN", "\"$bookkaroOrigin\"")
     }

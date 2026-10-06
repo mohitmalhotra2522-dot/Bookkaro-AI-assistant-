@@ -14,7 +14,13 @@ class NavigationAndScriptTest {
     @Test fun bookkaroWebViewKeepsOnlyBookKaroInside() {
         assertEquals(D.LOAD_IN_WEBVIEW, NavigationPolicy.forBookKaro("$origin/chat?x=1", origin))
         assertEquals(D.LOAD_IN_WEBVIEW, NavigationPolicy.forBookKaro("https://BOOKKARO-ai-assistant.onrender.com:443/", "$origin/"))
-        assertEquals(D.OPEN_EXTERNAL, NavigationPolicy.forBookKaro("https://www.irctc.co.in/nget/train-search", origin))
+        // P40.1: IRCTC links open the app's own IRCTC WebView (exact host, https, default port) — never the external browser
+        assertEquals(D.OPEN_IRCTC_IN_APP, NavigationPolicy.forBookKaro("https://www.irctc.co.in/nget/train-search", origin))
+        assertEquals(D.OPEN_IRCTC_IN_APP, NavigationPolicy.forBookKaro("https://WWW.IRCTC.CO.IN:443/nget/", origin))
+        assertEquals(D.OPEN_EXTERNAL, NavigationPolicy.forBookKaro("https://www.irctc.co.in.evil.example/nget/", origin))
+        assertEquals(D.OPEN_EXTERNAL, NavigationPolicy.forBookKaro("https://www.irctc.co.in:8443/nget/", origin))
+        assertEquals(D.BLOCK, NavigationPolicy.forBookKaro("http://www.irctc.co.in/nget/train-search", origin))
+        assertEquals(D.OPEN_EXTERNAL, NavigationPolicy.forBookKaro("https://evil.example/www.irctc.co.in", origin))
         assertEquals(D.OPEN_EXTERNAL, NavigationPolicy.forBookKaro("https://bookkaro-ai-assistant.onrender.com.evil.example/", origin))
         for (u in listOf("http://bookkaro-ai-assistant.onrender.com/", "intent://x#Intent;end", "file:///sdcard/a.html", "javascript:alert(1)", "data:text/html,x"))
             assertEquals(u, D.BLOCK, NavigationPolicy.forBookKaro(u, origin))
