@@ -590,3 +590,18 @@ pronunciation (`renderForSpeech`, client) → existing TTS. TEXT mode is untouch
   took 56–118 s (provider latency) → the visible gpt-oss-20b fallback served later turns. Review / correction /
   confirmation not reached live (fallback model's passenger collection) → covered by G2 only.
   REAL_DEVICE_VOICE_TEST = NOT_RUN.
+
+### P41-STT2 — tap-to-talk accuracy (after the user's device report: "ek passenger" → "16", "chaudah chhe sau barah" → "2,226")
+- **Capture (web = Android app):** `pcm-recorder.ts` now captures on the audio thread (AudioWorklet from a Blob URL;
+  ScriptProcessorNode fallback) — a busy WebView main thread made ScriptProcessorNode skip buffers (speech fragments).
+  Resampling to 16 kHz is band-limited (windowed sinc) instead of block averaging (aliasing). `durationMs` is measured
+  from the first real audio.
+- **Server (env-switchable, defaults = the P36-C lock so its tests stay unchanged):** `ELEVENLABS_STT_LANGUAGE=auto`
+  omits `language_code` (Scribe predicts it; Hinglish may come back in Roman); a transcript in another script
+  (Gurmukhi / Perso-Arabic) is re-transcribed ONCE with `hin`. `ELEVENLABS_STT_KEYTERMS=extended` sends 93 railway
+  keyterms (classes, quotas, train types, Punjab/Delhi + major stations; ≤ 100 → no 20 s minimum billing).
+  Rollback = remove the two env vars on Render (no code change).
+- **Observability:** STT route events now reach Render logs (the Fastify logger is off → `console.log`). New
+  metadata-only `voice_stt_audio` event: audioMs, wallMs, captureRatio (≪ 1 = dropped buffers), peak/RMS dBFS,
+  languageMode, keytermSet, detectedLanguage, languageRetry, attempts — never audio, transcript or session id.
+- Tests: `tests/unit/p41-stt2-server.test.ts` (9), `tests/unit/p41-stt2-capture.test.ts` (6, SIMULATED).

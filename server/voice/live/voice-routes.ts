@@ -15,7 +15,7 @@
  */
 import type { FastifyInstance } from 'fastify';
 import { VoiceProviderError, decodeAudioBase64, type OpenAICompatibleSTT, type OpenAICompatibleTTS } from './openai-compatible-voice';
-import { SttError, STT_HTTP_STATUS, batchSttConfigView, validateSttAudio, type ElevenLabsBatchSTT } from '../stt/elevenlabs-batch-stt';
+import { SttError, STT_HTTP_STATUS, batchSttConfigView, validateSttAudio, pcmSignalStats, type ElevenLabsBatchSTT } from '../stt/elevenlabs-batch-stt';
 
 export interface VoiceRouteDeps {
   stt: OpenAICompatibleSTT | null;
@@ -23,6 +23,12 @@ export interface VoiceRouteDeps {
   /** Latest validated assistant response for the session (speechText preferred) — null when none / unknown session. */
   latestSpeech(sessionId: string): { text: string; turnId?: string | null } | null;
   log?: (e: Record<string, unknown>) => void;
+  /**
+   * P41-STT2: separate metadata-only diagnostics sink (event `voice_stt_audio`): recorded audio vs wall time, signal
+   * level, language mode / detected language. Numbers + codes only — never audio, transcript, session id or key.
+   * Kept apart from `log`, whose P36-C key allowlist stays unchanged.
+   */
+  diag?: (e: Record<string, unknown>) => void;
   /** P36-C: ElevenLabs Scribe v2 batch STT (absent / unconfigured → STT_CONFIG_MISSING, browser fallback). */
   batchStt?: ElevenLabsBatchSTT | null;
   /** P36-C: the recording must belong to a session this server created (no session is created by STT). */
@@ -57,6 +63,14 @@ export function registerVoiceRoutes(server: FastifyInstance, deps: VoiceRouteDep
     let audio;
     try { audio = validateSttAudio({ audioBase64: b.audioBase64, mimeType: b.mimeType, durationMs: b.durationMs, sampleRate: b.sampleRate }); }
     catch (e) { return sttFail(reply, e instanceof SttError ? e.code : 'STT_AUDIO_INVALID', meta); }
+    // P41-STT2 observability (numbers only — never audio / transcript): recorded audio vs wall-clock time reveals
+    // dropped capture buffers on a busy device; the level reveals a muted / far-away mic.
+    const dmeta: Record<string, unknown> = { event: 'voice_stt_audio', voiceTurnId, languageMode: (stt as any).languageMode ?? 'hin', keytermSet: (stt as any).keytermSet ?? 'base' };
+    if (audio.fileFormat === 'pcm_s16le_16') {
+      const wallMs = typeof b.durationMs === 'number' && Number.isFinite(b.durationMs) && b.durationMs > 0 ? Math.round(b.durationMs) : null;
+      Object.assign(dmeta, { audioMs: audio.durationMs, wallMs, captureRatio: wallMs ? Math.round((audio.durationMs / wallMs) * 100) / 100 : null, ...pcmSignalStats(audio.bytes) });
+    }
+    const diag = (x: Record<string, unknown>) => { try { deps.diag?.({ ...dmeta, ...x }); } catch { /* observability never breaks a turn */ } };
     latestVoiceTurn.set(sessionId, voiceTurnId);
     // the client cancelled / went away → abort the provider call (no retry, no transcript)
     const ctl = new AbortController();
@@ -65,8 +79,9 @@ export function registerVoiceRoutes(server: FastifyInstance, deps: VoiceRouteDep
     const t0 = Date.now();
     try {
       const r = await stt.transcribe(audio, undefined, { signal: ctl.signal });
-      if (latestVoiceTurn.get(sessionId) !== voiceTurnId || ctl.signal.aborted) return sttFail(reply, 'STT_STALE_TURN', { ...meta, latencyMs: Date.now() - t0 });
+      if (latestVoiceTurn.get(sessionId) !== voiceTurnId || ctl.signal.aborted) { diag({ success: false, errorCategory: 'STT_STALE_TURN' }); return sttFail(reply, 'STT_STALE_TURN', { ...meta, latencyMs: Date.now() - t0 }); }
       deps.log?.({ event: 'voice_stt_batch', ...meta, latencyMs: r.latencyMs, success: true, transcriptChars: r.transcript.length });
+      diag({ success: true, latencyMs: r.latencyMs, transcriptChars: r.transcript.length, detectedLanguage: r.language ?? null, languageRetry: !!r.languageRetry, attempts: r.attempts });
       return reply.header('Cache-Control', 'no-store').send({
         sessionId, voiceTurnId, status: 'FINAL', transcript: r.transcript, language: r.language ?? 'hin',
         stt: { provider: 'elevenlabs', model: stt.model, mode: stt.mode, latencyMs: r.latencyMs }
@@ -74,6 +89,7 @@ export function registerVoiceRoutes(server: FastifyInstance, deps: VoiceRouteDep
     } catch (e) {
       const err = e instanceof SttError ? e : new SttError('STT_PROVIDER_UNAVAILABLE');
       const code = latestVoiceTurn.get(sessionId) !== voiceTurnId ? 'STT_STALE_TURN' : err.code;
+      diag({ success: false, errorCategory: code, latencyMs: Date.now() - t0 });
       return sttFail(reply, code, { ...meta, latencyMs: Date.now() - t0 });
     } finally {
       reply.raw.off('close', onClose);

@@ -421,7 +421,9 @@ registerVoiceRoutes(server, {
     const text = r ? String(r.speechText || r.text || '').trim() : '';
     return text ? { text, turnId: r.turnId ?? null } : null;
   },
-  log: (e) => server.log.info(e)
+  // P41-STT2: the Fastify logger is disabled → metadata-only voice events go to stdout (Render logs), like LLM events
+  log: (e) => console.log(JSON.stringify(e)),
+  diag: (e) => console.log(JSON.stringify(e))
 });
 
 server.get('/api/health', async (_, reply) => {
@@ -452,5 +454,5 @@ console.log(`Active LLM provider: ${llmSelection.info.providerId}${llmSelection.
 if (llmSelection.info.fallback) console.log(`LLM fallback model: ${llmSelection.info.fallback.model} (used only when the primary times out / errors; cooldown ${Math.round(llmSelection.info.fallback.cooldownMs / 1000)}s)`);
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Railway provider chain (RAILWAY_PROVIDER=live): ${liveProviderStatus().filter(p => p.priority).sort((a, b) => a.priority! - b.priority!).map(p => `${p.provider}${p.configured ? '' : '(no key)'}`).join(' → ')}`);
-console.log(`Voice STT (batch): elevenlabs/${batchStt.model} — ${batchStt.configured() ? 'configured' : 'not configured (browser speech fallback)'}`);
+console.log(`Voice STT (batch): elevenlabs/${batchStt.model} — ${batchStt.configured() ? 'configured' : 'not configured (browser speech fallback)'} · language=${batchStt.languageMode} · keyterms=${batchStt.keytermSet}`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

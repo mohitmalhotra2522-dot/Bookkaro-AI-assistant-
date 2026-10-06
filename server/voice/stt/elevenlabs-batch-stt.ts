@@ -31,6 +31,27 @@ export const ELEVENLABS_STT_MODEL = 'scribe_v2' as const;
 export const ELEVENLABS_STT_LANGUAGE = 'hin' as const;
 /** P36-B.6 condition B (railway set). Centralized here; the client can never add, remove or replace terms. */
 export const ELEVENLABS_STT_KEYTERMS: readonly string[] = Object.freeze(['AC', '3A', 'CC', 'SL', 'RAC', 'WL']);
+/**
+ * P41-STT2 — extended railway keyterm set (opt-in: ELEVENLABS_STT_KEYTERMS=extended). Superset of the P36-B.6 set;
+ * kept ≤ 100 terms (above 100 ElevenLabs bills a 20 s minimum per request). Centralized + frozen; never client-supplied.
+ */
+export const ELEVENLABS_STT_KEYTERMS_EXTENDED: readonly string[] = Object.freeze([
+  ...ELEVENLABS_STT_KEYTERMS,
+  '1A', '2A', '3E', 'EC', '2S', 'Sleeper', 'Chair Car', 'Executive Class', 'Third AC', 'Second AC', 'First AC',
+  'Tatkal', 'Premium Tatkal', 'General quota', 'PNR', 'fare', 'availability', 'passenger', 'passengers', 'live status',
+  'lower berth', 'middle berth', 'upper berth', 'side lower', 'side upper', 'window seat', 'veg', 'non veg',
+  'Shatabdi', 'Rajdhani', 'Vande Bharat', 'Duronto', 'Garib Rath', 'Jan Shatabdi', 'Intercity', 'Superfast',
+  'Tejas', 'Humsafar', 'Amrit Bharat',
+  'Amritsar', 'Ludhiana', 'Jalandhar', 'Jalandhar Cantt', 'Phagwara', 'Ambala', 'Ambala Cantt', 'Chandigarh',
+  'Pathankot', 'Jammu Tawi', 'Katra', 'Bathinda', 'Firozpur', 'Patiala', 'Rajpura', 'Sirhind', 'Kalka', 'Shimla',
+  'Delhi', 'New Delhi', 'Old Delhi', 'Hazrat Nizamuddin', 'Anand Vihar', 'Delhi Cantt', 'Mumbai Central',
+  'Bandra Terminus', 'Howrah', 'Sealdah', 'Chennai Central', 'Bengaluru', 'Secunderabad', 'Lucknow', 'Kanpur',
+  'Prayagraj', 'Varanasi', 'Patna', 'Jaipur', 'Ajmer', 'Agra Cantt', 'Bhopal', 'Indore', 'Ahmedabad', 'Pune',
+  'Haridwar', 'Dehradun', 'Rishikesh', 'Gorakhpur', 'Guwahati'
+]);
+export type SttLanguageMode = 'hin' | 'auto';
+export type SttKeytermSet = 'base' | 'extended';
+
 /** The complete, frozen request (besides `file` / `file_format`). */
 export const ELEVENLABS_STT_REQUEST = Object.freeze({
   endpoint: ELEVENLABS_STT_ENDPOINT,
@@ -157,6 +178,30 @@ export interface ElevenLabsSttConfig {
   sleep?: (ms: number) => Promise<void>;
   /** Explicit kill switch (ELEVENLABS_STT_ENABLED=false). */
   disabled?: boolean;
+  /** P41-STT2: 'hin' (default, P36-C lock) or 'auto' (Scribe detects the language; Hinglish may come back in Roman). */
+  languageMode?: SttLanguageMode;
+  /** P41-STT2: 'base' (default, P36-B.6 set) or 'extended' (railway words + common stations). */
+  keytermSet?: SttKeytermSet;
+}
+
+/**
+ * P41-STT2 — in auto mode Scribe can pick a neighbouring language and answer in another script (Gurmukhi for a
+ * Punjabi accent, Perso-Arabic for Urdu…). The agent understands Roman + Devanagari only → such a result is
+ * re-transcribed ONCE with language_code=hin. Pure script check (no keyword logic, no meaning).
+ */
+export function needsHindiRetry(transcript: string): boolean {
+  return /(?![\p{Script=Latin}\p{Script=Devanagari}])\p{L}/u.test(transcript);
+}
+
+/** P41-STT2 — signal level of a PCM16 recording (observability only: numbers, never audio). */
+export function pcmSignalStats(bytes: Uint8Array): { peakDbfs: number | null; rmsDbfs: number | null } {
+  const n = Math.floor(bytes.length / 2);
+  if (!n) return { peakDbfs: null, rmsDbfs: null };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, n * 2);
+  let peak = 0, sq = 0;
+  for (let i = 0; i < n; i++) { const v = view.getInt16(i * 2, true); const a = Math.abs(v); if (a > peak) peak = a; sq += v * v; }
+  const db = (x: number) => (x > 0 ? Math.round(20 * Math.log10(x / 32768) * 10) / 10 : -120);
+  return { peakDbfs: db(peak), rmsDbfs: db(Math.sqrt(sq / n)) };
 }
 
 export interface BatchTranscribeOptions {
@@ -164,7 +209,7 @@ export interface BatchTranscribeOptions {
   signal?: AbortSignal;
 }
 
-export interface BatchSttResult extends STTResult { attempts: number; latencyMs: number; audioDurationSecs: number | null }
+export interface BatchSttResult extends STTResult { attempts: number; latencyMs: number; audioDurationSecs: number | null; languageRetry?: boolean }
 
 export const MAX_STT_ATTEMPTS = 2;           // the first try + at most ONE retry on a transient failure
 export const DEFAULT_STT_TIMEOUT_MS = 8000;
@@ -177,18 +222,24 @@ export class ElevenLabsBatchSTT implements STTProvider {
   readonly mode = 'batch' as const;
   readonly keytermsEnabled = ELEVENLABS_STT_KEYTERMS.length > 0;
   readonly timeoutMs: number;
+  readonly languageMode: SttLanguageMode;
+  readonly keytermSet: SttKeytermSet;
   constructor(private readonly cfg: ElevenLabsSttConfig) {
     this.timeoutMs = clampTimeout(cfg.timeoutMs ?? DEFAULT_STT_TIMEOUT_MS);
+    this.languageMode = cfg.languageMode === 'auto' ? 'auto' : 'hin';
+    this.keytermSet = cfg.keytermSet === 'extended' ? 'extended' : 'base';
   }
 
   configured(): boolean { return !this.cfg.disabled && typeof this.cfg.apiKey === 'string' && this.cfg.apiKey.trim().length > 0; }
 
   /** Build the frozen multipart request. `language` / keyterms from callers are ignored by design (server lock). */
-  buildForm(audio: ValidatedAudio): FormData {
+  buildForm(audio: ValidatedAudio, forceHindi = false): FormData {
     const form = new FormData();
     form.append('model_id', ELEVENLABS_STT_REQUEST.model_id);
-    form.append('language_code', ELEVENLABS_STT_REQUEST.language_code);
-    for (const k of ELEVENLABS_STT_REQUEST.keyterms) form.append('keyterms', k);   // repeated fields (official SDK wire format)
+    // P41-STT2: 'auto' omits language_code (Scribe predicts it); the default stays the P36-C lock "hin"
+    if (this.languageMode === 'hin' || forceHindi) form.append('language_code', ELEVENLABS_STT_REQUEST.language_code);
+    const terms = this.keytermSet === 'extended' ? ELEVENLABS_STT_KEYTERMS_EXTENDED : ELEVENLABS_STT_REQUEST.keyterms;
+    for (const k of terms) form.append('keyterms', k);   // repeated fields (official SDK wire format)
     form.append('tag_audio_events', ELEVENLABS_STT_REQUEST.tag_audio_events);
     form.append('timestamps_granularity', ELEVENLABS_STT_REQUEST.timestamps_granularity);
     form.append('diarize', ELEVENLABS_STT_REQUEST.diarize);
@@ -209,6 +260,16 @@ export class ElevenLabsBatchSTT implements STTProvider {
       if (opts.signal?.aborted) throw new SttError('STT_STALE_TURN');
       try {
         const r = await this.once(audio, opts.signal);
+        // P41-STT2: auto mode answered in a script the agent cannot read → ONE re-transcription with "hin"
+        if (this.languageMode === 'auto' && needsHindiRetry(r.transcript) && !opts.signal?.aborted) {
+          try {
+            const h = await this.once(audio, opts.signal, true);
+            return { ...h, attempts: attempt + 1, latencyMs: Date.now() - t0, languageRetry: true };
+          } catch (e) {
+            if (opts.signal?.aborted) throw new SttError('STT_STALE_TURN');
+            /* keep the first (successful) result */
+          }
+        }
         return { ...r, attempts: attempt, latencyMs: Date.now() - t0 };
       } catch (e) {
         const err = e instanceof SttError ? e : new SttError('STT_PROVIDER_UNAVAILABLE');
@@ -221,7 +282,7 @@ export class ElevenLabsBatchSTT implements STTProvider {
     throw last;
   }
 
-  private async once(audio: ValidatedAudio, outer?: AbortSignal): Promise<Omit<BatchSttResult, 'attempts' | 'latencyMs'>> {
+  private async once(audio: ValidatedAudio, outer?: AbortSignal, forceHindi = false): Promise<Omit<BatchSttResult, 'attempts' | 'latencyMs'>> {
     const ctl = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, this.timeoutMs);
@@ -230,7 +291,7 @@ export class ElevenLabsBatchSTT implements STTProvider {
     let res: Response;
     try {
       res = await (this.cfg.fetchImpl || fetch)(ELEVENLABS_STT_ENDPOINT, {
-        method: 'POST', signal: ctl.signal, headers: { 'xi-api-key': String(this.cfg.apiKey) }, body: this.buildForm(audio)
+        method: 'POST', signal: ctl.signal, headers: { 'xi-api-key': String(this.cfg.apiKey) }, body: this.buildForm(audio, forceHindi)
       });
     } catch {
       // never surface the raw error (it may echo request details)
@@ -293,6 +354,8 @@ export function createElevenLabsBatchSTT(env: Env = process.env, fetchImpl?: typ
     apiKey: env.ELEVENLABS_API_KEY,
     timeoutMs: Number.isFinite(n) && n > 0 ? n : DEFAULT_STT_TIMEOUT_MS,
     disabled: String(env.ELEVENLABS_STT_ENABLED || '').toLowerCase() === 'false',
+    languageMode: String(env.ELEVENLABS_STT_LANGUAGE || '').trim().toLowerCase() === 'auto' ? 'auto' : 'hin',
+    keytermSet: String(env.ELEVENLABS_STT_KEYTERMS || '').trim().toLowerCase() === 'extended' ? 'extended' : 'base',
     fetchImpl
   });
 }
