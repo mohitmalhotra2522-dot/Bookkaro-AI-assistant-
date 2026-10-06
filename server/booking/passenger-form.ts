@@ -129,6 +129,12 @@ export function validateForm(body: any, s: BookingSession, facilities: TrainFaci
     } else if (foodOffered) fieldErrors.push({ passengerIndex: idx, field: 'foodPreference', message: `${label}: khane ki choice chuniye (Veg / Non-Veg / No Food).` });
     out.push(rec);
   });
+  // v0.39.6: no duplicate passenger rows (same name + age + gender)
+  out.forEach((r: any, i: number) => {
+    if (!r.name || r.age === undefined || !r.gender) return;
+    const j = out.findIndex((o: any, k: number) => k < i && o.name && o.name.toLowerCase() === r.name.toLowerCase() && o.age === r.age && o.gender === r.gender);
+    if (j >= 0) fieldErrors.push({ passengerIndex: i + 1, field: 'name', message: `Passenger ${i + 1}: Passenger ${j + 1} jaisi hi details hain (same naam, umar, gender) — duplicate passenger nahi ho sakta.` });
+  });
   if (fieldErrors.length) return { ok: false, error: { status: 400, code: 'INVALID_PASSENGER_DETAILS', message: 'Kuch passenger details theek nahi hain.', fieldErrors } };
   return { ok: true, passengers: out };
 }

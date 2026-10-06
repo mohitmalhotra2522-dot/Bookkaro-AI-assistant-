@@ -419,7 +419,13 @@
     var b = buttons(doc);
     var pick = function (re) { return b.filter(function (x) { return re.test(controlText(x)); })[0] || null; };
     if (page === 'PASSENGER' || page === 'REVIEW_CAPTCHA') return pick(/^continue$/i);
-    if (page === 'HOME_SEARCH') return pick(/^(search|find trains|खोजें)$/i);   // highlighted only — the user taps Search
+    if (page === 'HOME_SEARCH') {
+      // v0.39.6: IRCTC's own label is lang.search = "Search Trains" (labels_en.json); Hindi "… खोजें"
+      var sb = pick(/^(search|search trains?|find trains?|खोजें|ट्रेन खोजें|ट्रेनें खोजें)$/i);
+      if (sb) return sb;
+      var jf = all(doc, 'app-jp-input button.search_btn, app-jp-input button.train_Search, form button.search_btn, form button.train_Search').filter(function (x) { return isVisible(x) && /search|खोज/i.test(controlText(x)) && !/modify|संशोधित|बदल/i.test(controlText(x)); });
+      return jf[0] || null;
+    }
     if (page === 'PAYMENT') return pick(/pay\s*&\s*book|make payment|^pay$/i);
     if (page === 'OTP') return pick(/^(submit|verify|confirm)$/i);
     if (page === 'TRAIN_LIST' && snapshot) { var blk = trainBlock(doc, snapshot.train.number); return blk ? blk.book : null; }
@@ -626,7 +632,14 @@
     state.auto = state.auto || { search: 0, classTap: {}, dateTap: {}, book: 0 };
     var A = state.auto;
     if (page === 'HOME_SEARCH') {
-      if (rep.stopped || (rep.errors && rep.errors.length) || rep.overrides.length) { out.stopped = 'JOURNEY_NOT_VERIFIED'; return out; }
+      // v0.39.6: only the journey itself gates Search (quota keeps IRCTC's GENERAL default when its dropdown could not be set)
+      var KEY = ['from', 'to', 'date', 'travelClass'];
+      var bad = (rep.errors || []).filter(function (e) { return KEY.indexOf(e.field) >= 0; });
+      if ((rep.errors || []).some(function (e) { return e.field === 'quota'; })) {
+        var qEl = findChoice(doc, /quota/);
+        if (!qEl || lower(currentChoice(qEl).text) !== lower(snapshot.quota.label)) bad.push({ field: 'quota' });   // never search with another quota
+      }
+      if (rep.stopped || bad.length || rep.overrides.length) { out.stopped = 'JOURNEY_NOT_VERIFIED'; return out; }
       if (['from', 'to', 'date', 'travelClass'].some(function (f) { return rep.filled.indexOf(f) < 0; })) { out.stopped = 'JOURNEY_NOT_VERIFIED'; return out; }
       if (A.search >= 1) { out.stopped = 'SEARCH_ALREADY_TAPPED'; return out; }
       var sb = findFinalControl(doc, 'HOME_SEARCH');

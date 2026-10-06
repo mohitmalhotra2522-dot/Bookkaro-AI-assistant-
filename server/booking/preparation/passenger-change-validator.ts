@@ -48,8 +48,26 @@ export class PassengerChangeValidator {
     if (v.errors.length) {
       return { ok: false, code: 'INVALID_PASSENGER_VALUE', passengerIndex: idx, fields: v.errors.map(e => e.field), message: v.errors[0].message };
     }
+    const dup = duplicateOfOther(s, at.passengerId, v.valid);
+    if (dup) {
+      return { ok: false, code: 'INVALID_PASSENGER_VALUE', passengerIndex: idx, fields: ['name'],
+        message: `Passenger ${idx} ki details Passenger ${dup} jaisi hi ho jaatin (same naam, umar aur gender) — duplicate passenger nahi banaya. Agar yeh alag vyakti hain to inka sahi naam / umar bataiye.` };
+    }
     return { ok: true, passengerIndex: idx, passengerId: at.passengerId, changes: v.valid };
   }
 }
 
 export const passengerChangeValidator = new PassengerChangeValidator();
+
+const normName = (n: unknown) => String(n ?? '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+/** v0.39.6: 1-based number of ANOTHER passenger that this one would exactly duplicate (name + age + gender) after the
+ *  change, else null. Partial records never count as duplicates. */
+export function duplicateOfOther(s: BookingSession, passengerId: string, changes: Record<string, any>): number | null {
+  const list = s.passengers || [];
+  const cur: any = list.find(p => p.id === passengerId) || {};
+  const m = { name: changes.name ?? cur.name, age: changes.age ?? cur.age, gender: changes.gender ?? cur.gender };
+  if (!m.name || m.age === undefined || m.age === null || !m.gender) return null;
+  const j = list.findIndex((o: any) => o.id !== passengerId && o.name && normName(o.name) === normName(m.name) && Number(o.age) === Number(m.age) && o.gender === m.gender);
+  return j >= 0 ? j + 1 : null;
+}

@@ -570,6 +570,17 @@ export class BookingPreparationService {
         const parts: string[] = [];
         if (typeof before.fare === 'number' && typeof after.fare === 'number' && before.fare !== after.fare) { changed.push('fare'); parts.push(`Fare ₹${before.fare} se ₹${after.fare} ho gaya hai.`); }
         if (before.avail && after.avail && before.avail !== after.avail) { changed.push('availability'); parts.push(`Availability ${before.avail} se ${after.avail} ho gayi hai.`); }
+        // Only the "checked at" timestamps moved (same journey / train / class / passengers / fare / availability status the
+        // user just confirmed) → keep the confirmed review (same version), refresh its data in place, continue — no 2nd confirm.
+        if (!changed.length && sameExceptCheckTimes(rv.fingerprint, reviewFingerprint(S()))) {
+          const fr = this.evaluate(sessionId, ctx);
+          try {
+            const rebuilt = reviewBuilder.build(S(), { reviewVersion: rv.reviewVersion, availabilityFresh: fr.availability === 'FRESH', fareFresh: fr.fare === 'FRESH', now: this.clock() });
+            rv.data = rebuilt.data; rv.snapshot = rebuilt.snapshot;
+          } catch { /* the confirmed values are unchanged; keep the existing review data */ }
+          rv.fingerprint = reviewFingerprint(S());
+          this.state.bump(sessionId);
+        } else {
         this.confirmations.setStatus(S(), 'INVALIDATED', 'RAILWAY_DATA_CHANGED', this.clock());
         rv.valid = false; rv.invalidatedReason = 'REFRESHED_AT_CONFIRMATION';
         S().confirmedReviewVersion = undefined;
@@ -584,6 +595,7 @@ export class BookingPreparationService {
         this.createReview(sessionId, ctx, r, out);
         this.enterAwaiting(sessionId, ctx);
         return out;
+        }
       }
     }
     r = this.evaluate(sessionId, ctx);
@@ -773,4 +785,14 @@ export function dependencyFailureReason(errorCode: string | null | undefined): s
     case 'PROVIDER_FAILURE': return 'railway provider abhi uplabdh nahi hai';
     default: return 'result verify nahi ho paaya';
   }
+}
+
+/** Review fingerprints equal apart from the availability / fare "retrievedAt" check times (review-builder reviewFingerprint layout:
+ *  [... , [availStatus, retrievedAt] | null, [fareTotal, paxCount, retrievedAt] | null]). Unparseable → not equal. */
+export function sameExceptCheckTimes(a: string, b: string): boolean {
+  try {
+    const strip = (fp: string) => { const x = JSON.parse(fp); if (!Array.isArray(x) || x.length < 9) throw new Error('fp');
+      x[7] = Array.isArray(x[7]) ? x[7].slice(0, 1) : x[7]; x[8] = Array.isArray(x[8]) ? x[8].slice(0, 2) : x[8]; return JSON.stringify(x); };
+    return strip(a) === strip(b);
+  } catch { return false; }
 }

@@ -92,6 +92,18 @@ export function bookingPreparationView(s: BookingSession) {
   // P39.2: optional details this train + class actually offer and the user has not answered yet (ask once)
   const alsoAsk: string[] = [];
   for (let k = 0; k < count; k++) for (const f of optionalToAsk(s, (s.passengers || [])[k])) alsoAsk.push(`passenger${k + 1}.${f}`);
+  // v0.39.6: the next single passenger detail still open, in the order the user asked for (name → age → berth → gender →
+  // meal; berth / meal only when this train + class offer them) — passenger 1 is finished before passenger 2. A fact
+  // derived from the session; the LLM writes the question.
+  let nextToAsk: { passenger: number; field: string } | null = null;
+  for (let k = 0; k < count && !nextToAsk; k++) {
+    const p: any = (s.passengers || [])[k] || {};
+    const opt = optionalToAsk(s, (s.passengers || [])[k]);
+    const isMissing = (f: string) => p[f] === undefined || p[f] === null || p[f] === '';
+    const order = ['name', 'age', ...(opt.includes('berthPreference') ? ['berthPreference'] : []), 'gender', ...(opt.includes('foodPreference') ? ['foodPreference'] : [])];
+    const f = order.find(x => (x === 'berthPreference' || x === 'foodPreference') ? true : isMissing(x));
+    if (f) nextToAsk = { passenger: k + 1, field: f };
+  }
   const missing: string[] = [];
   if (!s.origin) missing.push('origin');
   if (!s.destination) missing.push('destination');
@@ -108,6 +120,7 @@ export function bookingPreparationView(s: BookingSession) {
     // P39.2: berth choices of the selected class + meal status from provider data (NOT_CHECKED → GET_TRAIN_INFO)
     ...((): { passengerOptions?: ReturnType<typeof passengerOptionsView> } => { const o = passengerOptionsView(s); return o ? { passengerOptions: o } : {}; })(),
     ...(alsoAsk.length ? { alsoAsk } : {}),
+    ...(nextToAsk ? { nextToAsk } : {}),
     // matching provider result for the CURRENT train/class/date/route (not a value — never reuse an old fare/availability)
     availabilityCheck: DEP_VIEW[availabilityStatus(s).status], fareCheck: DEP_VIEW[fareStatus(s).status],
     review, confirmation: confirmationStatusOf(s), handoff: s.handoffSession?.status ?? s.handoff?.status ?? null

@@ -459,3 +459,23 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
   Berth/food labels = exact IRCTC texts.
 - Tests: new `tests/unit/p39-5-irctc-real-dom.test.ts` (13, fixtures copied from IRCTC templates; old core fails [1]–[5]).
   G3 (real Chromium + v0.39.5): `/home/user/p39_verify/e2e/e2e_verify_v0395.py` 23/23.
+- **v0.39.6 (3 user-reported issues, extension 0.39.6)** — smallest additive fixes, diagnosed first.
+  1. *Search Trains not auto-tapped*: IRCTC's own label is `lang.search = "Search Trains"` (labels_en.json); the
+     extension's HOME_SEARCH matcher required exactly "Search" (MockIRCTC used "Search", so tests passed while the real
+     site failed). `findFinalControl` now matches search / search trains / find trains / खोजें / ट्रेन खोजें, else the
+     journey form's `button.search_btn|train_Search` whose text says search (never "Modify Search"). autoAdvance on
+     HOME_SEARCH is gated by From / To / Date / Class errors; a quota error only blocks when the IRCTC quota label is not
+     the snapshot quota (never searches with another quota).
+  2. *Confirm asked twice*: `reviewFingerprint` carries availability / fare `retrievedAt`; slow LLM turns make them stale
+     (2 / 10 min) before "haan", the confirm-time refresh always changed the fingerprint → review v2 + second confirm.
+     Now, in that refresh branch, when no value changed and the fingerprints differ ONLY in the check times
+     (`sameExceptCheckTimes`), the confirmed review is rebuilt in place (same reviewVersion, fresh data / snapshot,
+     fingerprint carried forward) and the flow continues to confirmation → handoff. Any real change still re-asks
+     (p11 G3 [14]/[15] unchanged).
+  3. *Passenger details step by step*: context `bookingPreparation.nextToAsk = { passenger, field }` (state fact; order
+     name → age → berth (if class offers) → gender → meal (if catering OFFERED); passenger 1 finished before 2). Prompt:
+     ONE detail per reply from nextToAsk, answer into that passengerIndex, volunteered details still accepted. Duplicate
+     guard: chat proposal / passenger form rejecting a passenger identical (name + age + gender) to another
+     (INVALID_PASSENGER_VALUE / field error; no values in messages).
+  Tests: `tests/unit/p39-6-fixes.test.ts` (9), `tests/integration/p39-6-confirm-once.test.ts` (3) — all fail on the
+  old code. Focused 21 files 318/318, tsc 0. G5 still USER VERIFICATION REQUIRED.
