@@ -60,6 +60,7 @@ import type { ExecutionConfig } from '../../booking/execution/execution-config';
 import type { TurnLoopObserver } from '../runtime/llm-tool-runtime';
 import { ConversationContextBuilder, ToolResultContextStore } from '../turn-engine/conversation-context-builder';
 import { pendingQuestionCode } from '../turn-engine/pending-question';
+import { nextPassengerDetail } from '../../booking/passenger-options';
 import { detectBareDay, resolveMonthAnswer } from '../turn-engine/ambiguous-date-clarifier';
 import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { syncPreparationState, recordDependencyOutcome, bookingPreparationSummary } from '../../booking/preparation/booking-preparation';
@@ -640,6 +641,15 @@ export class ConversationAgentOrchestrator {
     };
     const parts: string[] = [];
     const q = questionFor(s.pendingInteraction, s, mode);
+    // v0.39.6: step-by-step passenger details — the agent's reply already asks its next question (from
+    // bookingPreparation.nextToAsk) → the backend's name / age / gender question is not appended as a second one when
+    //   - the agent really stored a passenger detail this turn (nothing stored → the backend question still follows), or
+    //   - the next detail is a berth / meal choice (the backend question would be a later step in the user's order).
+    // Replies without a question of their own (deterministic / mock paths) keep the backend question as before.
+    const nx = s.pendingInteraction?.type === 'PASSENGER_DETAILS_REQUIRED' ? nextPassengerDetail(s) : null;
+    const paxStored = rt.applyOutcomes.some(o => (o.applied || []).includes('PASSENGER_DETAILS_UPDATED'));
+    const optionalNext = !!nx && (nx.field === 'berthPreference' || nx.field === 'foodPreference');
+    let llmAsked = false;
     if (blockErr) {
       parts.push(...preNotes);
       parts.push(blockErr.message);
@@ -685,7 +695,7 @@ export class ConversationAgentOrchestrator {
       const stateGuard = guardBookingStateClaims(rt.finalMessage, s);
       entityRejections.push(...stateGuard.removed.map(r => ({ sentence: r.sentence, reason: `BOOKING_STATE_CLAIM:${r.reason}`, binding: 'NONE' })));
       const guarded = stateGuard.text ? factCheck(lifecycleClaimGuard(factGuard(stateGuard.text, rt.steps, mode, s, recordRejections), prepChange)) : '';
-      if (guarded) parts.push(guarded);
+      if (guarded) { parts.push(guarded); llmAsked = /\?/.test(guarded); }
       // (a removed booking-state claim is not a failed fact — the backend's own state message follows)
       else if (rejectedClaims.length || entityRejections.some(r => !String(r.reason).startsWith('BOOKING_STATE_CLAIM:'))) parts.push(honestFailureFallback(rt.steps));
     }
@@ -708,7 +718,7 @@ export class ConversationAgentOrchestrator {
       if (!llmLost && rt.error && !parts.join(' ').includes(rt.error.message)) parts.push(rt.error.message);
     }
     const joined = parts.join(' ');
-    if (q && !joined.includes(q)) parts.push(q);
+    if (q && !joined.includes(q) && !(nx && llmAsked && (paxStored || optionalNext))) parts.push(q);
     if (!parts.length) parts.push((rt.finalDecision.clarification && factCheck((() => { const g = guardFareClaims(rt.finalDecision.clarification, s, rt.steps); recordRejections(g.rejected); return g.kept.join(' '); })())) || 'Main train search, selection, availability aur fare mein madad kar sakta hoon.');
     return joinParts(parts);
   }

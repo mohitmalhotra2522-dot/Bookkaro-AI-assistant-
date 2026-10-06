@@ -13,7 +13,7 @@
  * is ALSO built from BookingSession — an LLM-generated summary can never
  * replace BookingSession.
  */
-import { optionalToAsk, passengerOptionsView } from '../../booking/passenger-options';
+import { nextPassengerDetail, optionalToAsk, passengerOptionsView } from '../../booking/passenger-options';
 import { referenceContextView } from './reference-context';
 import type { BookingSession } from '@shared/entities';
 import { currentResults } from './train-reference-resolver';
@@ -95,15 +95,7 @@ export function bookingPreparationView(s: BookingSession) {
   // v0.39.6: the next single passenger detail still open, in the order the user asked for (name → age → berth → gender →
   // meal; berth / meal only when this train + class offer them) — passenger 1 is finished before passenger 2. A fact
   // derived from the session; the LLM writes the question.
-  let nextToAsk: { passenger: number; field: string } | null = null;
-  for (let k = 0; k < count && !nextToAsk; k++) {
-    const p: any = (s.passengers || [])[k] || {};
-    const opt = optionalToAsk(s, (s.passengers || [])[k]);
-    const isMissing = (f: string) => p[f] === undefined || p[f] === null || p[f] === '';
-    const order = ['name', 'age', ...(opt.includes('berthPreference') ? ['berthPreference'] : []), 'gender', ...(opt.includes('foodPreference') ? ['foodPreference'] : [])];
-    const f = order.find(x => (x === 'berthPreference' || x === 'foodPreference') ? true : isMissing(x));
-    if (f) nextToAsk = { passenger: k + 1, field: f };
-  }
+  const nextToAsk = nextPassengerDetail(s);
   const missing: string[] = [];
   if (!s.origin) missing.push('origin');
   if (!s.destination) missing.push('destination');

@@ -478,4 +478,13 @@ It is still not called production-ready. Pending: repeat runs, human sentence re
      guard: chat proposal / passenger form rejecting a passenger identical (name + age + gender) to another
      (INVALID_PASSENGER_VALUE / field error; no values in messages).
   Tests: `tests/unit/p39-6-fixes.test.ts` (9), `tests/integration/p39-6-confirm-once.test.ts` (3) — all fail on the
-  old code. Focused 21 files 318/318, tsc 0. G5 still USER VERIFICATION REQUIRED.
+  old code. Focused 21 files 318/318, tsc 0. G5 still USER VERIFICATION REQUIRED. (commit a44fb90)
+  Follow-up (live Muse check after a44fb90): Muse answered "31" with "age 31 noted" but NO update_booking_session (nothing
+  stored; the backend's honest "… ki umar kitni hai?" was appended), and after a stored name it asked the age while
+  the backend appended its own age question too (doubled). Fixes: prompt + passengerChanges tool description — a bare
+  answer to nextToAsk MUST be stored via update_booking_session before replying; shared `nextPassengerDetail()`
+  (server/booking/passenger-options.ts) used by context + compose; compose() no longer appends the backend
+  name/age/gender question when the agent's own reply asks a question AND (a passenger detail was really stored this
+  turn OR nextToAsk is berth / meal). Replies without their own question (mock / deterministic) keep the backend
+  question (p9 unchanged). Test `tests/integration/p39-6-passenger-steps.test.ts` (native fake-OpenAI stack; fails on
+  the old orchestrator with the exact doubled question). Focused 26 files 371/372 (p23 [8] pre-existing, fails on HEAD).

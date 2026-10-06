@@ -65,6 +65,24 @@ export function optionalToAsk(s: BookingSession, p: Partial<Passenger> | undefin
 }
 
 /**
+ * v0.39.6 — the next single passenger detail still open, in the order the user asked for: name → age → berth (only when
+ * the class offers berths) → gender → meal (only when catering is OFFERED); passenger 1 is finished before passenger 2.
+ * A fact derived from the session (the LLM writes the question). null when nothing is open.
+ */
+export function nextPassengerDetail(s: BookingSession): { passenger: number; field: 'name' | 'age' | 'berthPreference' | 'gender' | 'foodPreference' } | null {
+  const count = s.passengersCount || 0;
+  for (let k = 0; k < count; k++) {
+    const p: any = (s.passengers || [])[k] || {};
+    const opt = optionalToAsk(s, (s.passengers || [])[k]);
+    const isMissing = (f: string) => p[f] === undefined || p[f] === null || p[f] === '';
+    const order = ['name', 'age', ...(opt.includes('berthPreference') ? ['berthPreference'] : []), 'gender', ...(opt.includes('foodPreference') ? ['foodPreference'] : [])] as const;
+    const f = order.find(x => (x === 'berthPreference' || x === 'foodPreference') ? true : isMissing(x));
+    if (f) return { passenger: k + 1, field: f as any };
+  }
+  return null;
+}
+
+/**
  * Session-aware gate for chat-proposed berth / meal values (already enum-validated by PassengerValidator).
  * Returns the value to store, or null + a user-facing reason. NO_PREFERENCE on a class without berth choice is
  * dropped silently (nothing to choose), exactly like the form.

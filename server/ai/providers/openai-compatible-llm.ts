@@ -300,7 +300,7 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
         preferredTimeRaw: STR('e.g. subah / morning / raat'), preferredClassRaw: STR('e.g. AC / sleeper / CC'),
         trainRef, classRaw: STR('class as said, e.g. "CC", "AC", "sleeper"'),
         passengersCountRaw: STR('passenger count as said'), passengersDelta: { type: 'number' },
-        passengerChanges: { type: 'array', items: { type: 'object', properties: { passengerIndex: { type: 'number' }, changes: { type: 'object', properties: {
+        passengerChanges: { type: 'array', description: 'EVERY passenger detail the user gave this turn — incl. a bare answer ("31", "male", "lower") to context.bookingPreparation.nextToAsk, with that passengerIndex. Nothing is stored without this.', items: { type: 'object', properties: { passengerIndex: { type: 'number' }, changes: { type: 'object', properties: {
           name: { type: 'string' }, age: { type: 'number' }, gender: { type: 'string' },
           berthPreference: { type: 'string', enum: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER', 'SIDE_MIDDLE', 'WINDOW', 'CABIN', 'COUPE'], description: 'only a choice listed in context.bookingPreparation.passengerOptions.berth.options' },
           foodPreference: { type: 'string', enum: ['VEG', 'NON_VEG', 'NO_FOOD'], description: 'only when context.bookingPreparation.passengerOptions.food.status is OFFERED' } } } } } },
