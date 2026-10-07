@@ -34,6 +34,7 @@ import type { ToolExecutionPlanNode } from '@shared/turn-engine';
 import { DEFAULT_TOOL_RETRY_POLICY, shouldRetry, type ToolRetryPolicy } from './tool-retry-policy';
 import { buildToolExecutionPlan, unsatisfiedDependency } from './tool-execution-plan';
 import { inProviderScope, providerToolCatalog } from '../tools/provider-tools';
+import { fallbackProviderFor, runWithProviderFallback, isFallbackEligible } from '../../railway/providers/provider-fallback';
 
 /** Prompt 18: lifecycle observer (turn engine streaming events). Never receives raw arguments. */
 export interface ToolObserver {
@@ -117,6 +118,8 @@ export interface ExecutedCall {
   /** Prompt 35: failover chain behind this answer (provider layer; never a different tool, never a cache). */
   providerAttempts?: ToolExecutionRecord['providerAttempts'];
   fallbackUsed?: boolean;
+  /** P42.9: primary provider error that triggered the backend fallback (RATE_LIMITED / TIMEOUT / PROVIDER_UNAVAILABLE) */
+  fallbackReason?: string;
   freshness?: ToolExecutionRecord['freshness'];
   latencyMs: number;
   timedOut: boolean;
@@ -340,15 +343,18 @@ export class ToolTurn {
     let timer: any;
     try {
       raw = await Promise.race([
-        // P37: executed on the LLM-selected provider connector ONLY (no failover chain, no hidden switch)
-        inProviderScope(p.tc?.provider, () => executor.execute(p.vt, guard)),
+        // P37: executed on the LLM-selected provider connector. P42.9: when that connector is the configured PRIMARY and
+        // it fails with an ELIGIBLE fault, the backend runs the SAME request once on the configured fallback provider
+        // (visible: provider / fallbackUsed / fallbackReason / providerAttempts) — Muse never picks the fallback.
+        this.executeOnProvider(p, guard, executor, rec, t0),
         // P42: the composite Same Train Alternative search is bounded by its OWN engine budget (total + one call + margin)
         new Promise(res => { timer = setTimeout(() => { timedOut = true; res({ __timeout: true }); }, p.vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? sameTrainToolTimeoutMs() : this.timeoutMs); })
       ]);
     } catch (e) { thrown = e; } finally { clearTimeout(timer); }
     const latencyMs = Date.now() - t0;
     const provider = raw?.meta?.providerId || executor.providerLabel || null;
-    rec.provider = p.tc?.provider || provider; rec.latencyMs = latencyMs; rec.completedAt = new Date().toISOString();
+    rec.provider = (raw?.meta?.fallbackUsed && raw?.meta?.providerId) || p.tc?.provider || provider; rec.latencyMs = latencyMs; rec.completedAt = new Date().toISOString();
+    if (raw?.meta?.fallbackUsed) { rec.fallbackUsed = true; rec.fallbackReason = String(raw.meta.fallbackReason || '') || null; }
 
     const done = (status: ToolExecutionStatus, x: Partial<ExecutedCall>): ExecutedCall => {
       rec.status = status;
@@ -365,7 +371,7 @@ export class ToolTurn {
       const out: ExecutedCall = {
         prepared: p, record: rec, success: !!x.success, empty: !!x.empty, data: x.data, error: x.error, provider,
         latencyMs, timedOut, stale: !!x.stale, result: undefined as any, dataSource: dataSourceOf(raw?.meta),
-        ...(rec.providerAttempts ? { providerAttempts: rec.providerAttempts, fallbackUsed: !!rec.fallbackUsed } : {}), ...(rec.freshness ? { freshness: rec.freshness } : {})
+        ...(rec.providerAttempts ? { providerAttempts: rec.providerAttempts, fallbackUsed: !!rec.fallbackUsed } : {}), ...(rec.fallbackReason ? { fallbackReason: rec.fallbackReason } : {}), ...(rec.freshness ? { freshness: rec.freshness } : {})
       };
       out.result = this.toLLMResult(rec, status, {
         result: x.success ? llmView(p.vt.name, x.data) : undefined, empty: x.empty || undefined,
@@ -529,6 +535,32 @@ export class ToolTurn {
     // Prompt 25: a loop of INVALID calls ends with a clarification for the user (there is no verified result to keep)
     if (n >= this.loopThreshold) return this.reject(tc, this.newRecord(tc), 'TOOL_LOOP_DETECTED', this.invalidSigs.get(sig)?.clarify || SAFE_ERROR_MESSAGE.TOOL_LOOP_DETECTED, true) as any;
     return null;
+  }
+
+  /**
+   * P42.9: execute on the LLM-named connector; RailCore (configured primary) → RailRadar (configured fallback) ONLY for an
+   * eligible fault (RATE_LIMITED / PROVIDER_UNAVAILABLE / TIMEOUT), never for INVALID_* / NOT_FOUND / user-input errors,
+   * never when the primary succeeded. Sequential: the primary call has completed before the fallback starts, so a late
+   * primary answer can never overwrite the fallback answer. Same tool, same validated arguments, one attempt each.
+   */
+  private async executeOnProvider(p: Extract<PreparedCall, { ok: true }>, guard: { canApply: () => boolean }, executor: RailwayToolExecutor, rec: ToolExecutionRecord, t0: number): Promise<any> {
+    const primary = p.tc?.provider;
+    if (!primary || !fallbackProviderFor(primary, p.vt.name)) return inProviderScope(primary, () => executor.execute(p.vt, guard));
+    const o = await runWithProviderFallback<any>({
+      primary, capability: p.vt.name,
+      call: prov => inProviderScope(prov, () => executor.execute(p.vt, guard)).catch(() => ({ ok: false, error: { code: 'PROVIDER_UNAVAILABLE' } })),
+      errorCodeOf: r => (r && typeof r === 'object' && 'ok' in r && !r.ok ? String(r.error?.code || 'TOOL_FAILED') : null),
+      rateLimitLocalOf: r => r?.meta?.rateLimit?.local,
+      // only while this call is still current and the runtime budget leaves room for one more bounded attempt
+      canFallback: () => guard.canApply() && this.timeoutMs - (Date.now() - t0) > Math.min(2500, this.timeoutMs / 2),
+      log: (event, fields) => { try { console.info(JSON.stringify({ event, ...fields })); } catch { /* never throws */ } },
+      context: { tool: p.vt.name, toolExecutionId: rec.toolExecutionId, requestId: rec.requestId }
+    });
+    if (!o.fallbackUsed) return o.result;
+    const r = o.result && typeof o.result === 'object' ? o.result : { ok: false, error: { code: 'TOOL_FAILED' } };
+    const outcomeOf = (a: { status: string; errorCode: string | null }) => (a.status === 'SUCCESS' ? 'DATA' : a.errorCode === 'TIMEOUT' || a.errorCode === 'TOOL_TIMEOUT' || a.errorCode === 'PROVIDER_TIMEOUT' ? 'TIMEOUT' : 'PROVIDER_FAILURE');
+    return { ...r, meta: { ...(r.meta || {}), providerId: o.served, fallbackUsed: true, fallbackReason: o.fallbackReason,
+      attempts: o.attempts.map(a => ({ provider: a.provider, attempt: a.attempt, outcome: outcomeOf(a), errorCode: a.errorCode, httpStatus: null, latencyMs: a.latencyMs, retryable: isFallbackEligible(a.errorCode) })) } };
   }
 
   toLLMResult(rec: ToolExecutionRecord, status: ToolExecutionStatus, x: { result?: unknown; empty?: boolean; error?: LLMToolResult['error'] }): LLMToolResult {

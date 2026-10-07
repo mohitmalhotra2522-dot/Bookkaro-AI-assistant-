@@ -25,6 +25,7 @@ import { detectLanguageStyle, type LanguageStyle } from '@shared/voice/language-
 import { railwayResponseGrounding } from '../tool-runtime/railway-response-grounding';
 import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
+import { judgeDateBoundClaim, dateSourcesOf, dateFreshFallbackText, isDateBoundRejection, dateBoundKind } from './claim-date-freshness';
 import {
   buildFactIndex, judgeTimes, judgeComparison, repairClassList, judgeClassList, judgeFareScope,
   classifyPaxCount, isSessionish, derivedTrainCounts, isGeneralKnowledgeClaim, classifyClaim, type ClaimProvenance, type TimeVerdict, type FareFact, type PaxClass
@@ -413,6 +414,8 @@ export class NaturalResponseComposer {
 
     // ---- the authoritative fact base for grounding ----
     const views = toolViews(i.steps);
+    // P42.9 (D2): canonical dates of every date-bound result this reply may lean on
+    const dateSrc = dateSourcesOf(s, views);
     // Prompt 14/22: PNR / running status / cancelled trains → authoritative rendering of the provider result only
     if (views.some(v => LIVE_TOOLS.has(String(v.toolName)))) return fallback('LIVE_STATUS_AUTHORITATIVE');
     const nums = new Set<number>();
@@ -573,6 +576,10 @@ export class NaturalResponseComposer {
       for (const g of hits.time?.general || []) probe = probe.split(g).join('—');
       const g = railwayResponseGrounding.validate(probe, { session: s, steps: i.steps, records: (i.records || []) as any });
       if (g.rejected.length) return `GROUNDING:${g.rejected[0]}`;
+      // P42.9 (D2): LAST gate, in EVERY turn (a "general" turn never exempts a dated railway fact): a train count /
+      // availability / fare / status claim must be about the canonical date of the result behind it (count vs the result
+      // set's own date; an unstated date = the user's new date). Runs after the legacy checks so their codes keep priority.
+      { const db = judgeDateBoundClaim(t, dateSrc, i.userText); if (db) return db.reason; }
       return null;
     };
     const provenance: ClaimProvenance[] = [];
@@ -666,6 +673,8 @@ export class NaturalResponseComposer {
           ...(train && !p.trainNumber ? { trainNumber: train } : {}),
           ...(hits.fare?.cls && !p.travelClass ? { travelClass: hits.fare.cls } : {}),
           ...(hits.fare?.date && !p.date ? { date: hits.fare.date } : {}),
+          // P42.9: a train-count claim is bound to the canonical date of the result set it was counted from
+          ...(hits.count && !p.date && !hits.fare?.date && dateSrc.searchDate ? { date: dateSrc.searchDate } : {}),
           ...(hits.fare?.provider ? { sourceProvider: hits.fare.provider } : {}),
           verificationStatus: p.claimType === 'USER_PROVIDED' ? 'USER_PROVIDED' : (p.claimType === 'RAILWAY_LIVE_FACT' || p.claimType === 'TOOL_DERIVED_FACT') ? 'VERIFIED' : 'NOT_REQUIRED',
           claimBindingStatus: binding.status });
@@ -710,6 +719,19 @@ export class NaturalResponseComposer {
     else if (buf.trim()) { take(buf); buf = ''; }
     const bindingSummary = (): ClaimBindingSummary => ({ counts: bindCounts, crossEntity,
       status: crossEntity.some(c => c.diagnosis !== 'AMBIGUOUS_REFERENCE') ? 'CROSS_ENTITY_REMOVED' : crossEntity.length ? 'AMBIGUOUS_REMOVED' : entityClaims ? 'BOUND' : 'NONE' });
+    // P42.9 (D2): the only claims were about a date with no fresh result → say exactly that (never the stale facts)
+    // (legacy date guards — UNGROUNDED_DATE / CROSS_DATE_FACT — on a dated railway FACT get the same honest fallback)
+    const rejDate = (r: { sentence: string; reason: string }): string | null => {
+      if (isDateBoundRejection(r.reason)) return r.reason.split(':')[1] || null;
+      if (!dateBoundKind(r.sentence)) return null;
+      const m = r.reason.match(/^(?:UNGROUNDED_DATE|CROSS_DATE_FACT):(.+)$/);
+      if (!m) return null;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(m[1])) return m[1];
+      const d: any = resolveDate(m[1].toLowerCase());
+      return d?.ok ? d.date : null;
+    };
+    const dateRejDate = rejected.map(rejDate).find(Boolean) || null;
+    if (!accepted.length && dateRejDate) return { ...fallback('NO_FRESH_RESULT_FOR_DATE', rejected, dateFreshFallbackText(dateRejDate)), claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag, outcomeClaims: outcomeDiag };
     if (!accepted.length) return { ...fallback(out ? 'NOTHING_GROUNDED' : 'NO_RESPONSE', rejected), claimBinding: bindingSummary(), actionClaims: actionDiag, referenceClaims: refDiag, outcomeClaims: outcomeDiag };
 
     // ---- guarantees ----

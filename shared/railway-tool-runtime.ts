@@ -166,6 +166,8 @@ export interface ToolExecutionRecord {
   dataSource?: 'MOCK' | 'LIVE' | 'WEB_EXTERNAL' | null;
   outcome?: string | null;
   fallbackUsed?: boolean;
+  /** P42.9 (additive): the primary provider's eligible error that made the backend use the fallback provider. */
+  fallbackReason?: string | null;
   /** P37 (additive): provider-level tool the LLM called, e.g. `railcore_search` (canonical contract stays in `tool`). */
   providerTool?: string | null;
   providerAttempts?: Array<{ provider: string; attempt: number; outcome: string; errorCode: string | null; httpStatus: number | null; latencyMs: number; retryable: boolean }>;

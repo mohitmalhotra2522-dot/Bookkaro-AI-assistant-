@@ -13,6 +13,8 @@ import { providerToolCatalog, inProviderScope } from '../../ai/tools/provider-to
 import { railwayRegistry } from '../registry/provider-registry';
 import { RailwayToolService } from '../tools/railway-tool-service';
 import { WEB_PROVIDER_IDS } from '../providers/web/web-providers';
+import { fallbackProviderFor, isFallbackEligible, primaryProviderId, providerFallbackEnabled } from '../providers/provider-fallback';
+import { withRateWait } from '../providers/live/provider-rate-limiter';
 import { evaluateSeatShortage } from '@shared/same-train-shortage';
 import {
   type SameTrainAlternative, type SameTrainAlternativesResult, type SameTrainErrorCode, SameTrainErrorCode as E,
@@ -46,7 +48,9 @@ export function availabilityProviders(): ProviderRef[] {
 }
 
 export type ProviderResolution =
-  | { ok: true; providers: ProviderRef[]; routeProvider: ProviderRef; webProviders: ProviderRef[]; selection: 'LLM' | 'DEFAULT_ALL' }
+  | { ok: true; providers: ProviderRef[]; routeProvider: ProviderRef; webProviders: ProviderRef[]; selection: 'LLM' | 'DEFAULT_ALL' | 'DEFAULT_PRIMARY';
+      /** P42.9: backend per-request fallback (primary id → fallback ref) and route fallback — never Muse-chosen */
+      fallbacks: Record<string, ProviderRef>; routeFallback: ProviderRef | null }
   | { ok: false; code: string; message: string };
 
 /** Validate Muse's provider choice (CSV of connector ids) — arbitrary / web-only / route-less ids are rejected. */
@@ -55,7 +59,7 @@ export function resolveSameTrainProviders(providersCsv?: string | null, routePro
   if (!avail.length) return { ok: false, code: E.NOT_READY, message: 'Koi availability provider configured nahi hai.' };
   const catalog = providerToolCatalog.enabled();
   let chosen = avail;
-  let selection: 'LLM' | 'DEFAULT_ALL' = 'DEFAULT_ALL';
+  let selection: 'LLM' | 'DEFAULT_ALL' | 'DEFAULT_PRIMARY' = 'DEFAULT_ALL';
   const ids = String(providersCsv || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   if (ids.length && catalog) {
     const bad = ids.filter(id => !avail.some(p => p.id === id));
@@ -67,6 +71,11 @@ export function resolveSameTrainProviders(providersCsv?: string | null, routePro
     }
     chosen = [...new Set(ids)].map(id => avail.find(p => p.id === id)!);
     selection = 'LLM';
+  } else if (catalog && providerFallbackEnabled()) {
+    // P42.9: no explicit provider choice → the configured PRIMARY only; the fallback provider is used per request on an
+    // eligible fault (never queried when the primary succeeded). An explicit multi-provider choice still cross-checks.
+    const prim = avail.find(p => p.id === primaryProviderId());
+    if (prim) { chosen = [prim]; selection = 'DEFAULT_PRIMARY'; }
   }
   const routeCapable = (id: string) => !catalog || (providerToolCatalog.get(id)?.capabilities || []).includes('GET_TIMETABLE');
   let routeProvider: ProviderRef | undefined;
@@ -83,18 +92,28 @@ export function resolveSameTrainProviders(providersCsv?: string | null, routePro
   }
   if (!routeProvider) return { ok: false, code: E.NOT_READY, message: 'Koi route-capable (timetable) provider configured nahi hai.' };
   const webProviders = catalog ? providerToolCatalog.list().filter(c => isWebId(c.id) && c.capabilities.includes('SEARCH_TRAINS')).map(c => refOf(c.id)) : [];
-  return { ok: true, providers: chosen, routeProvider, webProviders, selection };
+  const fallbacks: Record<string, ProviderRef> = {};
+  if (catalog) for (const p of chosen) {
+    const fid = fallbackProviderFor(p.id, 'CHECK_AVAILABILITY');
+    if (fid && !chosen.some(c => c.id === fid)) fallbacks[p.id] = refOf(fid);
+  }
+  const rf = catalog ? fallbackProviderFor(routeProvider.id, 'GET_TIMETABLE') : null;
+  const routeFallback = rf && rf !== routeProvider.id ? refOf(rf) : null;
+  return { ok: true, providers: chosen, routeProvider, webProviders, selection, fallbacks, routeFallback };
 }
 
 const scoped = <T>(p: ProviderRef, fn: () => Promise<T>): Promise<T> => (p.id === ACTIVE ? fn() : inProviderScope(p.id, fn));
 
 /** Real adapters over RailwayToolService (each call fresh, inside the provider's own scope). */
 export function liveSameTrainDeps(tools: RailwayToolService = new RailwayToolService(), extra: Partial<SameTrainDeps> = {}): SameTrainDeps {
+  // P42.9: inside the matrix a request waits at most SAME_TRAIN_RATE_WAIT_MS for a pacer slot; no slot → RATE_LIMITED
+  // (LOCAL, no provider request spent) → eligible for the per-request fallback instead of a long queue
+  const wait = Number(process.env.SAME_TRAIN_RATE_WAIT_MS) >= 0 && process.env.SAME_TRAIN_RATE_WAIT_MS !== undefined && process.env.SAME_TRAIN_RATE_WAIT_MS !== '' ? Math.min(10000, Number(process.env.SAME_TRAIN_RATE_WAIT_MS)) : 1000;
   return {
     limits: sameTrainLimitsFromEnv(),
     getRoute: (p, trainNumber) => scoped(p, () => tools.GET_TIMETABLE(trainNumber)),
-    checkAvailability: (p, q) => scoped(p, () => tools.CHECK_AVAILABILITY({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, date: q.date, origin: q.origin, destination: q.destination } as any)),
-    getFare: (p, q) => scoped(p, () => tools.GET_FARE({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, passengersCount: q.passengersCount, date: q.date, origin: q.origin, destination: q.destination } as any)),
+    checkAvailability: (p, q) => withRateWait(wait, () => scoped(p, () => tools.CHECK_AVAILABILITY({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, date: q.date, origin: q.origin, destination: q.destination } as any))),
+    getFare: (p, q) => withRateWait(wait, () => scoped(p, () => tools.GET_FARE({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, passengersCount: q.passengersCount, date: q.date, origin: q.origin, destination: q.destination } as any))),
     webListsTrain: async (p, q) => {
       const r: any = await scoped(p, () => (railwayRegistry.getActive() as any).searchTrains({ origin: q.origin, destination: q.destination, date: q.date }));
       if (!r || r.ok !== true) return { ok: false, code: String(r?.error?.code || 'WEB_ERROR') };
@@ -106,7 +125,26 @@ export function liveSameTrainDeps(tools: RailwayToolService = new RailwayToolSer
 }
 
 export async function searchSameTrainAlternatives(req: SameTrainSearchRequest, deps?: SameTrainDeps) {
-  return runSameTrainSearch(req, deps || liveSameTrainDeps());
+  const r = await runSameTrainSearch(req, deps || liveSameTrainDeps());
+  logRecoveryStats(req, r);
+  return r;
+}
+
+/** P42.9 observability: one structured line per recovery — counts + provider ids only (no keys, headers, tokens, PII). */
+function logRecoveryStats(req: SameTrainSearchRequest, r: Awaited<ReturnType<typeof runSameTrainSearch>>): void {
+  try {
+    const res: any = r.ok ? r.result : (r as any).partial;
+    const route: any = res?.route;
+    console.log(JSON.stringify({
+      event: 'same_train_recovery', requestId: req.requestId ?? null, sessionId: req.sessionId, turnId: req.turnId ?? null, journeyVersion: req.journeyVersion,
+      alternativeSearchId: res?.alternativeSearchId ?? null, trainNumber: req.trainNumber, date: req.date,
+      status: r.ok ? r.result.status : 'FAILED', code: r.ok ? null : r.code,
+      providers: req.providers.map(p => p.id), fallbackProviders: Object.fromEntries(Object.entries(req.fallbackProviders || {}).map(([k, v]) => [k, v.id])),
+      ...(res?.callStats || {}),
+      ...(route?.fallbackUsed ? { routeProvider: route.provider, routeFallbackReason: route.fallbackReason } : {}),
+      latencyMs: res?.latencyMs ?? null
+    }));
+  } catch { /* observability must never break the recovery */ }
 }
 
 // ------------------------------------------------------------------ explicit selection → fresh revalidation
@@ -116,7 +154,7 @@ export interface RevalidationOutcome {
   code?: SameTrainErrorCode | 'ALTERNATIVE_NOT_ACTIONABLE' | 'ALTERNATIVE_NO_LONGER_AVAILABLE' | 'ALTERNATIVE_INSUFFICIENT_SEATS';
   message: string;
   alternative?: Pick<SameTrainAlternative, 'alternativeId' | 'trainNumber' | 'travelClass' | 'date' | 'ticketOrigin' | 'ticketDestination' | 'boardingStation' | 'alightingStation' | 'boardingRuleStatus' | 'alightingRuleStatus' | 'verificationStatus'>;
-  fresh?: { provider: string; status: string; category: string; fetchedAt: string }[];
+  fresh?: { provider: string; status: string; category: string; fetchedAt: string; fallbackUsed?: boolean; fallbackReason?: string; primaryProvider?: string }[];
   /** text the UI may send as the user's explicit choice (existing chat flow → Muse → SESSION_UPDATE → validators) */
   handoffText?: string;
 }
@@ -144,12 +182,20 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
   const providerIds = [...new Set(alt.evidence.filter(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS').map(e => e.provider))];
   const refs = providerIds.map(id => (id === ACTIVE ? activeRef() : refOf(id)));
   const q: AvailabilityQuery = { trainNumber: alt.trainNumber, travelClass: alt.travelClass, date: alt.date, origin: alt.ticketOrigin, destination: alt.ticketDestination, passengersCount: alt.passengersCount };
+  const once = (p: ProviderRef) => Promise.race([deps.checkAvailability(p, q), new Promise(res => setTimeout(() => res({ ok: false, error: { code: 'PROVIDER_TIMEOUT' } }), deps.limits.perCallTimeoutMs))]);
   const answers = await Promise.all(refs.map(async p => {
-    const r = await Promise.race([deps.checkAvailability(p, q), new Promise(res => setTimeout(() => res({ ok: false, error: { code: 'PROVIDER_TIMEOUT' } }), deps.limits.perCallTimeoutMs))]);
-    return { p, ev: evaluateAvailabilityAnswer(r, q) };
+    const r = await once(p);
+    let ev = evaluateAvailabilityAnswer(r, q);
+    // P42.9: fresh re-check — primary eligible fault (rate limit / unavailable / timeout) → backend fallback provider once
+    if (ev.outcome !== 'SUCCESS' && isFallbackEligible(ev.errorCode) && p.id !== ACTIVE) {
+      const fid = fallbackProviderFor(p.id, 'CHECK_AVAILABILITY');
+      if (fid && !refs.some(x => x.id === fid)) { const fp = refOf(fid); const ev2 = evaluateAvailabilityAnswer(await once(fp), q); return { p: fp, ev: ev2, fallbackFrom: p.id, fallbackReason: String(ev.errorCode) }; }
+    }
+    return { p, ev };
   }));
   const ok = answers.filter(a => a.ev.outcome === 'SUCCESS' && a.ev.availability);
-  const fresh = ok.map(a => ({ provider: a.p.id, status: a.ev.availability!.status, category: a.ev.availability!.category, fetchedAt: new Date().toISOString() }));
+  const fresh = ok.map(a => ({ provider: a.p.id, status: a.ev.availability!.status, category: a.ev.availability!.category, fetchedAt: new Date().toISOString(),
+    ...((a as any).fallbackFrom ? { fallbackUsed: true, fallbackReason: (a as any).fallbackReason, primaryProvider: (a as any).fallbackFrom } : {}) }));
   const view = { alternativeId: alt.alternativeId, trainNumber: alt.trainNumber, travelClass: alt.travelClass, date: alt.date, ticketOrigin: alt.ticketOrigin, ticketDestination: alt.ticketDestination,
     boardingStation: alt.boardingStation, alightingStation: alt.alightingStation, boardingRuleStatus: alt.boardingRuleStatus, alightingRuleStatus: alt.alightingRuleStatus, verificationStatus: alt.verificationStatus };
   if (!ok.length) return { ok: false, code: E.SEARCH_FAILED, message: 'Fresh availability verify nahi ho paayi — abhi select nahi kar sakte.', alternative: view };

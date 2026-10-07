@@ -212,6 +212,12 @@ export class ConversationStateManager {
       s.focusTrainNumber = undefined;
       s.reviewConfirmed = false;
       s.irctcHandoffReady = false;
+      // P42.9 (D2): every date / route-bound result goes with the old journey — same-train recovery results + the
+      // selection made from them, and the review built from the old facts (passengers are kept)
+      const anyS = s as any;
+      for (const k of ['sameTrainAlternatives', 'sameTrainSelection'] as const) if (anyS[k] !== undefined) { cleared.push(k); anyS[k] = undefined; }
+      if (Array.isArray(anyS.sameTrainAlternativeSets) && anyS.sameTrainAlternativeSets.length) { cleared.push('sameTrainAlternativeSets'); anyS.sameTrainAlternativeSets = []; }
+      if (s.review && s.review.valid) { s.review.valid = false; s.review.invalidatedReason = scope === 'DATE' ? 'DATE_CHANGED' : 'ROUTE_CHANGED'; cleared.push('review'); }
       // A new search will be required → bump search version so any old
       // displayIndex reference is now stale.
       s.searchResultsVersion = (s.searchResultsVersion || 0) + 1;

@@ -2,21 +2,25 @@
  * PROMPT 35 — Secret-safe HTTP for live railway providers.
  *
  *  - one bounded GET per call (AbortController timeout); no cache, no retry here (fallback is the failover layer's job);
+ *  - P42.9: the provider's rate-limit headers are parsed into counters for the per-provider pacer (never logged);
  *  - HTTP / transport failures are classified onto the EXISTING railway error vocabulary — a timeout, a 5xx or a
  *    malformed body is NEVER "no results"; only a documented not-found answer (adapter predicate) is NOT_FOUND;
  *  - error messages are fixed, generic strings: never the URL (could carry a query key), never headers, never the raw
  *    provider body, never a stack trace. Credentials only ever travel in the request headers built by the adapter.
  */
 import type { RailwayErrorCode } from '../../types/railway-types';
+import { parseRateHeaders, type RateHeaders } from './provider-rate-limiter';
 
 export type FetchLike = (url: string, init: { method: 'GET'; headers: Record<string, string>; signal: AbortSignal }) => Promise<{
   status: number; text(): Promise<string>;
+  /** P42.9: optional — only the provider's rate-limit headers are read (never logged / returned raw) */
+  headers?: { get(name: string): string | null };
 }>;
 
 export interface LiveHttpError { code: RailwayErrorCode; message: string; retryable: boolean; httpStatus: number | null }
 export type LiveHttpResult =
-  | { ok: true; httpStatus: number; json: any; latencyMs: number }
-  | { ok: false; error: LiveHttpError; json?: any; latencyMs: number };
+  | { ok: true; httpStatus: number; json: any; latencyMs: number; rate?: RateHeaders }
+  | { ok: false; error: LiveHttpError; json?: any; latencyMs: number; rate?: RateHeaders; /** P42.9: refused by the local pacer — no provider request was made */ localThrottle?: true };
 
 export interface LiveGetOptions {
   timeoutMs: number;
@@ -58,14 +62,16 @@ export async function liveGet(url: string, headers: Record<string, string>, o: L
     const res = await f(url, { method: 'GET', headers: { Accept: 'application/json', ...headers }, signal: ctrl.signal });
     const text = await res.text();
     const latencyMs = Date.now() - t0;
+    let rate: RateHeaders | undefined;
+    try { if (res.headers && typeof res.headers.get === 'function') { const h = parseRateHeaders(n => res.headers!.get(n)); if (Object.keys(h).length) rate = h; } } catch { rate = undefined; }
     let json: any; let parsed = true;
     try { json = text ? JSON.parse(text) : undefined; } catch { parsed = false; }
     if (res.status >= 200 && res.status < 300) {
-      if (!parsed || json === undefined || json === null || typeof json !== 'object') return { ok: false, error: liveError('PROVIDER_DATA_INVALID', res.status), latencyMs };
-      return { ok: true, httpStatus: res.status, json, latencyMs };
+      if (!parsed || json === undefined || json === null || typeof json !== 'object') return { ok: false, error: liveError('PROVIDER_DATA_INVALID', res.status), latencyMs, ...(rate ? { rate } : {}) };
+      return { ok: true, httpStatus: res.status, json, latencyMs, ...(rate ? { rate } : {}) };
     }
-    if (parsed && o.isNotFound?.(res.status, json)) return { ok: false, error: liveError('NOT_FOUND', res.status, false), json, latencyMs };
-    return { ok: false, error: liveError(classifyHttpStatus(res.status), res.status), json: parsed ? json : undefined, latencyMs };
+    if (parsed && o.isNotFound?.(res.status, json)) return { ok: false, error: liveError('NOT_FOUND', res.status, false), json, latencyMs, ...(rate ? { rate } : {}) };
+    return { ok: false, error: liveError(classifyHttpStatus(res.status), res.status), json: parsed ? json : undefined, latencyMs, ...(rate ? { rate } : {}) };
   } catch {
     return { ok: false, error: liveError(timedOut ? 'TIMEOUT' : 'PROVIDER_UNAVAILABLE'), latencyMs: Date.now() - t0 };
   } finally {

@@ -13,6 +13,7 @@ import type {
   TimetableRequest, AvailabilityRequest, AvailabilityData, FareRequest, FareData, TrackRequest, TrackData, PNRRequest, PNRData
 } from '../../types/railway-types';
 import { liveGet, liveError, type FetchLike, type LiveHttpResult } from './live-http';
+import { rateLimiterFor, currentRateWait, pacingApplies } from './provider-rate-limiter';
 import { providerSupports, type LiveProviderId, type RailwayCapability } from './provider-capabilities';
 
 export interface LiveProviderConfig {
@@ -50,18 +51,34 @@ export abstract class LiveRailwayProvider implements RailwayProvider {
     return { source: this.source, providerId: this.providerId, requestTimestamp: new Date(t0).toISOString(), responseTimestamp: now,
       latencyMs: Date.now() - t0, cache: 'disabled', ...(freshness ? { freshness } : {}) };
   }
-  protected fail<T>(code: RailwayErrorCode, t0: number, extra: { httpStatus?: number | null; retryable?: boolean; message?: string } = {}): RailwayResponse<T> {
+  protected fail<T>(code: RailwayErrorCode, t0: number, extra: { httpStatus?: number | null; retryable?: boolean; message?: string; localThrottle?: boolean } = {}): RailwayResponse<T> {
     const e = liveError(code, extra.httpStatus ?? null, extra.retryable);
-    return { ok: false, error: { code, message: extra.message || e.message, retryable: e.retryable, httpStatus: e.httpStatus }, meta: this.meta(t0) };
+    const rl = code === 'RATE_LIMITED' && extra.localThrottle !== undefined ? { rateLimit: { local: extra.localThrottle } } : {};
+    return { ok: false, error: { code, message: extra.message || e.message, retryable: e.retryable, httpStatus: e.httpStatus }, meta: { ...this.meta(t0), ...rl } };
   }
   protected httpFail<T>(r: Extract<LiveHttpResult, { ok: false }>, t0: number, notFoundCode: RailwayErrorCode = 'NOT_FOUND'): RailwayResponse<T> {
     const code = r.error.code === 'NOT_FOUND' ? notFoundCode : r.error.code;
-    return this.fail<T>(code, t0, { httpStatus: r.error.httpStatus, retryable: r.error.retryable });
+    return this.fail<T>(code, t0, { httpStatus: r.error.httpStatus, retryable: r.error.retryable, ...(code === 'RATE_LIMITED' ? { localThrottle: !!r.localThrottle } : {}) });
   }
   protected get(path: string, query: Record<string, string | undefined> = {}, isNotFound?: (status: number, json: any) => boolean): Promise<LiveHttpResult> {
     const qs = Object.entries(query).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&');
     const url = `${this.cfg.baseUrl.replace(/\/+$/, '')}${path}${qs ? `?${qs}` : ''}`;
-    return liveGet(url, this.authHeaders(), { timeoutMs: this.cfg.timeoutMs, fetchImpl: this.cfg.fetchImpl, isNotFound });
+    return this.paced(() => liveGet(url, this.authHeaders(), { timeoutMs: this.cfg.timeoutMs, fetchImpl: this.cfg.fetchImpl, isNotFound }));
+  }
+
+  /**
+   * P42.9: every provider request goes through the per-provider pacer (shared by all callers). No slot within the wait
+   * budget → RATE_LIMITED (LOCAL, retryable) WITHOUT a provider request — eligible for the backend fallback. The
+   * provider's own rate headers / 429 adapt the pacer. Nothing is cached or replayed.
+   */
+  private async paced(call: () => Promise<LiveHttpResult>): Promise<LiveHttpResult> {
+    if (!pacingApplies(!!this.cfg.fetchImpl)) return call();
+    const limiter = rateLimiterFor(this.providerId);
+    const slot = await limiter.acquire(currentRateWait());
+    if (!slot.ok) return { ok: false, error: { ...liveError('RATE_LIMITED', null, true) }, latencyMs: 0, localThrottle: true };
+    const r = await call();
+    limiter.observe(r.ok ? r.httpStatus : r.error.httpStatus, r.rate);
+    return r;
   }
 
   /** Gate + normalization boundary shared by every capability. */

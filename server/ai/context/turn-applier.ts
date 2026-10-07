@@ -605,7 +605,9 @@ export class ContextualTurnApplier {
 
     const routeChanged = (o && o.code !== s.origin) || (dst && dst.code !== s.destination);
     const dateChanged = !!date && date !== s.date;
-    const hadFacts = !!(s.searchResults || s.selectedTrain || s.selectedClass || s.fare || s.availability || (s.availableTrains && s.availableTrains.length));
+    const hadFacts = !!(s.searchResults || s.selectedTrain || s.selectedClass || s.fare || s.availability || (s.availableTrains && s.availableTrains.length)
+      // P42.9 (D2): date-bound same-train recovery results / a valid review also go with the old journey
+      || (s as any).sameTrainAlternatives || (s.review && s.review.valid));
     const isCorrection = (routeChanged && !!((o && s.origin) || (dst && s.destination))) || (dateChanged && !!s.date);
 
     if (routeChanged || dateChanged) {

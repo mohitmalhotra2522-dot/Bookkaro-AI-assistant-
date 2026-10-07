@@ -39,7 +39,9 @@ export function sameTrainLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Sa
     maxCandidatePairs: envNum(env, 'SAME_TRAIN_MAX_CANDIDATE_PAIRS', D.maxCandidatePairs, 1, 60),
     maxOriginSweepStations: envNum(env, 'SAME_TRAIN_MAX_ORIGIN_SWEEP', D.maxOriginSweepStations, 0, MAX_EARLIER_STATIONS),
     maxDestinationSweep: envNum(env, 'SAME_TRAIN_MAX_DESTINATION_SWEEP', D.maxDestinationSweep, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX),
-    maxParallel: envNum(env, 'SAME_TRAIN_MAX_PARALLEL', D.maxParallel, 1, 12),
+    // P42.9: SAME_TRAIN_MAX_CONCURRENCY (spec name) wins over the older SAME_TRAIN_MAX_PARALLEL; request RATE is paced
+    // per provider by the live pacer (RAILCORE_RATE_LIMIT_PER_MIN / RAILCORE_MIN_INTERVAL_MS …), concurrency only bounds bursts
+    maxParallel: envNum(env, 'SAME_TRAIN_MAX_CONCURRENCY', envNum(env, 'SAME_TRAIN_MAX_PARALLEL', D.maxParallel, 1, 12), 1, 12),
     perCallTimeoutMs: envNum(env, 'SAME_TRAIN_CALL_TIMEOUT_MS', D.perCallTimeoutMs, 500, 30000),
     totalTimeoutMs: envNum(env, 'SAME_TRAIN_TOTAL_TIMEOUT_MS', D.totalTimeoutMs, 1000, 90000),
     maxWebChecks: envNum(env, 'SAME_TRAIN_MAX_WEB_CHECKS', D.maxWebChecks, 0, 20),
@@ -172,6 +174,8 @@ export function statusKey(status: string): string {
 }
 
 const TIMEOUT_CODES = new Set(['PROVIDER_TIMEOUT', 'TIMEOUT', 'TOOL_TIMEOUT', 'ALTERNATIVE_SEARCH_TIMEOUT']);
+/** P42.9: same set as provider-fallback FALLBACK_ELIGIBLE_CODES (kept local — the engine stays free of registry imports). */
+export const SAME_TRAIN_FALLBACK_ELIGIBLE = new Set(['RATE_LIMITED', 'PROVIDER_UNAVAILABLE', 'TIMEOUT', 'TOOL_TIMEOUT', 'PROVIDER_TIMEOUT']);
 const normDate = (v: unknown) => String(v ?? '').slice(0, 10);
 
 export interface ProviderRef { id: string; label?: string; level: EvidenceLevel; isMock?: boolean }
@@ -337,6 +341,14 @@ export interface SameTrainSearchRequest {
    */
   classes?: string[];
   explicitUserRequest?: boolean;
+  /**
+   * P42.9: backend-controlled per-request fallback (primary provider id → fallback provider), e.g. railcore → railradar.
+   * Used ONLY for an eligible fault of that single request (RATE_LIMITED / PROVIDER_UNAVAILABLE / TIMEOUT); never when
+   * the fallback provider is already one of `providers` (then it is queried anyway). Muse never chooses it.
+   */
+  fallbackProviders?: Record<string, ProviderRef>;
+  /** P42.9: fallback for the route (timetable) call on an eligible fault of the route provider. */
+  routeFallback?: ProviderRef | null;
 }
 
 /** P42.7: requested class first, then the other authoritative classes in provider order (deduped, codes only). */
@@ -361,16 +373,31 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const deadline = t0 + L.totalTimeoutMs;
   const alternativeSearchId = `sta_${shortId()}`;
   const current = () => (deps.isCurrent ? deps.isCurrent() : true);
-  const isMock = [req.routeProvider, ...req.providers].some(p => p.isMock);
+  const isMock = [req.routeProvider, ...req.providers, ...Object.values(req.fallbackProviders || {}), ...(req.routeFallback ? [req.routeFallback] : [])].some(p => p.isMock);
+  const eligible = (code: string | null | undefined) => !!code && SAME_TRAIN_FALLBACK_ELIGIBLE.has(code);
+  // P42.9 observability: per-recovery call counters (no keys / headers / bodies)
+  const stats = { requested: 0, executed: 0, successful: 0, rateLimited: 0, rateLimitedAttempts: 0, timeout: 0, providerUnavailable: 0, fallback: 0, fallbackSucceeded: 0, deduped: 0, skipped: 0 };
 
-  // 1) route — from the Muse-chosen route provider only (no hidden failover)
-  const routeResp = await withTimeout(Promise.resolve().then(() => deps.getRoute(req.routeProvider, req.trainNumber)), L.perCallTimeoutMs);
-  if (routeResp.timedOut) return { ok: false, code: E.SEARCH_TIMEOUT, errorClass: SameTrainErrorClass.TOOL_TIMEOUT, message: `${req.routeProvider.label || req.routeProvider.id} se route time par nahi aaya.` };
+  // 1) route — from the route provider; P42.9: an eligible fault (rate limit / unavailable / timeout) → the backend
+  // fallback route provider (visible in result.route.provider / routeFallbackReason)
+  let routeProvider = req.routeProvider;
+  let routeFallbackReason: string | undefined;
+  let routeResp = await withTimeout(Promise.resolve().then(() => deps.getRoute(req.routeProvider, req.trainNumber)), L.perCallTimeoutMs);
+  stats.executed++;
+  {
+    const c0 = routeResp.timedOut ? 'PROVIDER_TIMEOUT' : ((routeResp.value as any)?.ok === true ? null : String((routeResp.value as any)?.error?.code || ''));
+    if (c0 && eligible(c0) && req.routeFallback && req.routeFallback.id !== req.routeProvider.id && current()) {
+      routeFallbackReason = c0; routeProvider = req.routeFallback; stats.fallback++; stats.executed++;
+      routeResp = await withTimeout(Promise.resolve().then(() => deps.getRoute(req.routeFallback!, req.trainNumber)), L.perCallTimeoutMs);
+      if (!routeResp.timedOut && (routeResp.value as any)?.ok === true) stats.fallbackSucceeded++;
+    }
+  }
+  if (routeResp.timedOut) return { ok: false, code: E.SEARCH_TIMEOUT, errorClass: SameTrainErrorClass.TOOL_TIMEOUT, message: `${routeProvider.label || routeProvider.id} se route time par nahi aaya.` };
   const rv: any = routeResp.value;
   if (!rv || rv.ok !== true) {
     const code = String(rv?.error?.code || '');
     return { ok: false, code: TIMEOUT_CODES.has(code) ? E.SEARCH_TIMEOUT : E.INVALID_TRAIN_ROUTE,
-      errorClass: TIMEOUT_CODES.has(code) ? SameTrainErrorClass.TOOL_TIMEOUT : SameTrainErrorClass.INVALID_TRAIN_ROUTE, message: `Train ${req.trainNumber} ka route ${req.routeProvider.label || req.routeProvider.id} se verify nahi ho paaya.` };
+      errorClass: TIMEOUT_CODES.has(code) ? SameTrainErrorClass.TOOL_TIMEOUT : (code === 'RATE_LIMITED' || code === 'PROVIDER_UNAVAILABLE') ? SameTrainErrorClass.PROVIDER_UNAVAILABLE : SameTrainErrorClass.INVALID_TRAIN_ROUTE, message: `Train ${req.trainNumber} ka route ${routeProvider.label || routeProvider.id} se verify nahi ho paaya.` };
   }
   const route = normalizeRoute(rv.data);
   if (!route.ok) return { ok: false, code: route.code, message: route.message, errorClass: SameTrainErrorClass.INVALID_TRAIN_ROUTE };
@@ -391,6 +418,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   let checksTruncated = false;
   const checkedUnits: { pair: CandidatePair; cls: string }[] = [];
   let skippedStale = false;
+  const inflight = new Map<string, Promise<{ timedOut: true } | { timedOut: false; value: any }>>();
   const runPhase = async (pairs: CandidatePair[]) => {
     const units: { pair: CandidatePair; cls: string }[] = [];
     for (const cls of classes) for (const pair of pairs) {
@@ -403,27 +431,60 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     const run = units.slice(0, room);
     checksUsed += run.length;
     checkedUnits.push(...run);
-    await Promise.all(req.providers.map(provider => mapLimit(run, L.maxParallel, async ({ pair, cls }) => {
+    stats.requested += run.length * req.providers.length;
+    await Promise.all(req.providers.map(provider => mapLimit(run.map((u, i) => ({ ...u, i })), L.maxParallel, async ({ pair, cls, i }) => {
       const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: cls, date: req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
-      const base = { provider: provider.id, ...(provider.label ? { providerLabel: provider.label } : {}), level: provider.level,
-        requestId: req.requestId || alternativeSearchId, toolExecutionId: `${alternativeSearchId}:${provider.id}:${pair.pairId}`,
-        trainNumber: q.trainNumber, ticketOrigin: q.origin, ticketDestination: q.destination, travelClass: q.travelClass, date: q.date, passengersCount: q.passengersCount };
-      const s = now();
-      let ev: ProviderEvidence;
-      if (!current()) { skippedStale = true; ev = { ...base, fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.RESULT_STALE }; }
-      else if (s >= deadline) ev = { ...base, fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.SEARCH_TIMEOUT };
-      else {
-        const r = await withTimeout(Promise.resolve().then(() => deps.checkAvailability(provider, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - s)));
+      const baseFor = (prov: ProviderRef) => ({ provider: prov.id, ...(prov.label ? { providerLabel: prov.label } : {}), level: prov.level,
+        requestId: req.requestId || alternativeSearchId, toolExecutionId: `${alternativeSearchId}:${prov.id}:${pair.pairId}`,
+        trainNumber: q.trainNumber, ticketOrigin: q.origin, ticketDestination: q.destination, travelClass: q.travelClass, date: q.date, passengersCount: q.passengersCount,
+        batchNumber: Math.floor(i / Math.max(1, L.maxParallel)) + 1 });
+      // P42.9: one provider attempt; identical requests inside THIS execution share one call (dedupe — never a cache)
+      const attempt = async (prov: ProviderRef) => {
+        const s1 = now();
+        const dk = [prov.id, q.trainNumber, q.travelClass, q.origin, q.destination, q.date].join('|');
+        let pr = inflight.get(dk);
+        if (pr) stats.deduped++;
+        else { pr = withTimeout(Promise.resolve().then(() => deps.checkAvailability(prov, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - s1))); inflight.set(dk, pr); stats.executed++; }
+        const r = await pr;
         const at = now();
         const evald = r.timedOut ? { outcome: 'TIMEOUT' as const, errorCode: 'PROVIDER_TIMEOUT' } : evaluateAvailabilityAnswer(r.value, q);
-        ev = { ...base, fetchedAt: new Date(at).toISOString(), latencyMs: at - s, ...evald };
+        if (evald.errorCode === 'RATE_LIMITED') stats.rateLimitedAttempts++;
+        return { evald, at, latencyMs: at - s1, rateLimitLocal: r.timedOut ? undefined : (r.value as any)?.meta?.rateLimit?.local };
+      };
+      const s = now();
+      let ev: ProviderEvidence;
+      if (!current()) { skippedStale = true; stats.skipped++; ev = { ...baseFor(provider), fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.RESULT_STALE }; }
+      else if (s >= deadline) { stats.skipped++; ev = { ...baseFor(provider), fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.SEARCH_TIMEOUT }; }
+      else {
+        let served = provider;
+        let a = await attempt(provider);
+        let fb: { reason: string; primary: string; primaryLatencyMs: number } | undefined;
+        const fbProv = req.fallbackProviders?.[provider.id];
+        // P42.9: per-request fallback ONLY for an eligible fault; never for a REJECTED / identity-mismatch / not-found answer
+        if (fbProv && fbProv.id !== provider.id && !req.providers.some(p => p.id === fbProv.id) && a.evald.outcome !== 'SUCCESS'
+          && eligible(a.evald.errorCode) && current() && now() < deadline) {
+          fb = { reason: String(a.evald.errorCode), primary: provider.id, primaryLatencyMs: a.latencyMs };
+          stats.fallback++;
+          a = await attempt(fbProv);
+          served = fbProv;
+          if (a.evald.outcome === 'SUCCESS') stats.fallbackSucceeded++;
+        }
+        ev = { ...baseFor(served), fetchedAt: new Date(a.at).toISOString(), latencyMs: now() - s, ...a.evald,
+          ...(a.evald.errorCode === 'RATE_LIMITED' ? { rateLimited: true, ...(a.rateLimitLocal !== undefined ? { rateLimitLocal: !!a.rateLimitLocal } : {}) } : {}),
+          retryCount: 0,
+          ...(fb ? { fallbackUsed: true, fallbackReason: fb.reason, primaryProvider: fb.primary, primaryErrorCode: fb.reason } : {}) };
         if (req.includeFare && deps.getFare && ev.outcome === 'SUCCESS' && current() && now() < deadline) {
-          const fr = await withTimeout(Promise.resolve().then(() => deps.getFare!(provider, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - now())));
+          stats.executed++;
+          const fr = await withTimeout(Promise.resolve().then(() => deps.getFare!(served, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - now())));
           const fa = fr.timedOut ? { ok: false as const, code: 'PROVIDER_TIMEOUT', timeout: true } : evaluateFareAnswer(fr.value, q);
           if (fa.ok) { ev.fare = { ...(fa.total !== undefined ? { total: fa.total } : {}), ...(fa.perPassenger !== undefined ? { perPassenger: fa.perPassenger } : {}), currency: fa.currency, fetchedAt: new Date(now()).toISOString() }; ev.fareOutcome = 'SUCCESS'; }
           else ev.fareOutcome = fa.timeout ? 'TIMEOUT' : 'FAILED';
         }
       }
+      if (ev.outcome === 'SUCCESS') stats.successful++;
+      else if (ev.errorCode === 'RATE_LIMITED') stats.rateLimited++;
+      else if (ev.outcome === 'TIMEOUT') stats.timeout++;
+      else if (ev.errorCode === 'PROVIDER_UNAVAILABLE') stats.providerUnavailable++;
       const list = evidenceByPair.get(ek(pair.pairId, cls)) || [];
       list.push(ev);
       evidenceByPair.set(ek(pair.pairId, cls), list);
@@ -495,7 +556,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
 
   // 5) provider coverage + overall status
   const allEv = [...evidenceByPair.values()].flat();
-  const providers = req.providers.map(p => {
+  const usedFallbacks = Object.values(req.fallbackProviders || {}).filter((p, i, a) => a.findIndex(x => x.id === p.id) === i && !req.providers.some(x => x.id === p.id) && allEv.some(e => e.provider === p.id));
+  const providers = [...req.providers, ...usedFallbacks].map(p => {
     const mine = allEv.filter(e => e.provider === p.id);
     return { provider: p.id, ...(p.label ? { label: p.label } : {}), level: p.level, requested: mine.length,
       succeeded: mine.filter(e => e.outcome === 'SUCCESS').length, failed: mine.filter(e => e.outcome === 'FAILED' || e.outcome === 'REJECTED').length,
@@ -507,15 +569,19 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const latencyMs = now() - t0;
   const earlierStationsChecked = plan.originAlternatives.length;
   const downstreamStationsChecked = plan.destinationExtension.length;
+  const partialRun = apiEv.some(e => e.outcome !== 'SUCCESS');
+  const callStats = { ...stats, partial: partialRun };
   deps.log?.('same_train_search', { alternativeSearchId, providers: req.providers.map(p => p.id).join(','), candidateCount: pairs.length,
     resultCount: alternatives.length, succeeded: apiEv.filter(e => e.outcome === 'SUCCESS').length, timeouts: apiEv.filter(e => e.outcome === 'TIMEOUT').length, latencyMs });
+  // P42.9: recovery-level counters travel on the result (callStats) and are logged by the service (same_train_recovery)
   if (skippedStale || !current()) return { ok: false, code: E.STALE_RESULT, errorClass: SameTrainErrorClass.STALE, message: 'Journey badal gayi — yeh alternative result ab purana hai.' };
   if (!anySuccess) {
     const allTimeout = apiEv.length > 0 && apiEv.every(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT));
     // P42.2: typed error class — a timeout is TOOL_TIMEOUT (never NOT_AVAILABLE); only-malformed answers are INVALID_TOOL_RESULT
     const allInvalid = apiEv.length > 0 && apiEv.every(e => e.outcome === 'REJECTED');
     return { ok: false, code: allTimeout ? E.SEARCH_TIMEOUT : E.SEARCH_FAILED, message: SAME_TRAIN_ALL_FAILED_MESSAGE,
-      errorClass: allTimeout ? SameTrainErrorClass.TOOL_TIMEOUT : allInvalid ? SameTrainErrorClass.INVALID_TOOL_RESULT : SameTrainErrorClass.PROVIDER_UNAVAILABLE };
+      errorClass: allTimeout ? SameTrainErrorClass.TOOL_TIMEOUT : allInvalid ? SameTrainErrorClass.INVALID_TOOL_RESULT : SameTrainErrorClass.PROVIDER_UNAVAILABLE,
+      partial: { callStats } as any };
   }
   const anyFailure = apiEv.some(e => e.outcome !== 'SUCCESS');
   if (anyFailure && apiEv.some(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT))) errors.push(E.SEARCH_TIMEOUT);
@@ -533,7 +599,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     trainNumber: req.trainNumber, ...(req.trainName ? { trainName: req.trainName } : {}), date: req.date, travelClass: requestedClass, passengersCount: req.passengersCount,
     requestedOrigin: ctx.requestedOrigin, requestedOriginName: req.originName || names.get(ctx.requestedOrigin),
     requestedDestination: ctx.requestedDestination, requestedDestinationName: req.destinationName || names.get(ctx.requestedDestination),
-    route: { provider: req.routeProvider.id, fetchedAt: routeFetchedAt, trainOrigin: plan.route[0].code, trainTerminal: plan.route[plan.route.length - 1].code,
+    route: { provider: routeProvider.id, ...(routeFallbackReason ? { fallbackUsed: true, fallbackReason: routeFallbackReason } : {}), fetchedAt: routeFetchedAt, trainOrigin: plan.route[0].code, trainTerminal: plan.route[plan.route.length - 1].code,
       stationCount: plan.route.length, originSweep: plan.originAlternatives.map(s => s.code), destinationExtension: plan.destinationExtension.map(s => s.code),
       destinationSweep: plan.destinationSweep,
       stations: plan.route.slice(Math.max(0, (plan.originAlternatives[0]?.index ?? plan.originIndex)), (plan.destinationExtension[plan.destinationExtension.length - 1]?.index ?? plan.destinationIndex) + 1) },
@@ -552,6 +618,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     classesChecked: classes, earlierStationsChecked, downstreamStationsChecked, availabilityChecks: checksUsed, checksTruncated,
     ...(req.explicitUserRequest ? { explicitUserRequest: true } : {}),
     toolExecutionId: req.toolExecutionId ?? null,
+    callStats,
     ...(req.contextSnapshot ? { contextSnapshot: req.contextSnapshot } : {})
   };
   return { ok: true, result };

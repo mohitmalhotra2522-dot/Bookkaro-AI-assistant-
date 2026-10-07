@@ -93,6 +93,23 @@ export interface ProviderEvidence {
   /** typed reason when not SUCCESS (never a provider secret / raw body) */
   errorCode?: string;
   rejectedReason?: 'WRONG_TRAIN' | 'WRONG_DATE' | 'WRONG_CLASS' | 'MALFORMED';
+  /** P42.9 observability (additive): backend fallback for THIS request (provider = the provider that served it) */
+  fallbackUsed?: boolean;
+  fallbackReason?: string;
+  primaryProvider?: string;
+  primaryErrorCode?: string;
+  rateLimited?: boolean;
+  /** RATE_LIMITED by the local pacer (no provider request spent) vs by the provider (429) */
+  rateLimitLocal?: boolean;
+  retryCount?: number;
+  /** dispatch wave inside the bounded-concurrency matrix (1-based) */
+  batchNumber?: number;
+}
+
+/** P42.9: per-recovery provider call counters (observability only — never keys / headers / bodies). */
+export interface SameTrainCallStats {
+  requested: number; executed: number; successful: number; rateLimited: number; rateLimitedAttempts: number; timeout: number;
+  providerUnavailable: number; fallback: number; fallbackSucceeded: number; deduped: number; skipped: number; partial: boolean;
 }
 
 export interface WebRouteEvidence {
@@ -189,6 +206,9 @@ export interface SameTrainAlternativesResult {
   requestedDestinationName?: string;
   route: {
     provider: string;
+    /** P42.9: the route came from the backend fallback provider (primary route call hit an eligible fault) */
+    fallbackUsed?: boolean;
+    fallbackReason?: string;
     fetchedAt: string;
     trainOrigin: string;
     trainTerminal: string;
@@ -226,6 +246,8 @@ export interface SameTrainAlternativesResult {
   /** false when the candidate list was truncated or some provider calls failed / timed out — never claim exhaustive */
   searchComplete?: boolean;
   toolExecutionId?: string | null;
+  /** P42.9: provider call counters for this recovery execution (observability) */
+  callStats?: SameTrainCallStats;
   /** session selection at creation: a result is stale only when train / class changed AFTER it was produced */
   contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null; requestedClass?: string | null };
   /** P42.7 all-class route matrix coverage (metadata; route / provider order, never a ranking) */

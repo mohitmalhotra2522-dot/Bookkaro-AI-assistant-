@@ -796,7 +796,7 @@ export class BoundToolRuntime {
       origin: a.origin, destination: a.destination, originName: s.origin === a.origin ? s.originName : undefined, destinationName: s.destination === a.destination ? s.destinationName : undefined,
       originSweep: a.originSweep !== false, destinationSweep: a.destinationSweep !== false, destinationExtensionStations: a.destinationExtensionStations,
       combinedPairs: a.combinedPairs, includeFare: !!a.includeFare, webEvidence: !!a.webEvidence,
-      providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders,
+      providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders, fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
       triggerReason: a.triggerReason ?? null, triggerSource: this.safetyNetCallIds.has(vt.callId) ? 'SAFETY_NET' : (a.triggerSource || 'NONE'),
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion: s.journeyVersion ?? null,
         requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }
@@ -1286,9 +1286,9 @@ function safeObs(f: () => void) { try { f(); } catch { /* observers never break 
  * Prompt 35: provider provenance the LLM may read (additive keys, outside the pinned P26 `provenance` object):
  * which provider answered, whether a fallback provider served it, and the compact attempt chain. Never keys / bodies.
  */
-export function providerViewOf(x: Pick<ExecutedCall, 'provider' | 'providerAttempts' | 'fallbackUsed'>): { provider?: string; fallbackUsed?: boolean; providerAttempts?: Array<{ provider: string; outcome: string; errorCode: string | null }> } {
+export function providerViewOf(x: Pick<ExecutedCall, 'provider' | 'providerAttempts' | 'fallbackUsed'> & { fallbackReason?: string }): { provider?: string; fallbackUsed?: boolean; fallbackReason?: string; providerAttempts?: Array<{ provider: string; outcome: string; errorCode: string | null }> } {
   if (!x.providerAttempts?.length) return {};
-  return { provider: String(x.provider || '').toUpperCase(), fallbackUsed: !!x.fallbackUsed,
+  return { provider: String(x.provider || '').toUpperCase(), fallbackUsed: !!x.fallbackUsed, ...(x.fallbackUsed && x.fallbackReason ? { fallbackReason: x.fallbackReason } : {}),
     providerAttempts: x.providerAttempts.map(a => ({ provider: a.provider.toUpperCase(), outcome: a.outcome, errorCode: a.errorCode })) };
 }
 

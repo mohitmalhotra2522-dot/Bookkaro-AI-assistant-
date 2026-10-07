@@ -51,6 +51,10 @@ export interface RailwayMeta {
   attempts?: ProviderAttempt[];
   /** Prompt 35 (additive): true when a fallback provider (not the primary) served this response. */
   fallbackUsed?: boolean;
+  /** P42.9 (additive): why the backend fell back (primary's error code: RATE_LIMITED / TIMEOUT / PROVIDER_UNAVAILABLE). */
+  fallbackReason?: string;
+  /** P42.9 (additive): RATE_LIMITED produced by the local pacer (no provider request spent) vs by the provider (429). */
+  rateLimit?: { local: boolean };
 }
 
 /** Prompt 35 — one provider attempt inside a failover chain (observability; never contains keys or raw bodies). */

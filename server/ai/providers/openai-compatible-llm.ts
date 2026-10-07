@@ -382,7 +382,7 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
             // Prompt 32: honest outcome category + provider identity (MOCK data is never live)
             ...(r.outcome ? { outcome: r.outcome } : {}), ...(r.dataSource ? { dataSource: r.dataSource } : {}),
             // Prompt 35: which live provider answered + failover chain (provider normalization — no re-wording needed)
-            ...(r.provider ? { provider: r.provider, fallbackUsed: !!r.fallbackUsed, providerAttempts: r.providerAttempts } : {}),
+            ...(r.provider ? { provider: r.provider, fallbackUsed: !!r.fallbackUsed, ...((r as any).fallbackReason ? { fallbackReason: (r as any).fallbackReason } : {}), providerAttempts: r.providerAttempts } : {}),
             // P38/P39: source + freshness label on every provider result. Web results carry the WebRailwayResult envelope
             //   (status / fetchedAt / sourceReportedAt / freshness / urlReference / warnings) and the API failures of this
             //   turn for the same capability, so the reply can never hide them. API results are LIVE_API.

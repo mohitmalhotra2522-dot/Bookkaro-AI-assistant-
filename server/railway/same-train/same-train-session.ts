@@ -18,8 +18,8 @@ import { evaluateSeatShortage } from '@shared/same-train-shortage';
 import type { SameTrainAlternativesResult } from '@shared/same-train-alternatives';
 import { sameTrainAlternativesEnabledFromEnv } from '../../ai/tools/tool-registry';
 import type { RailwayToolService } from '../tools/railway-tool-service';
-import { type SameTrainDeps, runSameTrainSearch } from './same-train-engine';
-import { liveSameTrainDeps, resolveSameTrainProviders, findSameTrainResult, sameTrainResultsOf, isSameTrainResultStale, type RevalidationOutcome } from './same-train-service';
+import type { SameTrainDeps } from './same-train-engine';
+import { liveSameTrainDeps, searchSameTrainAlternatives, resolveSameTrainProviders, findSameTrainResult, sameTrainResultsOf, isSameTrainResultStale, type RevalidationOutcome } from './same-train-service';
 
 // ------------------------------------------------------------------ 1) auto display discovery
 
@@ -119,13 +119,13 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
     };
     const t0 = Date.now();
     const sel: any = s.selectedTrain;
-    const out = await runSameTrainSearch({
+    const out = await searchSameTrainAlternatives({
       sessionId, turnId: null, requestId: null, journeyVersion,
       trainNumber, trainName: row.trainName || row.name, date: String(s.date || j.date), travelClass, classes, passengersCount: pax,
       origin: String(s.origin || j.origin), destination: String(s.destination || j.destination), originName: s.originName, destinationName: s.destinationName,
       originSweep: true, destinationSweep: true, combinedPairs: 'NEVER', includeFare: false, webEvidence: false,
       // primary availability provider only (bounded cost); route from the resolved route provider — never a hidden failover
-      providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [],
+      providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [], fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
       triggerReason: shortage.triggerReason, triggerSource: 'AUTO_DISPLAY',
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion,
         requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }
