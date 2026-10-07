@@ -93,6 +93,19 @@ export const LLM_CONTEXT_VERSION = 'p42.7-memory-2';
  * belong to the CURRENT journey are included (a changed date / train / class / route drops them — counted in
  * staleRejected). Station codes / statuses only; no names, no ids beyond the result id the UI uses.
  */
+/**
+ * P42.10 (Part 27): memory is an enhancement, never a hard dependency — if the memory view cannot be built, the turn
+ * continues with the current session / conversation context + fresh railway tools (memory block omitted). Safe log:
+ * event + error type only (no memory contents, no PII).
+ */
+export function safeMemoryContextView(s: BookingSession): ReturnType<typeof memoryContextView> | undefined {
+  try { return memoryContextView(s); }
+  catch (e) {
+    try { console.log(JSON.stringify({ event: 'memory_unavailable', memoryRead: false, errorType: (e as any)?.name || 'Error' })); } catch { /* never break the turn */ }
+    return undefined;
+  }
+}
+
 export function memoryContextView(s: BookingSession) {
   const x: any = s;
   const sel: any = x.sameTrainSelection;
@@ -268,7 +281,7 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
         departure: x.departure, arrival: x.arrival, duration: x.duration, classes: (x.classes || []).map(c => c.code)
       }))
     },
-    memory: memoryContextView(s),
+    ...((): { memory?: ReturnType<typeof memoryContextView> } => { const m = safeMemoryContextView(s); return m ? { memory: m } : {}; })(),
     referenceContext: referenceContextView(s),
     ...((): { bookingPreparation?: ReturnType<typeof bookingPreparationView> } => { const v = bookingPreparationView(s); return v ? { bookingPreparation: v } : {}; })(),
     summary: compressed ? summarizeFromSession(s) : undefined,
