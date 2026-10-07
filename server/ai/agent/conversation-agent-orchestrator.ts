@@ -63,6 +63,10 @@ import type { BookingExecutorRegistry } from '../../booking/execution/booking-ex
 import type { ExecutionConfig } from '../../booking/execution/execution-config';
 import type { TurnLoopObserver } from '../runtime/llm-tool-runtime';
 import { ConversationContextBuilder, ToolResultContextStore } from '../turn-engine/conversation-context-builder';
+import { llmContextLogRecord } from '../context/context-builder';
+
+/** P42.4: `llm_context` metadata log — on unless LLM_CONTEXT_LOG=0 (off by default under vitest unless =1). */
+const llmContextLogEnabled = () => process.env.LLM_CONTEXT_LOG === '1' || (process.env.LLM_CONTEXT_LOG !== '0' && !process.env.VITEST);
 import { pendingQuestionCode } from '../turn-engine/pending-question';
 import { nextPassengerDetail, markOptionalAsked } from '../../booking/passenger-options';
 import { detectBareDay, resolveMonthAnswer } from '../turn-engine/ambiguous-date-clarifier';
@@ -370,6 +374,7 @@ export class ConversationAgentOrchestrator {
     const ctx: ApplyCtx = { turnId, mode, cards, events, changes: preChanges, rawText: llmInput, requestId, contextPatches: [], rejectedPatches: [] };
     extra.patches = ctx.contextPatches; extra.rejectedPatches = ctx.rejectedPatches;
     let pendingOverride: PendingInteraction | undefined;
+    let ctxLogged = false;
     const bound = this.runtime.bind(guard.getSession, guard.commit, {
       requestId,
       // Prompt 17: correlation ids for tool execution records + explicit fresh request (never cached anyway)
@@ -382,9 +387,12 @@ export class ConversationAgentOrchestrator {
         // (pending question code, journeyVersion, structured tool results; earlier turns HISTORICAL)
         const sc = this.state.getSession(sessionId);
         const cc = this.context.snapshot(sc, this.activeBookingOf(sessionId));
-        return { ...this.contextBuilder.build({ session: sc, history: this.getHistory(sessionId), turnId, postBooking: this.postBooking.contextFor(sessionId),
+        const built = { ...this.contextBuilder.build({ session: sc, history: this.getHistory(sessionId), turnId, postBooking: this.postBooking.contextFor(sessionId),
             intents: { lastUserIntent: cc.lastUserIntent, lastAssistantIntent: cc.lastAssistantIntent } }),
           conversationContext: summarizeContext(cc, sc) };
+        // P42.4 (Part 2.1): one safe-metadata record per turn — field names / versions / counts, never values
+        if (!ctxLogged && llmContextLogEnabled()) { ctxLogged = true; try { console.log(JSON.stringify({ ...llmContextLogRecord(built, sc), turnId })); } catch { /* observer only */ } }
+        return built;
       },
       emit: (type, data) => { if (!guard.isStale()) { this.state.emit(sessionId, type, turnId, data); events.push(type); } },
       grounding: (text: string) => this.postBooking.grounding(sessionId, text),

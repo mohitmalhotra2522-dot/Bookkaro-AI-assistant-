@@ -22,6 +22,9 @@ import { currentResults } from './train-reference-resolver';
 import { BookingState } from '@shared/states';
 import { STATE_ORDER } from '../state/state-transition-validator';
 import { availabilityStatus, fareStatus } from '../../booking/preparation/booking-preparation-guard';
+import { sameTrainResultsOf, isSameTrainResultStale } from '../../railway/same-train/same-train-service';
+import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
+import { syncJourneyVersion } from '../tool-runtime/journey-version';
 import { reviewStatusOf, confirmationStatusOf } from '../../booking/preparation/booking-preparation';
 import type { PostBookingContextView } from '../../booking/post-booking/post-booking-service';
 
@@ -76,6 +79,79 @@ export interface LLMContext {
   referenceContext?: ReturnType<typeof referenceContextView>;
   /** Prompt 33: structured booking preparation state (what is known / missing) — the LLM decides what to ask next. */
   bookingPreparation?: ReturnType<typeof bookingPreparationView>;
+  /** P42.4 (Part 2.1): compact memory versions + same-train selection / shown alternatives (current journey only). */
+  memory?: ReturnType<typeof memoryContextView>;
+}
+
+export const LLM_CONTEXT_VERSION = 'p42.4-memory-1';
+
+/**
+ * P42.4 — Part 2.1 memory block: versions the LLM needs to tell current facts from stale ones, plus the same-train
+ * selection the backend applied and the same-train results currently on screen. Only results / selections that still
+ * belong to the CURRENT journey are included (a changed date / train / class / route drops them — counted in
+ * staleRejected). Station codes / statuses only; no names, no ids beyond the result id the UI uses.
+ */
+export function memoryContextView(s: BookingSession) {
+  const x: any = s;
+  const sel: any = x.sameTrainSelection;
+  const selTrain = s.selectedTrain ? String((s.selectedTrain as any).number ?? (s.selectedTrain as any).trainNumber ?? '') : '';
+  const selCurrent = !!sel && s.origin === sel.ticketOrigin && s.destination === sel.ticketDestination && s.date === sel.date
+    && selTrain === sel.trainNumber && String(s.selectedClass || '').toUpperCase() === sel.travelClass;
+  const all = [...sameTrainResultsOf(s), ...((x.sameTrainAutoSets || []) as any[])];
+  const seen = new Set<string>();
+  const uniq = all.filter(r => r?.alternativeSearchId && !seen.has(r.alternativeSearchId) && (seen.add(r.alternativeSearchId), true));
+  const current = uniq.filter(r => !isSameTrainResultStale(s, r));
+  const staleRejected = (uniq.length - current.length) + (sel && !selCurrent ? 1 : 0);
+  return {
+    contextVersion: LLM_CONTEXT_VERSION,
+    sessionVersion: s.sessionVersion,
+    journeyVersion: syncJourneyVersion(s),
+    reviewVersion: s.review?.reviewVersion ?? null,
+    resultSetId: (s.searchResults as any)?.resultId ?? null,
+    ...(selCurrent ? { sameTrainSelection: {
+      trainNumber: sel.trainNumber, travelClass: sel.travelClass, date: sel.date,
+      ticketOrigin: sel.ticketOrigin, ticketDestination: sel.ticketDestination,
+      requestedOrigin: sel.requestedOrigin, requestedDestination: sel.requestedDestination,
+      boardingStation: sel.boardingStation, alightingStation: sel.alightingStation,
+      boardingRuleStatus: sel.boardingRuleStatus, alightingRuleStatus: sel.alightingRuleStatus,
+      freshStatus: sel.freshStatus, fetchedAt: sel.fetchedAt, appliedBy: 'BACKEND_AFTER_FRESH_CHECK'
+    } } : {}),
+    ...(current.length ? { sameTrainShown: current.slice(0, 8).map(r => ({
+      trainNumber: r.trainNumber, travelClass: r.travelClass, source: r.triggerSource === 'AUTO_DISPLAY' ? 'AUTO_DISPLAY' : 'TOOL',
+      verifiedOptions: (r.alternatives || []).filter((a: any) => isVerifiedSameTrainAlternative(a)).length, completedAt: r.completedAt ?? null
+    })) } : {}),
+    staleRejected
+  };
+}
+
+/** P42.4 — safe metadata for the `llm_context` log: field NAMES / versions / counts only — never values. */
+export function llmContextLogRecord(ctx: any, s: BookingSession): Record<string, unknown> {
+  const m = ctx?.memory || {};
+  const used: string[] = [];
+  const sv = ctx?.sessionView || {};
+  if (sv.origin || sv.destination) used.push('route');
+  if (sv.date) used.push('date');
+  if (sv.passengersCount) used.push('passengersCount');
+  if (sv.selectedTrain) used.push('selectedTrain');
+  if (sv.selectedClass) used.push('selectedClass');
+  const bp = ctx?.bookingPreparation;
+  if (bp?.passengers?.some((p: any) => p.name || p.age || p.gender)) used.push('passengerFields');
+  if (bp?.nextToAsk) used.push('nextToAsk');
+  if (m.reviewVersion != null) used.push('review');
+  if (m.sameTrainSelection) used.push('sameTrainSelection');
+  if (m.sameTrainShown) used.push('sameTrainShown');
+  if (ctx?.searchResults?.trains?.length) used.push('displayedTrains');
+  if (ctx?.recentMessages?.length) used.push('recentTurns');
+  if (ctx?.turnContext?.lastToolResults?.length) used.push('toolResults');
+  return {
+    event: 'llm_context',
+    contextFieldsProvided: Object.keys(ctx || {}).filter(k => ctx[k] !== undefined && ctx[k] !== null),
+    contextVersion: m.contextVersion ?? LLM_CONTEXT_VERSION,
+    journeyVersion: m.journeyVersion ?? s.journeyVersion ?? null,
+    pendingInteraction: (s.pendingInteraction as any)?.type ?? null,
+    memoryFieldsUsed: used,
+    staleContextRejected: Number(m.staleRejected || 0)
+  };
 }
 
 const DEP_VIEW: Record<string, string> = { AVAILABLE: 'MATCHING_RESULT', STALE: 'STALE', UNAVAILABLE: 'LAST_CHECK_FAILED', NOT_REQUESTED: 'NOT_CHECKED' };
@@ -182,6 +258,7 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
         departure: x.departure, arrival: x.arrival, duration: x.duration, classes: (x.classes || []).map(c => c.code)
       }))
     },
+    memory: memoryContextView(s),
     referenceContext: referenceContextView(s),
     ...((): { bookingPreparation?: ReturnType<typeof bookingPreparationView> } => { const v = bookingPreparationView(s); return v ? { bookingPreparation: v } : {}; })(),
     summary: compressed ? summarizeFromSession(s) : undefined,

@@ -155,7 +155,9 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
   if (!ok.length) return { ok: false, code: E.SEARCH_FAILED, message: 'Fresh availability verify nahi ho paayi — abhi select nahi kar sakte.', alternative: view };
   if (new Set(ok.map(a => statusKey(a.ev.availability!.status))).size > 1) return { ok: false, code: E.PROVIDER_DATA_CONFLICT, message: 'Providers ka fresh data match nahi kar raha.', alternative: view, fresh };
   const cat = ok[0].ev.availability!.category;
-  if (cat === 'NOT_AVAILABLE' || cat === 'UNKNOWN') return { ok: false, code: 'ALTERNATIVE_NO_LONGER_AVAILABLE', message: `Fresh check: ${ok[0].ev.availability!.status} — yeh option ab available nahi.`, alternative: view, fresh };
+  // P42.4: an alternative is actionable only while it is still AVAILABLE (whole party) or RAC — a pair that has fallen to
+  // WAITLIST since the search is no longer an alternative to the waitlisted original
+  if (cat === 'NOT_AVAILABLE' || cat === 'UNKNOWN' || cat === 'WAITLIST') return { ok: false, code: 'ALTERNATIVE_NO_LONGER_AVAILABLE', message: `Fresh check: ${ok[0].ev.availability!.status} — yeh option ab available nahi.`, alternative: view, fresh };
   // P42.2: the fresh count must still cover the whole party ("AVAILABLE-0001" for 3 passengers is not selectable)
   const seats = evaluateSeatShortage({ status: ok[0].ev.availability!.status, requestedPassengerCount: alt.passengersCount });
   if (seats.sufficiency === 'INSUFFICIENT') {

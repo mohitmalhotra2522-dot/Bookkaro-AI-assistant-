@@ -327,7 +327,7 @@ export interface SameTrainSearchRequest {
   includeFare: boolean; webEvidence: boolean;
   providers: ProviderRef[]; routeProvider: ProviderRef; webProviders: ProviderRef[];
   /** P42.2 (optional, recorded only): why this search ran, the tool execution id and the session selection at call time */
-  triggerReason?: ShortageTriggerReason | null; triggerSource?: 'SESSION_EVIDENCE' | 'MUSE' | 'NONE';
+  triggerReason?: ShortageTriggerReason | null; triggerSource?: 'SESSION_EVIDENCE' | 'MUSE' | 'AUTO_DISPLAY' | 'NONE';
   toolExecutionId?: string | null;
   contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null };
 }

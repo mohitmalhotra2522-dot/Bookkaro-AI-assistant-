@@ -35,7 +35,9 @@ import { mockIrctcEnabled, renderMockIrctc, MOCK_IRCTC_SCENARIOS } from './irctc
 import { MOCK_IRCTC_REAL_SCENARIOS } from './irctc/mock/mock-irctc-real';
 import { EXECUTION_LOCKED_STATES } from '@shared/states';
 import { sameTrainAlternativesEnabledFromEnv } from './ai/tools/tool-registry';
-import { revalidateSameTrainAlternative, findSameTrainResult, sameTrainSelectionKey } from './railway/same-train/same-train-service';
+import { revalidateSameTrainAlternative, sameTrainSelectionKey } from './railway/same-train/same-train-service';
+import { discoverSameTrainForDisplay, applySameTrainSelection, findAnySameTrainResult } from './railway/same-train/same-train-session';
+import { sameTrainCardData } from './railway/same-train/same-train-view';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -146,7 +148,8 @@ server.post('/api/chat', async (request, reply) => {
     conversationContext: result.conversationContext,
     events: result.events,
     cards: result.cards || [],
-    context: { ...ctx, eventLog: (ctx.eventLog || []).slice(-15) },
+    // P42.4: auto same-train sets are fetched per card (discover endpoint) — not repeated in every chat response
+    context: { ...ctx, eventLog: (ctx.eventLog || []).slice(-15), sameTrainAutoSets: undefined, sameTrainAutoBudget: undefined },
     toolActivity: result.toolActivity,
     dataSourceLabel: railwayRegistry.getActive().label,
     turnLog: result.turnLog,
@@ -220,9 +223,10 @@ server.post('/api/session/:id/passenger-form', async (request, reply) => {
 
 /** Prompt 18: barge-in / stop — marks the presentation or in-flight turn INTERRUPTED (no provider cancel, session untouched). */
 /**
- * P42 — "Use this option" on a Same Train Alternative: FRESH revalidation only (same providers, same ticket pair). The
- * BookingSession is NOT changed here — on success the client sends the returned handoffText as the user's explicit
- * choice, so the existing chat flow (Muse → SESSION_UPDATE → validators) prepares the booking. Metadata-only log.
+ * P42 — "Use this option" on a Same Train Alternative: FRESH revalidation (same providers, same ticket pair). P42.4 (user
+ * decision): when the fresh check passes, the backend APPLIES the ticket pair + train + class to the BookingSession (old
+ * fare / review invalid, fresh answer = availability evidence, passengers kept, boarding rule recorded); the client then
+ * sends handoffText as the user's explicit choice so Muse continues the booking. Metadata-only log.
  */
 server.post('/api/session/:id/same-train-alternative/select', async (request, reply) => {
   const { id } = request.params as any;
@@ -231,14 +235,32 @@ server.post('/api/session/:id/same-train-alternative/select', async (request, re
   const s: any = stateManager.getSession(id);
   if (EXECUTION_LOCKED_STATES.has(s.bookingState)) return reply.status(409).send({ ok: false, code: 'INVALID_ACTION_FOR_STATE', message: 'Booking process chal raha hai — abhi option change nahi ho sakta.' });
   // P42.2: the selection resolves against ITS OWN result set (multi-class / multi-train), never free-form text
-  const stored = findSameTrainResult(s, String(body.alternativeSearchId || '')) || s.sameTrainAlternatives;
+  const stored = findAnySameTrainResult(s, String(body.alternativeSearchId || '')) || s.sameTrainAlternatives;
   const key = stored ? sameTrainSelectionKey(s, stored) : '';
   const t0 = Date.now();
   const out = await revalidateSameTrainAlternative(stored, String(body.alternativeSearchId || ''), String(body.alternativeId || ''), key,
     { acknowledgeUnverifiedRules: body.acknowledgeUnverifiedRules === true });
+  const applied = out.ok && stored ? applySameTrainSelection(stateManager, id, stored, out) : { applied: false };
   console.log(JSON.stringify({ event: 'same_train_select', ok: out.ok, code: out.code || null, alternativeSearchId: stored?.alternativeSearchId || null,
-    alternativeId: String(body.alternativeId || '').slice(0, 6), providers: (out.fresh || []).map(f => f.provider).join(','), latencyMs: Date.now() - t0 }));
-  return reply.status(out.ok ? 200 : out.code === 'ALTERNATIVE_RESULT_STALE' || out.code === 'ALTERNATIVE_NOT_FOUND' ? 409 : 422).send(out);
+    alternativeId: String(body.alternativeId || '').slice(0, 6), providers: (out.fresh || []).map(f => f.provider).join(','), applied: applied.applied,
+    auto: !!(stored as any)?.autoKey, latencyMs: Date.now() - t0 }));
+  const after: any = stateManager.getSession(id);
+  return reply.status(out.ok ? 200 : out.code === 'ALTERNATIVE_RESULT_STALE' || out.code === 'ALTERNATIVE_NOT_FOUND' ? 409 : 422)
+    .send({ ...out, applied: applied.applied, ...(applied.applied ? { sessionVersion: after.sessionVersion, journeyVersion: after.journeyVersion, bookingState: after.bookingState } : {}) });
+});
+
+/**
+ * P42.4 — AUTO display discovery (user choice: under every WL class of the search list). The UI asks for ONE displayed
+ * train/class when its chip becomes visible; the backend searches only when that class's own search status shows a
+ * shortage for this party, within a per-result-set budget, primary provider only. Booking never changes. Metadata log.
+ */
+server.post('/api/session/:id/same-train-alternative/discover', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  const out = await discoverSameTrainForDisplay(stateManager, id, (request.body || {}) as any,
+    { log: f => console.log(JSON.stringify(f)) });
+  if (!out.ok || !out.result) return reply.send({ ok: false, code: out.code, ...(out.budget ? { budget: out.budget } : {}) });
+  return reply.send({ ok: true, code: 'OK', card: sameTrainCardData(out.result, { stale: false }) });
 });
 
 server.post('/api/session/:id/interrupt', async (request, reply) => {

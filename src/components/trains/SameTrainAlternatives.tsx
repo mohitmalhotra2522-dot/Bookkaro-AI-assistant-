@@ -4,6 +4,7 @@ import { IconAlert, IconArrowRight, IconCheck, IconInfo, IconRefresh, IconRoute,
 import { formatClock, formatDate, inr } from '../../lib/format';
 import { selectSameTrainAlternative } from '../../lib/api';
 import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
+import { SameTrainOptionList } from './SameTrainInline';
 
 /**
  * P42 — Same Train Alternative card + panel. Renders ONLY the backend's validated result:
@@ -68,8 +69,10 @@ export const SameTrainCard: React.FC<{ d: any; sessionId: string | null; disable
           <span className={`bk-tag bk-tag--${AV_TONE[best.availability] || 'navy'}`}>{availText(best)}</span>
         </div>
       )}
+      {/* P42.4: verified options are shown expanded (route order, or Muse's order when Muse presented) — Select on each */}
+      <SameTrainOptionList d={d} sessionId={sessionId} disabled={disabled || d.stale} onHandoff={onHandoff} />
       <div className="bk-train__actions">
-        <button type="button" className="bk-btn bk-btn--primary bk-btn--sm" onClick={() => setOpen(true)}>View options <IconArrowRight size={15} /></button>
+        <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm" onClick={() => setOpen(true)}>Full details <IconArrowRight size={15} /></button>
         {d.fetchedAt || d.completedAt ? <span className="bk-meta">Fetched {formatClock(d.completedAt || d.fetchedAt)}</span> : null}
       </div>
       {open && <SameTrainPanel d={d} sessionId={sessionId} disabled={disabled} onClose={() => setOpen(false)}

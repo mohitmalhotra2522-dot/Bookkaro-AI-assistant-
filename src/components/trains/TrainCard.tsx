@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { SameTrainInline, needsSameTrainDiscovery } from './SameTrainInline';
 import type { NormalizedTrain, ClassOption } from '../../../server/railway/types/railway-types';
 import { IconAlert, IconCheck, IconChevronDown, IconClock, IconInfo } from '../icons/Icons';
 import { availabilityTone, formatClock, inr } from '../../lib/format';
@@ -13,19 +14,25 @@ interface Props {
   destinationLabel?: string;
   disabled?: boolean;
   /** P42: optional "Same Train Alternative" action (shown only when the feature is enabled) — asks the agent, nothing more */
-  onSameTrain?: (trainNumber: string) => void;
+  onSameTrain?: (trainNumber: string, classCode?: string) => void;
+  /** P42.4: AUTO same-train options under waitlisted class chips (feature on + a session + the list version) */
+  autoSameTrain?: AutoSameTrain;
 }
+
+export interface AutoSameTrain { sessionId: string | null; searchResultsVersion?: number; passengers: number; onHandoff: (text: string) => void }
 
 /**
  * TrainCard — one train, time-first. Renders ONLY normalized fields the backend returned:
  * a class shows availability / fare only when the provider supplied them (never invented).
  * Selecting a train or class sends the same message as before, carrying the list version.
  */
-export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, onSelectClass, highlightedClass, originLabel, destinationLabel, disabled, onSameTrain }) => {
+export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, onSelectClass, highlightedClass, originLabel, destinationLabel, disabled, onSameTrain, autoSameTrain }) => {
   const [open, setOpen] = useState(false);
   const detailsId = `td-${train.trainNumber}`;
+  const shortClasses = autoSameTrain ? (train.classes || []).filter(c => needsSameTrainDiscovery(c.availability, autoSameTrain.passengers)) : [];
+  const visible = useOnScreen(shortClasses.length > 0);
   return (
-    <article className={`bk-card bk-train${isSelected ? ' is-selected' : ''}`} aria-label={`Train ${train.trainNumber} ${train.trainName}`}>
+    <article ref={visible.ref} className={`bk-card bk-train${isSelected ? ' is-selected' : ''}`} aria-label={`Train ${train.trainNumber} ${train.trainName}`}>
       <div className="bk-train__top">
         <div className="bk-train__id">
           <div className="bk-train__num">{train.trainNumber}</div>
@@ -58,6 +65,12 @@ export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, o
         </div>
       )}
 
+      {autoSameTrain && shortClasses.map(c => (
+        <SameTrainInline key={`sti-${c.code}`} sessionId={autoSameTrain.sessionId} trainNumber={train.trainNumber} travelClass={c.code}
+          searchResultsVersion={autoSameTrain.searchResultsVersion} visible={visible.seen} disabled={disabled}
+          onHandoff={autoSameTrain.onHandoff} onFallback={onSameTrain ? () => onSameTrain(train.trainNumber, c.code) : undefined} />
+      ))}
+
       <div className="bk-train__actions">
         <button type="button" className="bk-btn bk-btn--primary" onClick={() => onSelectTrain(train.trainNumber)} disabled={disabled}>
           Select train
@@ -84,6 +97,21 @@ export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, o
     </article>
   );
 };
+
+/** Becomes true once the element has been on screen (lazy auto discovery); no observer support → treated as visible. */
+function useOnScreen(enabled: boolean): { ref: React.RefObject<HTMLElement>; seen: boolean } {
+  const ref = useRef<HTMLElement>(null);
+  const [seen, setSeen] = useState(false);
+  useEffect(() => {
+    if (!enabled || seen) return;
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') { setSeen(true); return; }
+    const io = new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) { setSeen(true); io.disconnect(); } }, { rootMargin: '120px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [enabled, seen]);
+  return { ref, seen };
+}
 
 const KV: React.FC<{ k: string; v: React.ReactNode }> = ({ k, v }) => (
   <div className="bk-kv"><span className="bk-kv__k">{k}</span><span className="bk-kv__v">{v}</span></div>
@@ -115,8 +143,9 @@ export const TrainResults: React.FC<{
   onSelectTrain: (n: string) => void;
   onSelectClass: (n: string, c: string) => void;
   disabled?: boolean;
-  onSameTrain?: (n: string) => void;
-}> = ({ trains, source, retrievedAt, routeLabel, selectedTrainNumber, selectedClass, originLabel, onSelectTrain, onSelectClass, disabled, onSameTrain }) => {
+  onSameTrain?: (n: string, classCode?: string) => void;
+  autoSameTrain?: AutoSameTrain;
+}> = ({ trains, source, retrievedAt, routeLabel, selectedTrainNumber, selectedClass, originLabel, onSelectTrain, onSelectClass, disabled, onSameTrain, autoSameTrain }) => {
   const INITIAL = 4;
   const [all, setAll] = useState(trains.length <= INITIAL + 1);
   const shown = all ? trains : trains.slice(0, INITIAL);
@@ -139,7 +168,8 @@ export const TrainResults: React.FC<{
           isSelected={!!selectedTrainNumber && selectedTrainNumber === t.trainNumber}
           highlightedClass={selectedTrainNumber === t.trainNumber ? selectedClass : undefined}
           originLabel={originLabel(t.origin)} destinationLabel={originLabel(t.destination)}
-          onSelectTrain={onSelectTrain} onSelectClass={onSelectClass} disabled={disabled} onSameTrain={onSameTrain} />
+          onSelectTrain={onSelectTrain} onSelectClass={onSelectClass} disabled={disabled} onSameTrain={onSameTrain}
+          autoSameTrain={autoSameTrain && !isWeb ? autoSameTrain : undefined} />
       ))}
       {!all && trains.length > INITIAL && (
         <button type="button" className="bk-btn bk-btn--ghost bk-results__more" onClick={() => setAll(true)}>

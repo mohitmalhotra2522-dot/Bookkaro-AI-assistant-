@@ -346,7 +346,11 @@ const App: React.FC = () => {
             originLabel={placeLabel} disabled={isLoading}
             onSelectTrain={(n: string) => handleSelectTrain(n, d.searchResultsVersion)}
             onSelectClass={(n: string, c: string) => handleSelectClass(n, c, d.searchResultsVersion)}
-            onSameTrain={appStatus.sameTrainAlternatives ? (n: string) => handleSameTrain(n, ctx?.selectedTrain?.number === n ? ctx?.selectedClass : undefined) : undefined} />
+            onSameTrain={appStatus.sameTrainAlternatives ? (n: string, c?: string) => handleSameTrain(n, c || (ctx?.selectedTrain?.number === n ? ctx?.selectedClass : undefined)) : undefined}
+            // P42.4: verified same-train options appear by themselves under waitlisted classes of the CURRENT list only
+            autoSameTrain={appStatus.sameTrainAlternatives && sessionId && typeof d.searchResultsVersion === 'number' && d.searchResultsVersion === ctx?.searchResultsVersion
+              ? { sessionId, searchResultsVersion: d.searchResultsVersion, passengers: Number(ctx?.passengersCount) || 1, onHandoff: (text: string) => { void send(text, 'TEXT'); } }
+              : undefined} />
         );
       }
       case 'passengers':

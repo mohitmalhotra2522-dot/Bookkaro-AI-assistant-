@@ -243,6 +243,8 @@ export async function postIrctcEvent(handoffId: string, bridgeToken: string, eve
 /** P42 — "Use this option": fresh server-side revalidation of a Same Train Alternative (nothing is booked or changed). */
 export interface SameTrainSelectResult {
   ok: boolean; code?: string; message: string; handoffText?: string;
+  /** P42.4: the backend applied the ticket pair + train + class to the booking session after the fresh check */
+  applied?: boolean;
   fresh?: Array<{ provider: string; status: string; category: string; fetchedAt: string }>;
 }
 export async function selectSameTrainAlternative(sessionId: string, body: { alternativeSearchId: string; alternativeId: string; acknowledgeUnverifiedRules?: boolean }): Promise<SameTrainSelectResult> {
@@ -255,5 +257,23 @@ export async function selectSameTrainAlternative(sessionId: string, body: { alte
     return { ok: false, code: 'NETWORK', message: 'Option verify nahi ho paaya — dobara try karein.' };
   } catch {
     return { ok: false, code: 'NETWORK', message: 'Option verify nahi ho paaya — dobara try karein.' };
+  }
+}
+
+/**
+ * P42.4 — AUTO same-train discovery for one displayed train/class (backend decides whether a search is needed; budget,
+ * dedupe and provider choice are server-side). Returns the card payload or a code; never throws.
+ */
+export interface SameTrainDiscoverResult { ok: boolean; code: string; card?: any; budget?: { used: number; max: number } }
+export async function discoverSameTrainAlternative(sessionId: string, body: { trainNumber: string; travelClass: string; searchResultsVersion: number }): Promise<SameTrainDiscoverResult> {
+  try {
+    const r = await fetch(`/api/session/${encodeURIComponent(sessionId)}/same-train-alternative/discover`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => null);
+    if (j && typeof j.code === 'string') return j as SameTrainDiscoverResult;
+    return { ok: false, code: r.status === 404 ? 'UNKNOWN_SESSION' : 'NETWORK' };
+  } catch {
+    return { ok: false, code: 'NETWORK' };
   }
 }

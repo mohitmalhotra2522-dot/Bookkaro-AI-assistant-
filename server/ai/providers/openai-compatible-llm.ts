@@ -327,6 +327,12 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
   return [...railway, session];
 }
 
+function omitRecentMessages(c: any): any {
+  if (!c || typeof c !== 'object' || !('recentMessages' in c)) return c;
+  const { recentMessages: _omit, ...rest } = c;
+  return rest;
+}
+
 const clip = (v: string, n: number) => (v.length > n ? `${v.slice(0, n)}…` : v);
 
 /** Recent conversation (bounded), without the current user message (sent separately) and without tool chatter. */
@@ -341,7 +347,9 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
     inputMode: input.inputMode, bookingState: input.state, missingFields: input.missingFields,
     // Prompt 25 Part 7: dominant language of the LATEST user message (the reply language; the model writes the reply)
     replyLanguage: detectLanguageStyle(input.userText, (input.history || []).filter(m => m.role === 'user').map(m => String(m.content || ''))),
-    context: input.context ?? null,
+    // P42.4 (Part 2.1): recent turns are sent as real chat messages below — not duplicated inside the context JSON, so the
+    // authoritative fields (memory versions, booking preparation, turn context) stay inside the size bound
+    context: input.context ? omitRecentMessages(input.context) : null,
     // P37: the LLM interprets dates itself → it needs today's date; and it knows which railway providers are callable
     today: todayInIndia(),
     ...(providerToolCatalog.enabled() ? { railwayProviders: providerToolCatalog.list().map(c => c.label) } : {})
