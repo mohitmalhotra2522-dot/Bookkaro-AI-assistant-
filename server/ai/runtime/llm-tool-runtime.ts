@@ -1,4 +1,5 @@
 import { groundPassengerProposals } from '../context/passenger-proposal-grounding';
+import { countMentioned } from '../conversation/grounding';
 import { getWebResearchService } from '../../research/web-research-service';
 /**
  * LLMToolCallingRuntime — the real multi-step tool-calling loop.
@@ -249,6 +250,12 @@ export const BFE_SAFETY_NET_INSTRUCTION =
   + 'Now write your reply from ALL verified results of this turn. Mention same-train options only if verified ones exist (AVAILABLE for the whole party, or RAC — RAC stays RAC, never call it a confirmed seat); '
   + 'if none were verified or the search failed / was skipped, say so briefly and keep the original result. Never call an option best unless you rank it with PRESENT_SAME_TRAIN_ALTERNATIVES. '
   + 'In voice, do not read every option — summarise. Do not repeat this note to the user.';
+
+/** Post-P42.10 F5: a SEARCH_TRAINS passengersCount argument counts only when the user's words this turn name that count. */
+export function groundedSearchPassengers(n: unknown, userText: string): number | undefined {
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 1 || n > 6) return undefined;
+  return countMentioned(String(userText || '')).has(n) ? n : undefined;
+}
 
 export class LLMToolCallingRuntime {
   private validator = new ToolCallValidator();
@@ -1065,7 +1072,8 @@ export class BoundToolRuntime {
         // will also invalidate dependent state if route/date changed.
         return this.searchOrch.trySearch('', {
           origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date,
-          passengerCount: vt.arguments.passengersCount,
+          // Post-P42.10 F5: a search argument may set the session passenger count only when the user's own words name it
+          passengerCount: groundedSearchPassengers(vt.arguments.passengersCount, this.userText),
           preferredClass: vt.arguments.preferredClass, preferredTime: vt.arguments.preferredTime
         }, { canApply: guard?.canApply });
       }
@@ -1241,7 +1249,10 @@ export class BoundToolRuntime {
           searchResultsVersion: version,
           searchMeta: { resultId, retrievedAt, totalCount: trains.length }
         };
-        if (typeof vt.arguments.passengersCount === 'number') patch.passengersCount = vt.arguments.passengersCount;
+        // Post-P42.10 F5: an LLM-filled search argument (e.g. a default 1 on a date correction) never changes the booking
+        // passenger count — only a count grounded in the user's words this turn (same rule as update_booking_session)
+        const pax = groundedSearchPassengers(vt.arguments.passengersCount, this.userText);
+        if (pax !== undefined) patch.passengersCount = pax;
         if (vt.arguments.preferredClass) patch.preferredClass = vt.arguments.preferredClass;
         if (vt.arguments.requestedClass) patch.requestedClass = vt.arguments.requestedClass;   // P42.7 (validated class code)
         if (vt.arguments.preferredTime) patch.preferredTime = vt.arguments.preferredTime;
@@ -1261,6 +1272,14 @@ export class BoundToolRuntime {
       }
       case 'CHECK_AVAILABILITY': {
         const s = this.getSession();
+        // Post-P42.10 F3: an information check of a train / class that is NOT the authoritative selection stays a tool
+        // result of this turn (grounding + Muse) — it never enters the booking session (booking consumers read availability
+        // by class, so a different train's result must never look like the selected train's)
+        const selNum = s.selectedTrain ? String((s.selectedTrain as any).number || (s.selectedTrain as any).trainNumber) : null;
+        if (!selNum || String(vt.arguments.trainNumber) !== selNum || String(vt.arguments.travelClass).toUpperCase() !== String(s.selectedClass || '').toUpperCase()) {
+          H.emit?.('AVAILABILITY_CHECKED', { trainNumber: r.data?.trainNumber, travelClass: r.data?.travelClass, status: r.data?.status, date: r.data?.date, selection: false });
+          break;
+        }
         this.commitSession({ availability: { ...(s.availability || {}), [vt.arguments.travelClass]: { ...r.data, dataSource: source, ...r.provenance,
           fetchedAt: r.provenance?.retrievedAt || r.timestamp, toolExecutionId: r.toolExecutionId,
           trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, date: vt.arguments.date || s.date, origin: s.origin, destination: s.destination } } } as any);

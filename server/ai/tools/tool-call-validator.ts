@@ -27,6 +27,7 @@ import { SAME_TRAIN_NOT_NEEDED } from '@shared/same-train-shortage';
 export const REQUESTED_CLASS_CODES = new Set(['1A', '2A', '3A', '3E', 'SL', 'CC', 'EC', '2S', 'FC', 'EA', 'EV']);
 import { REGISTERED_TOOLS, getToolDefinition, type ToolCall, type ToolDefinition, type RegisteredToolName, type ToolParam } from './tool-registry';
 import type { OrchestratorError } from '../decisions/agent-decision';
+import { TrainReferenceResolver } from '../context/train-reference-resolver';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
 import { normalizePnrInput, pnrsInText } from '../../booking/post-booking/pnr-validator';
@@ -47,6 +48,8 @@ export interface ValidatedToolCall {
 const UNAVAILABLE_TOOLS: ReadonlySet<RegisteredToolName> = new Set<RegisteredToolName>([]);
 
 export class ToolCallValidator {
+  /** Post-P42.10 F3: the existing backend reference resolver (current result set only, never a guess). */
+  private readonly trainRefs = new TrainReferenceResolver();
 
   /**
    * @param ground Prompt 14 grounding for CHECK_PNR / TRACK_TRAIN (user's own words + this session's
@@ -385,16 +388,77 @@ export class ToolCallValidator {
   }
 
   private validateAvailability(callId: string, def: ToolDefinition, args: Record<string,any>, session: BookingSession) {
-    // State guard
-    if (!session.selectedTrain || !session.selectedClass) {
-      return { ok:false as const, error:{ code:'INVALID_ACTION_FOR_STATE' as const, message:'पहले train और class select होनी चाहिए।' } };
+    const sel: any = session.selectedTrain;
+    const selNum = sel ? String(sel.number || sel.trainNumber) : null;
+    const hasRef = !!args.trainRef && typeof args.trainRef === 'object';
+    const explicitNum = args.trainNumber !== undefined && args.trainNumber !== null && args.trainNumber !== '';
+    const argNum = explicitNum ? this.validateTrainNumber(args.trainNumber, session) : null;
+    if (explicitNum && !argNum) return { ok:false as const, error:{ code:'INVALID_TOOL_CALL' as const, message:'Valid train number chahiye.' } };
+    const argCls = args.travelClass ? String(args.travelClass).toUpperCase() : null;
+    // 1) the AUTHORITATIVE selection (unchanged contract) — its result is synced into the booking session
+    if (sel && session.selectedClass && !hasRef && (!argNum || argNum === selNum) && (!argCls || argCls === String(session.selectedClass).toUpperCase())) {
+      const s1 = this.selectionCheck(args, session);
+      if (!s1.ok) return s1;
+      const date = this.resolveDateStr(args.date || session.date);
+      if (!date) return { ok:false as const, error:{ code:'AMBIGUOUS_DATE' as const, message:'तारीख चाहिए।' } };
+      return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber: s1.trainNumber, travelClass: s1.travelClass, date }, tool: def } };
     }
-    const sel = this.selectionCheck(args, session);
-    if (!sel.ok) return sel;
-    const { trainNumber, travelClass } = sel;
+    // 2) Post-P42.10 F3 — an INFORMATION availability check needs no prior UI selection: the train must resolve uniquely
+    //    against the CURRENT authoritative context (the selected train, or the current result set of this journey via the
+    //    existing TrainReferenceResolver), the class must be listed on that train and the date must be the journey's.
+    //    Never a guess: ambiguous → AMBIGUOUS_REFERENCE (+ candidates), unknown → INVALID_TRAIN_REFERENCE, no context →
+    //    INVALID_ACTION_FOR_STATE. The result never becomes the booking selection (see the runtime commit).
+    const info = this.resolveInformationTrain(args, session, argNum, hasRef, selNum);
+    if (!info.ok) return info;
+    const t = info.train;
+    const listed: string[] = ((t.availableClasses && t.availableClasses.length) ? t.availableClasses : (t.classes || []).map((c: any) => c?.code ?? c))
+      .map((c: any) => String(c).toUpperCase()).filter(Boolean);
+    const requested = (session as any).requestedClass ? String((session as any).requestedClass).toUpperCase() : null;
+    const travelClass = argCls
+      ?? (selNum === info.trainNumber && session.selectedClass ? String(session.selectedClass).toUpperCase() : null)
+      ?? (requested && listed.includes(requested) ? requested : null);
+    if (!travelClass) return { ok:false as const, error:{ code:'MISSING_REQUIRED_FIELD' as const,
+      message: `${info.trainNumber} ki kaunsi class check karni hai? Listed: ${listed.join(', ') || 'unknown'}.`,
+      details: { missingField: 'CLASS', availableClasses: listed } } };
+    if (listed.length && !listed.includes(travelClass)) return { ok:false as const, error:{ code:'INVALID_CLASS_SELECTION' as const,
+      message: `"${travelClass}" ${info.trainNumber} mein listed nahi hai. Listed: ${listed.join(', ')}.`, details: { availableClasses: listed } } };
     const date = this.resolveDateStr(args.date || session.date);
-    if (!date) return { ok:false as const, error:{ code:'AMBIGUOUS_DATE' as const, message:'तारीख चाहिए।' } };
-    return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber, travelClass, date }, tool: def } };
+    if (!date) return { ok:false as const, error:{ code:'AMBIGUOUS_DATE' as const, message:'Journey date clear nahi hai.' } };
+    if (info.resultDate && date !== info.resultDate) return { ok:false as const, error:{ code:'CONTEXT_CONFLICT' as const,
+      message: `${info.trainNumber} ${info.resultDate} ki current list se hai — ${date} ke liye pehle us date ki search chahiye.` } };
+    return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber: info.trainNumber, travelClass, date }, tool: def } };
+  }
+
+  /** Post-P42.10 F3: the train of an information availability check — selected train, or a unique current-result match. */
+  private resolveInformationTrain(args: Record<string, any>, session: BookingSession, argNum: string | null, hasRef: boolean, selNum: string | null):
+    { ok: true; train: any; trainNumber: string; resultDate: string | null } | { ok: false; error: OrchestratorError } {
+    const sel: any = session.selectedTrain;
+    if (!hasRef && argNum && sel && argNum === selNum) return { ok: true, train: sel, trainNumber: selNum!, resultDate: null };
+    if (!hasRef && !argNum) {
+      if (sel && selNum) return { ok: true, train: sel, trainNumber: selNum, resultDate: null };
+      return { ok: false, error: { code: 'INVALID_ACTION_FOR_STATE', message: 'Kis train ki availability? Train number ya list mein uski position batayein.', details: { missingField: 'TRAIN' } } };
+    }
+    const sr: any = session.searchResults;
+    const rows: any[] = sr?.trains || [];
+    // the result set must belong to the CURRENT journey (Prompt 30 provenance) — never an older list
+    const stale = !!sr && ((sr.date && session.date && sr.date !== session.date) || (sr.origin && session.origin && sr.origin !== session.origin)
+      || (sr.destination && session.destination && sr.destination !== session.destination));
+    if (!rows.length || stale) {
+      return { ok: false, error: { code: 'INVALID_ACTION_FOR_STATE', message: 'Is journey ki current train list nahi hai — pehle trains search karni hogi.', details: { missingField: 'SEARCH_RESULTS' } } };
+    }
+    const ref: any = hasRef ? args.trainRef : { kind: 'TRAIN_NUMBER', value: argNum };
+    if (hasRef && !['TRAIN_NUMBER', 'DISPLAY_INDEX', 'TIME_PREFERENCE', 'CLASS_PREFERENCE', 'DEMONSTRATIVE', 'PREVIOUS', 'ALTERNATIVE', 'TRAIN_NAME'].includes(String(ref.kind))) {
+      return { ok: false, error: { code: 'INVALID_TOOL_CALL', message: 'trainRef.kind samajh nahi aaya.' } };
+    }
+    const res = this.trainRefs.resolve(ref, session);
+    if (!res.ok) {
+      const code: OrchestratorError['code'] = res.code === 'STALE_SEARCH_REFERENCE' ? 'INVALID_TRAIN_REFERENCE' : res.code === 'MISSING_REQUIRED_FIELD' ? 'INVALID_ACTION_FOR_STATE' : res.code;
+      return { ok: false, error: { code, message: res.message, details: { candidates: (res.candidates || []).map(c => c.trainNumber) } } };
+    }
+    if (argNum && hasRef && res.train.trainNumber !== argNum) {
+      return { ok: false, error: { code: 'AMBIGUOUS_REFERENCE', message: `trainNumber ${argNum} aur trainRef alag trains bata rahe hain (${res.train.trainNumber}).`, details: { candidates: [argNum, res.train.trainNumber] } } };
+    }
+    return { ok: true, train: res.train, trainNumber: res.train.trainNumber, resultDate: sr?.date ?? null };
   }
 
   private validateFare(callId: string, def: ToolDefinition, args: Record<string,any>, session: BookingSession) {

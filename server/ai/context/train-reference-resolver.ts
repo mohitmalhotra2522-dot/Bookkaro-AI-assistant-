@@ -159,6 +159,14 @@ export class TrainReferenceResolver {
         const cands = trains.filter(x => (x.classes || []).some(c => c.code === code));
         return choose(cands, `Current results mein kisi train mein ${code} nahi hai.`, `${code} in trains mein hai:`);
       }
+      case 'TRAIN_NAME': {
+        // Post-P42.10 F3: name words ("Vande Bharat", "Shatabdi") against the CURRENT result names only — never a guess
+        const norm = (v: any) => String(v ?? '').toUpperCase().replace(/[^A-Z0-9]+/g, '');
+        const q = norm(ref.value);
+        if (q.length < 3) return { ok: false, code: 'INVALID_TRAIN_REFERENCE', message: 'Train ka naam clear nahi hai.', candidates: trains };
+        const cands = trains.filter(x => norm(x.trainName).includes(q));
+        return choose(cands, `"${ref.value}" naam ki train current results mein nahi hai. Available: ${listTrains(trains)}.`, `"${ref.value}" naam se ye trains hain:`);
+      }
     }
     return { ok: false, code: 'INVALID_TRAIN_REFERENCE', message: 'Train reference samajh nahi aaya.', candidates: trains };
   }

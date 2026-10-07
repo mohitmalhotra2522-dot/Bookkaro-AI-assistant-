@@ -82,6 +82,7 @@ import { naturalResponseComposer, statesExecutionBoundary, type NaturalComposeRe
 import { voiceResponseLogRecord, type VoiceResponse } from '../response/voice-response';
 import { speechOf } from '../conversation/assistant-response';
 import { actionLedgerFromSteps, guardActionClaims, type ActionExecution, type ActionClaimDiagnostic } from '../response/action-claims';
+import { guardPreferenceClaims, type PreferenceClaimDiagnostic } from '../response/preference-claims';
 import { guardReferenceClaims, type ReferenceClaimDiagnostic } from '../response/reference-claims';
 import { guardOutcomeClaims, honestFailureFallback, type OutcomeClaimDiagnostic } from '../response/outcome-claims';
 import { guardBookingStateClaims } from '../response/booking-state-claims';
@@ -178,6 +179,8 @@ interface TurnExtras {
   entityRejections?: Array<{ sentence: string; reason: string; binding: string }>;
   /** Prompt 29: action / progress statements checked against this turn's actual executions (codes + ids only). */
   actionClaims?: ActionClaimDiagnostic[];
+  /** Post-P42.10 F1: preference-memory claims ("yaad rakh liya") checked against the session after the turn. */
+  preferenceClaims?: PreferenceClaimDiagnostic[];
   /** Prompt 30 */
   referenceClaims?: ReferenceClaimDiagnostic[];
   /** Prompt 32: outcome-claim guard diagnostics (zero-result / source / live claims). */
@@ -576,7 +579,12 @@ export class ConversationAgentOrchestrator {
     extra.actionClaims = actionGuard.diagnostics;
     this.lastActions.set(sessionId, actionLedger.current);
     const turnSteps = [...rt.steps, ...(prep?.steps || [])];
-    const actionChecked = actionGuard.text || (actionGuard.removed.length ? joinParts([honestFailureFallback(turnSteps)]) : composed);
+    const actionChecked0 = actionGuard.text || (actionGuard.removed.length ? joinParts([honestFailureFallback(turnSteps)]) : composed);
+    // ---- Post-P42.10 F1: "preference yaad rakh liya" survives only when the AUTHORITATIVE session (after this turn's
+    //      update_booking_session outcomes) holds that preference; otherwise an honest "save nahi ho paayi" line replaces it
+    const prefGuard = guardPreferenceClaims(actionChecked0, sess);
+    extra.preferenceClaims = prefGuard.diagnostics;
+    const actionChecked = prefGuard.text || actionChecked0;
     // ---- Prompt 30 (guard step 7): position / list-membership claims ("doosri wali 12497 hai", "12497 parso ki list
     //      mein nahi hai") must hold for the CURRENT result set; only the false sentence is removed (text = TTS)
     const refGuard = guardReferenceClaims(actionChecked, sess);
@@ -832,6 +840,7 @@ export class ConversationAgentOrchestrator {
       ...(a.rt?.chain ? { chain: { ...a.rt.chain, sessionId: a.sessionId, turnId: a.turnId, stateBefore: String(a.stateBefore), stateAfter: String(this.state.getSession(a.sessionId).bookingState) } } : {}),
       binding: this.bindingDiagnostics(a, x, wording),
       actionClaims: [...(x.actionClaims || []), ...(ns?.actionClaims || [])],
+      ...(x.preferenceClaims?.length ? { preferenceClaims: x.preferenceClaims } : {}),
       references: { records: x.referenceRecords || [], claims: [...(ns?.referenceClaims || []), ...(x.referenceClaims || [])] },
       outcomeClaims: [...(x.outcomeClaims || []), ...(ns?.outcomeClaims || [])],
       tools: this.toolDiagnostics(recs, [...(a.rt?.steps || []), ...(a.prepSteps || [])]),

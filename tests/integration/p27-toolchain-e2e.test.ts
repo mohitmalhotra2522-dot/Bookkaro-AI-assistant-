@@ -265,7 +265,7 @@ describe('P27 G3 — general knowledge, mixed, corrections, failures, limits', (
     expect(JSON.stringify(fake.requests.map(q => q.body))).not.toContain(KEY);
   });
 
-  it('[N2] native: after a fresh search the LLM gets the ACTIONABLE reason (select first), not a misleading "repeated call" block; re-select → check runs', async () => {
+  it('[N2] native: a stale list is rejected with the ACTIONABLE reason, not a misleading "repeated call" block; after the fresh search the same train is checked directly (post-P42.10 F3: no select-first)', async () => {
     const U = (intent: string, action: string, entities: any = {}) => ({ name: 'update_booking_session', args: { intent, action, entities } });
     const SEARCH = (date: string) => ({ name: 'SEARCH_TRAINS', args: { origin: 'Amritsar', destination: 'Delhi', date } });
     const AV = { name: 'CHECK_AVAILABILITY', args: { trainNumber: '12497', travelClass: '3A' } };
@@ -276,9 +276,7 @@ describe('P27 G3 — general knowledge, mixed, corrections, failures, limits', (
         { calls: [U('UPDATE_DATE', 'UPDATE_DATE', { dateRaw: 'parso', correctionTarget: 'date', correctionValueRaw: 'parso' })] },
         { calls: [AV] },                         // stale list → rejected on the OLD state
         { calls: [SEARCH('parso')] },            // fresh search for the new date
-        { calls: [AV] },                         // same arguments on a NEW result list → re-validated (selection missing)
-        { calls: [U('SELECT_TRAIN', 'SELECT_TRAIN', { trainRef: { kind: 'TRAIN_NUMBER', value: '12497' }, classRaw: '3A', selectionPurpose: 'INFORMATION' })] },
-        { calls: [AV] },                         // re-selected from the NEW list → executes
+        { calls: [AV] },                         // same arguments on the NEW result list → re-validated there, executes (no selection needed)
         { content: 'Parso ke liye 12497 mein 3A available hai.' }]
     };
     const fake = new FakeOpenAI((v: TurnView) => { const p = plan[v.user]; return p && v.step < p.length ? p[v.step] : { content: 'Theek hai.' }; });
@@ -289,7 +287,7 @@ describe('P27 G3 — general knowledge, mixed, corrections, failures, limits', (
     const r = await h.say('Kal nahi parso, usi train ki availability dobara check karo.');
     const reasons = chain(r).steps.map((x: any) => `${x.toolName}:${x.decisionReason}`);
     expect(reasons).not.toContain('CHECK_AVAILABILITY:REJECTED:INVALID_REPEATED_CALL');
-    expect(reasons).toEqual(['CHECK_AVAILABILITY:REJECTED:INVALID_ACTION_FOR_STATE', 'SEARCH_TRAINS:LLM_TOOL_CALL', 'CHECK_AVAILABILITY:REJECTED:INVALID_ACTION_FOR_STATE', 'CHECK_AVAILABILITY:LLM_TOOL_CALL']);
+    expect(reasons).toEqual(['CHECK_AVAILABILITY:REJECTED:INVALID_ACTION_FOR_STATE', 'SEARCH_TRAINS:LLM_TOOL_CALL', 'CHECK_AVAILABILITY:LLM_TOOL_CALL']);
     expect(delta(n0)).toMatchObject({ search: 1, avail: 1 });
     expect(h.s().date).toBe(nextDay(d0));
     expect(rail.calls.at(-1)).toEqual(['avail', '12497', '3A']);

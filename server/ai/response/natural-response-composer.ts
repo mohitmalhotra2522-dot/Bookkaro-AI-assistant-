@@ -35,6 +35,7 @@ import { ClaimEntityBinder, verifyBoundClaim, diagnoseCrossEntity, resultTrainsO
 import { explicitDates } from './claim-dates';
 import { RESULT_REF_RE } from '../tool-runtime/tool-result-identity';
 import { actionLedgerFromSteps, guardActionSentence, type ActionLedger, type ActionClaimDiagnostic } from './action-claims';
+import { guardPreferenceClaims } from './preference-claims';
 import { guardSameTrainRuleClaims } from './same-train-claims';
 import { verifyReferenceClaims, type ReferenceClaimDiagnostic } from './reference-claims';
 import { verifyOutcomeClaims, type OutcomeClaimDiagnostic } from './outcome-claims';
@@ -604,6 +605,11 @@ export class NaturalResponseComposer {
           if (!ag.text) { prevRejected = true; return; }
           t = ag.text;
         }
+      }
+      // Post-P42.10 F1: a preference "saved / yaad rakh liya" claim the session does not hold never reaches TTS either
+      if (guardPreferenceClaims(t, s).removed.length) {
+        rejected.push({ sentence: t.slice(0, 120), reason: 'PREFERENCE_CLAIM:NOT_SAVED' });
+        prevRejected = true; return;
       }
       // Prompt 42: "book X, board / deboard at Y" only with a VERIFIED boarding / alighting rule — same hard constraint
       // as the screen reply (a removed claim never reaches the screen or TTS through this path either)

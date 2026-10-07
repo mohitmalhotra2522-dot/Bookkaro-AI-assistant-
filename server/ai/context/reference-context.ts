@@ -77,7 +77,7 @@ export function referenceContextView(s: BookingSession) {
 // ------------------------------------------------------------------ resolution records (internal observability)
 
 export type ReferenceStatus = 'VALID' | 'STALE' | 'AMBIGUOUS' | 'INVALID';
-export type ResolutionType = 'TRAIN_NUMBER' | 'DISPLAY_INDEX' | 'POSITION' | 'FOCUS' | 'TIME_WINDOW' | 'CLASS_PREFERENCE' | 'PREVIOUS' | 'ALTERNATIVE' | 'TOOL_ARGUMENT';
+export type ResolutionType = 'TRAIN_NUMBER' | 'DISPLAY_INDEX' | 'POSITION' | 'FOCUS' | 'TIME_WINDOW' | 'CLASS_PREFERENCE' | 'PREVIOUS' | 'ALTERNATIVE' | 'TOOL_ARGUMENT' | 'TRAIN_NAME';
 
 export interface ReferenceResolutionRecord {
   via: 'SELECTION' | 'TOOL_ARGUMENT';
@@ -104,6 +104,7 @@ function resolutionTypeOf(ref: TrainReference): ResolutionType {
     case 'TIME_PREFERENCE': return 'TIME_WINDOW';
     case 'CLASS_PREFERENCE': return 'CLASS_PREFERENCE';
     case 'PREVIOUS': return 'PREVIOUS';
+    case 'TRAIN_NAME': return 'TRAIN_NAME';
     default: return 'ALTERNATIVE';
   }
 }

@@ -28,7 +28,7 @@ export type RegisteredToolName =
   | 'PRESENT_SAME_TRAIN_ALTERNATIVES';
 
 export interface ToolParam {
-  type: 'string' | 'number' | 'boolean';
+  type: 'string' | 'number' | 'boolean' | 'object';
   description: string;
   required?: boolean;
   enum?: string[];
@@ -77,7 +77,7 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
       date: { type: 'string', description: 'Canonical date YYYY-MM-DD (after DateResolver)', required: true },
       preferredClass: { type: 'string', description: 'AC | NON_AC | ANY', enum: ['AC','NON_AC','ANY'] },
       preferredTime: { type: 'string', description: 'MORNING | AFTERNOON | EVENING | NIGHT | ANY', enum: ['MORNING','AFTERNOON','EVENING','NIGHT','ANY'] },
-      passengersCount: { type: 'number', description: 'Number of passengers 1-6' },
+      passengersCount: { type: 'number', description: 'Only a passenger count the user stated in their own words (omit otherwise — never default to 1). It is a search parameter; the session count changes through update_booking_session passengersCountRaw.' },
       requestedClass: { type: 'string', description: 'P42.7: the exact class CODE the user asked for, only when the user named one (1A, 2A, 3A, 3E, SL, CC, EC, 2S, FC, EA, EV). Omit when the user did not name a class.' },
       dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
     },
@@ -99,17 +99,17 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
   },
   {
     name: 'CHECK_AVAILABILITY',
-    description: 'Check seat availability for the SELECTED train and class on the journey date. Omitted arguments default to the authoritative session selection; mismatching arguments are rejected.',
+    description: 'Check seat availability of a train + class on the journey date. No prior train selection is needed: the train may be the selected train or any train of the CURRENT search results (by trainNumber, or by trainRef as the user referred to it). The backend resolves it against the current results and never guesses (ambiguous → candidates, unknown → rejected). Omitted arguments default to the selected train / class.',
     parameters: {
-      trainNumber: { type: 'string', description: 'Train number (optional: defaults to selected train)' },
-      travelClass: { type: 'string', description: 'Class code e.g. CC, 2S, 3A (optional: defaults to selected class)' },
+      trainNumber: { type: 'string', description: 'Train number from the current results or the selected train (optional: defaults to the selected train)' },
+      trainRef: { type: 'object', description: 'Post-P42.10: how the user referred to the train ("doosri wali" → DISPLAY_INDEX 2, "morning wali" → TIME_PREFERENCE MORNING, "last wali" → DEMONSTRATIVE LAST, "Vande Bharat wali" → TRAIN_NAME) — resolved by the backend against the current results (optional; use instead of trainNumber)' },
+      travelClass: { type: 'string', description: 'Class code e.g. CC, 2S, 3A — a class listed for that train (optional: defaults to the selected class, else the class the user named at search)' },
       date: { type: 'string', description: 'YYYY-MM-DD (optional: defaults to journey date)' },
       origin: { type: 'string', description: 'Journey origin code (optional: must match the session journey)' },
       destination: { type: 'string', description: 'Journey destination code (optional: must match the session journey)' },
       passengersCount: { type: 'number', description: 'Passenger count (optional: must match the session count)' },
       dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
-    },
-    requiresState: ['selectedTrain','selectedClass']
+    }
   },
   {
     name: 'GET_FARE',

@@ -174,7 +174,7 @@ export function errorTypeOf(code: string): ToolErrorType {
  * the same validation error always comes back until an argument changes).
  */
 export function structuredToolError(tool: string, err: { code?: string; message?: string; details?: any } | undefined, attempts = 1)
-  : { errorType: ToolErrorType; tool: string; argument?: string; reason: string; retryable: boolean; code: string; message: string; expected?: string; received?: string } {
+  : { errorType: ToolErrorType; tool: string; argument?: string; reason: string; retryable: boolean; code: string; message: string; expected?: string; received?: string; candidates?: string[]; missingField?: string; availableClasses?: string[] } {
   const code = String(err?.code || 'TOOL_FAILED');
   const d = err?.details && typeof err.details === 'object' ? err.details : {};
   const argument = typeof d.argument === 'string' ? d.argument : ARGUMENT_OF[code];
@@ -184,5 +184,9 @@ export function structuredToolError(tool: string, err: { code?: string; message?
   };
   if (typeof d.expected === 'string') out.expected = d.expected.slice(0, 120);
   if (typeof d.received === 'string') out.received = d.received.slice(0, 120);
+  // Post-P42.10 F3: what the LLM needs to ask naturally (never a guess) — candidate train numbers / the missing slot
+  if (Array.isArray(d.candidates) && d.candidates.length) out.candidates = d.candidates.slice(0, 10).map((c: any) => String(c));
+  if (typeof d.missingField === 'string') out.missingField = d.missingField;
+  if (Array.isArray(d.availableClasses) && d.availableClasses.length) out.availableClasses = d.availableClasses.slice(0, 12).map((c: any) => String(c));
   return out;
 }

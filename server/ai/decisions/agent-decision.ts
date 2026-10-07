@@ -71,6 +71,8 @@ export type TrainReference = (
   | { kind: 'PREVIOUS'; value: 'PREVIOUS' }
   /** "nahi, doosri train" — another train than the currently selected one */
   | { kind: 'ALTERNATIVE'; value: 'OTHER' }
+  /** Post-P42.10 F3: a train named by (part of) its name ("Vande Bharat wali") — resolved only when exactly ONE current result matches */
+  | { kind: 'TRAIN_NAME'; value: string }
 ) & { searchResultsVersion?: number };
 
 export type InfoRequest = 'TRAIN_INFO' | 'TIMETABLE' | 'AVAILABILITY' | 'FARE';
@@ -380,6 +382,8 @@ export interface TurnRecord {
     };
     /** Prompt 29: action / progress claim validation (actionType, actionStatus, toolCallId, validationStatus, removalReason). */
     actionClaims?: import('../response/action-claims').ActionClaimDiagnostic[];
+    /** Post-P42.10 F1: preference-memory claims vs the session after the turn. */
+    preferenceClaims?: import('../response/preference-claims').PreferenceClaimDiagnostic[];
     /** Prompt 30: reference resolutions (LLM trainRefs / tool-argument trains vs the current result set) and the reply's
      *  position / list-membership claims. Codes + internal ids for logs only — never shown to the user. */
     references?: { records: import('../context/reference-context').ReferenceResolutionRecord[]; claims: import('../response/reference-claims').ReferenceClaimDiagnostic[] };

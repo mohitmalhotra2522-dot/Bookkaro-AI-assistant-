@@ -281,8 +281,17 @@ export function todayInIndia(now: Date = new Date()): { date: string; weekday: s
   return { date, weekday, timezone: 'Asia/Kolkata' };
 }
 
+/** Post-P42.10 F4: reply script for a language style (HINDI = the user wrote Devanagari). */
+export function replyScriptOf(style: 'HINGLISH' | 'HINDI' | 'ENGLISH'): 'ROMAN' | 'DEVANAGARI' {
+  return style === 'HINDI' ? 'DEVANAGARI' : 'ROMAN';
+}
+
 /** Railway tools as OpenAI function definitions (the approved, implemented, LLM-callable set) + the session proposal. */
 export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
+  const trainRef = { type: 'object', description: 'How the user referred to a train (a PROPOSAL resolved by the backend).', properties: {
+    kind: { type: 'string', enum: ['TRAIN_NUMBER', 'DISPLAY_INDEX', 'TIME_PREFERENCE', 'CLASS_PREFERENCE', 'DEMONSTRATIVE', 'PREVIOUS', 'ALTERNATIVE', 'TRAIN_NAME'] },
+    value: { type: ['string', 'number'], description: 'e.g. "12014", 2, "MORNING", "AC", "THIS" | "FIRST" | "LAST" | "MIDDLE" ("beech wali"), "Vande Bharat" (TRAIN_NAME)' },
+    searchResultsVersion: { type: 'number' } }, required: ['kind'] };
   const railway = input.tools.map(t => {
     const props: Record<string, any> = {};
     const required: string[] = [];
@@ -291,17 +300,14 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
       // the backend resolves stations and dates deterministically — the model passes the user's own words
       if (t.name === 'SEARCH_TRAINS' && (k === 'origin' || k === 'destination')) description = 'Station name or code as the user said it (e.g. "Amritsar", "ASR") — the backend resolves it.';
       if (t.name === 'SEARCH_TRAINS' && k === 'date') description = 'Travel date exactly as the user said it ("kal", "parso", "5 Oct") or YYYY-MM-DD — the backend DateResolver resolves it. Never compute dates.';
-      props[k] = { type: p.type, description, ...(p.enum ? { enum: p.enum } : {}) };
+      // Post-P42.10 F3: a train reference argument uses the same trainRef schema as update_booking_session
+      props[k] = k === 'trainRef' ? { ...trainRef, description } : { type: p.type, description, ...(p.enum ? { enum: p.enum } : {}) };
       if (p.required && canonicalToolOf(t.name) === 'SEARCH_TRAINS') required.push(k);
     }
     return { type: 'function', function: { name: t.name, description: t.description, parameters: { type: 'object', properties: props, required } } };
   });
-  const trainRef = { type: 'object', description: 'How the user referred to a train (a PROPOSAL resolved by the backend).', properties: {
-    kind: { type: 'string', enum: ['TRAIN_NUMBER', 'DISPLAY_INDEX', 'TIME_PREFERENCE', 'CLASS_PREFERENCE', 'DEMONSTRATIVE', 'PREVIOUS', 'ALTERNATIVE'] },
-    value: { type: ['string', 'number'], description: 'e.g. "12014", 2, "MORNING", "AC", "THIS" | "FIRST" | "LAST" | "MIDDLE" ("beech wali")' },
-    searchResultsVersion: { type: 'number' } }, required: ['kind'] };
   const session = { type: 'function', function: { name: SESSION_UPDATE_TOOL,
-    description: 'Propose a change to the booking session (select train/class, change route/date, passengers, review, confirmation, new booking, cancel flow). The backend validates it and returns the outcome; nothing is booked or paid.',
+    description: 'Propose a change to the booking session (select train/class, change route/date, passengers, remember a travel preference — preferredClassRaw / preferredTimeRaw, review, confirmation, new booking, cancel flow). The backend validates it and returns the outcome (applied / error); nothing is booked or paid. Nothing is stored without this call.',
     parameters: { type: 'object', required: ['intent', 'action'], properties: {
       intent: { type: 'string', enum: ['BOOK_TRAIN', 'SEARCH_TRAINS', 'SELECT_TRAIN', 'SELECT_CLASS', 'UPDATE_JOURNEY', 'UPDATE_DATE', 'UPDATE_PASSENGERS', 'COLLECT_PASSENGER_DETAILS', 'SHOW_REVIEW', 'CONFIRM_BOOKING', 'CANCEL_FLOW', 'CANCEL_BOOKING', 'MODIFY_BOOKING', 'CHECK_REFUND_STATUS', 'GENERAL_RAILWAY_QUERY', 'UNKNOWN'] },
       action: { type: 'string', description: 'SELECT_TRAIN | SELECT_CLASS | UPDATE_JOURNEY | UPDATE_DATE | UPDATE_PASSENGERS | SET_PASSENGER_COUNT | UPDATE_PASSENGER | START_PASSENGER_COLLECTION | COLLECT_PASSENGERS | COLLECT_PASSENGER_DETAILS | SHOW_REVIEW | REQUEST_CONFIRMATION | PREPARE_IRCTC_HANDOFF | REFINE_RESULTS | COMPARE_TRAINS | NO_ACTION' },
@@ -309,7 +315,7 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
         originRaw: STR(providerToolCatalog.enabled() ? 'origin station CODE (e.g. ASR) — understand the station in any language/script yourself' : 'origin as said'),
         destinationRaw: STR(providerToolCatalog.enabled() ? 'destination station CODE (e.g. NDLS) — understand the station in any language/script yourself' : 'destination as said'),
         dateRaw: STR(providerToolCatalog.enabled() ? 'journey date as YYYY-MM-DD, computed by you from the user\'s words and "today"' : 'date words as said'),
-        preferredTimeRaw: STR('e.g. subah / morning / raat'), preferredClassRaw: STR('e.g. AC / sleeper / CC'),
+        preferredTimeRaw: STR('MORNING | AFTERNOON | EVENING | NIGHT | ANY — only a time preference the user stated'), preferredClassRaw: STR('AC | NON_AC | ANY, or a class code (SL, 3A, CC …; sleeper = SL) — only a class preference the user stated'),
         trainRef, classRaw: STR('class as said, e.g. "CC", "AC", "sleeper"'),
         passengersCountRaw: STR('passenger count as said'), passengersDelta: { type: 'number' },
         passengerChanges: { type: 'array', description: 'EVERY passenger detail the user gave this turn — incl. a bare answer ("31", "male", "lower") to context.bookingPreparation.nextToAsk, with that passengerIndex. Nothing is stored without this.', items: { type: 'object', properties: { passengerIndex: { type: 'number' },
@@ -348,6 +354,9 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
     inputMode: input.inputMode, bookingState: input.state, missingFields: input.missingFields,
     // Prompt 25 Part 7: dominant language of the LATEST user message (the reply language; the model writes the reply)
     replyLanguage: detectLanguageStyle(input.userText, (input.history || []).filter(m => m.role === 'user').map(m => String(m.content || ''))),
+    // Post-P42.10 F4: the SCRIPT that goes with it — Hinglish / English are written in Roman letters; Devanagari only when the
+    // user writes Hindi in Devanagari (same rule for TEXT and VOICE: both use the user's normalized words)
+    replyScript: replyScriptOf(detectLanguageStyle(input.userText, (input.history || []).filter(m => m.role === 'user').map(m => String(m.content || '')))),
     // P42.4 (Part 2.1): recent turns are sent as real chat messages below — not duplicated inside the context JSON, so the
     // authoritative fields (memory versions, booking preparation, turn context) stay inside the size bound
     context: input.context ? omitRecentMessages(input.context) : null,
@@ -419,7 +428,10 @@ function bfeEligibilityLLMView(e: any): Record<string, unknown> {
 /** Prompt 25 Part 8: the structured validation reason (argument / expected / received) — nothing else from details. */
 /** Prompt 28: { errorType, tool, argument, reason, retryable } — code / message are already present. */
 function pickStructured(e: ReturnType<typeof structuredToolError>): Record<string, any> {
-  return { errorType: e.errorType, tool: e.tool, ...(e.argument ? { argument: e.argument } : {}), reason: e.reason, retryable: e.retryable };
+  return { errorType: e.errorType, tool: e.tool, ...(e.argument ? { argument: e.argument } : {}), reason: e.reason, retryable: e.retryable,
+    // Post-P42.10 F3: what Muse needs to ask naturally instead of guessing (candidate train numbers / the missing slot)
+    ...(e.candidates?.length ? { candidates: e.candidates } : {}), ...(e.missingField ? { missingField: e.missingField } : {}),
+    ...(e.availableClasses?.length ? { availableClasses: e.availableClasses } : {}) };
 }
 
 function argumentDetails(d: any): Record<string, string> {
