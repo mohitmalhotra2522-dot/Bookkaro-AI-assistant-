@@ -110,8 +110,8 @@ export function clarification(c: readonly Readonly<BookingRecord>[], stationLabe
   const unique = new Set(nums).size === nums.length;
   const label = (r: Readonly<BookingRecord>) => unique ? r.train.trainNumber : `${r.train.trainNumber} (${humanDate(r.journeyDate)})`;
   const head = `${COUNT_WORD[c.length] || c.length} ${stationLabel ? stationLabel + ' ' : ''}bookings mil rahi hain.`;
-  if (c.length === 2) return `${head} Aap ${label(c[0])} wali dekhna chahte ho ya ${label(c[1])} wali?`;
-  return `${head} Aap ${c.slice(0, -1).map(label).join(', ')} ya ${label(c[c.length - 1])} — kaunsi wali dekhna chahte ho?`;
+  // P42.1: facts only (the matching bookings) — the LLM asks which one, if needed
+  return `${head} (${c.map(label).join(' / ')})`;
 }
 
 const cap = (w: string) => w.charAt(0).toUpperCase() + w.slice(1);

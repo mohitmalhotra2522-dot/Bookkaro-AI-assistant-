@@ -184,7 +184,8 @@ describe('P18 G2 — slots, follow-ups, corrections, references', () => {
   it('[11] "second train" with no results → current results unavailable, nothing executed', async () => {
     const h = mk();
     const r = await h.say('Second wali');
-    expect(r.responseMessage).toMatch(/Kaunsi train\? Current search results available nahi hain\./);
+    expect(r.responseMessage).toMatch(/^Current search results available nahi hain\./);   // P42.1: fact only, no backend question
+    expect(r.responseMessage).not.toMatch(/\?/);
     expect(r.turn.toolCount).toBe(0);
   });
 });
@@ -194,7 +195,10 @@ describe('P18 G2 — ambiguity, pending questions, yes/no safety', () => {
     const h = mk();
     await h.say('Amritsar se Delhi jaana hai');
     const r = await h.say('22');
-    expect(r.responseMessage).toMatch(/22 tareekh kis mahine ki/);
+    // P42.1: the month ambiguity is STRUCTURED context (the LLM asks); no backend question
+    expect(h.s().pendingInteraction).toMatchObject({ type: 'CLARIFICATION_REQUIRED', data: { kind: 'DATE_MONTH' } });
+    expect(String((h.s().pendingInteraction as any).data.day)).toBe('22');
+    expect(r.responseMessage).not.toMatch(/\?/);
     expect(h.s().date).toBeFalsy();
     expect(h.s().pendingQuestion).toBe('MISSING_DATE');
     expect(r.turn.toolCount).toBe(0);

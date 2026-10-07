@@ -20,7 +20,7 @@ import { reviewBuilder, reviewFingerprint } from '../../booking/review-builder';
 import { normalizeStateAction } from '../decisions/state-actions';
 import { passengerChangeValidator } from '../../booking/preparation/passenger-change-validator';
 import { validatePassengerCount } from '../../booking/preparation/passenger-count';
-import { classifyConfirmation, AMBIGUOUS_CONFIRMATION_PROMPT } from '../../booking/handoff/confirmation-policy';
+import { classifyConfirmation, AMBIGUOUS_CONFIRMATION_FACT } from '../../booking/handoff/confirmation-policy';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import { messageForRecord, SUBMITTING_MESSAGE, UNSAFE_RETRY_MESSAGE, ALREADY_CONFIRMED_MESSAGE, ALREADY_ACTIVE_MESSAGE, VOICE_INTERRUPTION_MESSAGE } from '../../booking/provider/booking-provider-execution-service';
 
@@ -79,6 +79,9 @@ export interface ApplyOutcome {
   /** Deterministic computed answer (comparison / refinement over authoritative results). */
   directAnswer?: string;
   applied: string[];
+  /** P42.1 hardening: LLM-proposed passenger fields that were NOT stored (non-Latin / transliterated name, preference
+   *  the user never stated) — index + field + reason only, never the value. Set by the runtime's grounding step. */
+  passengerProposalRejections?: import('./passenger-proposal-grounding').PassengerProposalRejection[];
   /** Explicit confirmation accepted by the guard; BookingPreparationService
    *  verifies review version + freshness and performs the handoff transition. */
   confirmRequested?: boolean;
@@ -128,8 +131,8 @@ export class ContextualTurnApplier {
     const out: ApplyOutcome = { notes: [], blockTools: false, applied: [] };
     const S = () => this.state.getSession(sessionId);
     const e = d?.entities || {};
-    const fail = (code: OrchestratorErrorCode, message: string, pendingOverride?: PendingInteraction): ApplyOutcome =>
-      ({ ...out, error: { code, message }, blockTools: true, pendingOverride: pendingOverride ?? out.pendingOverride });
+    const fail = (code: OrchestratorErrorCode, message: string, pendingOverride?: PendingInteraction, details?: Record<string, any>): ApplyOutcome =>
+      ({ ...out, error: { code, message, ...(details ? { details } : {}) }, blockTools: true, pendingOverride: pendingOverride ?? out.pendingOverride });
     const emit = (type: BookingEventType, data?: Record<string, any>) => { this.state.emit(sessionId, type, ctx.turnId, data); ctx.events.push(type); };
 
     // 0) Structural validation of untrusted LLM output
@@ -139,7 +142,7 @@ export class ContextualTurnApplier {
       return fail('UNSUPPORTED_ACTION', 'Ye action supported nahi hai. Aap train, class, passengers ya review ke baare mein bata sakte hain.');
     }
     if (!d || typeof d !== 'object' || !ALLOWED_INTENTS.has(d.intent) || !ALLOWED_ACTIONS.has(d.action)) {
-      return fail('INVALID_CONTEXT', 'Maaf kijiye, request samajh nahi aayi. Thoda alag tareeke se batayein?');
+      return fail('INVALID_CONTEXT', 'Maaf kijiye, request samajh nahi aayi.');
     }
 
     // 0a) Prompt 15 — booking lifecycle actions (cancel / modify / refund status). Classified from the
@@ -297,7 +300,7 @@ export class ContextualTurnApplier {
     if (S().bookingState === BookingState.AWAITING_CONFIRMATION && !this.hasSubstantiveEntities(e) && !e.negation
       && classifyConfirmation(ctx.rawText ?? '') === 'AMBIGUOUS') {
       out.applied.push('CONFIRMATION_AMBIGUOUS');
-      return fail('INVALID_CONFIRMATION', AMBIGUOUS_CONFIRMATION_PROMPT, { type: 'CONFIRMATION_REQUIRED' });
+      return fail('INVALID_CONFIRMATION', AMBIGUOUS_CONFIRMATION_FACT, { type: 'CONFIRMATION_REQUIRED', data: { kind: 'BOOKING_CONFIRMATION', confirmationRequired: true, confirmationStatus: 'PENDING' } } as any);
     }
     if (e.executionRequested) {
       // Prompt 35: explicit execution attempt → the required boundary sentence first
@@ -321,7 +324,7 @@ export class ContextualTurnApplier {
       const cls = classifyConfirmation(ctx.rawText ?? '');
       if (cls !== 'EXPLICIT') {
         out.applied.push(`CONFIRMATION_${cls}`);
-        return fail('INVALID_CONFIRMATION', AMBIGUOUS_CONFIRMATION_PROMPT, { type: 'CONFIRMATION_REQUIRED' });
+        return fail('INVALID_CONFIRMATION', AMBIGUOUS_CONFIRMATION_FACT, { type: 'CONFIRMATION_REQUIRED', data: { kind: 'BOOKING_CONFIRMATION', confirmationRequired: true, confirmationStatus: 'PENDING' } } as any);
       }
       out.confirmRequested = true;
       out.applied.push('CONFIRMATION_ACCEPTED_BY_GUARD');
@@ -333,8 +336,8 @@ export class ContextualTurnApplier {
       const s = S();
       if (s.bookingState === BookingState.AWAITING_CONFIRMATION) {
         this.state.transitionState(sessionId, BookingState.REVIEW);
-        out.notes.push('Theek hai, booking aage nahi badha raha. Kya badalna hai — train, class, date ya passengers?');
-        out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', hint: 'Kya badalna hai — train, class, date ya passengers?' };
+        out.notes.push('Theek hai, booking aage nahi badha raha.');
+        out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', data: { kind: 'CHANGE_DETAILS', options: ['train', 'class', 'date', 'passengers'] } } as any;
         out.applied.push('NEGATION_AT_CONFIRMATION');
         return out;
       }
@@ -351,16 +354,16 @@ export class ContextualTurnApplier {
     if (e.changeRequested && !this.hasSubstantiveEntities(e)) {
       const s = S();
       if (e.changeRequested === 'date') return { ...out, notes: [], pendingOverride: { type: 'DATE_REQUIRED', data: { correction: true } }, applied: ['CHANGE_DATE_REQUESTED'] };
-      if (e.changeRequested === 'route') return { ...out, pendingOverride: { type: 'CLARIFICATION_REQUIRED', hint: 'Naya route batayein — kahan se kahan?' }, applied: ['CHANGE_ROUTE_REQUESTED'] };
+      if (e.changeRequested === 'route') return { ...out, pendingOverride: { type: 'CLARIFICATION_REQUIRED', data: { kind: 'NEW_ROUTE' } } as any, applied: ['CHANGE_ROUTE_REQUESTED'] };
       if (e.changeRequested === 'destination') return { ...out, pendingOverride: { type: 'DESTINATION_REQUIRED', data: { correction: true } }, applied: ['CHANGE_DESTINATION_REQUESTED'] };
       if (e.changeRequested === 'origin') return { ...out, pendingOverride: { type: 'ORIGIN_REQUIRED', data: { correction: true } }, applied: ['CHANGE_ORIGIN_REQUESTED'] };
       if (e.changeRequested === 'details') {
         if (s.bookingState === BookingState.AWAITING_CONFIRMATION) this.state.transitionState(sessionId, BookingState.REVIEW);
-        return { ...out, pendingOverride: { type: 'CLARIFICATION_REQUIRED', hint: 'Kya badalna hai — train, class, date ya passengers?' }, applied: ['CHANGE_DETAILS_REQUESTED'] };
+        return { ...out, pendingOverride: { type: 'CLARIFICATION_REQUIRED', data: { kind: 'CHANGE_DETAILS', options: ['train', 'class', 'date', 'passengers'] } } as any, applied: ['CHANGE_DETAILS_REQUESTED'] };
       }
       if (e.changeRequested === 'passengers') return { ...out, pendingOverride: { type: 'PASSENGERS_REQUIRED' }, applied: ['CHANGE_PASSENGERS_REQUESTED'] };
       if (e.changeRequested === 'train') {
-        if (!currentResults(s).length) return fail('MISSING_REQUIRED_FIELD', 'Kaunsi train? Current search results available nahi hain. Pehle trains search kar lete hain.');
+        if (!currentResults(s).length) return fail('MISSING_REQUIRED_FIELD', 'Current search results available nahi hain. Pehle trains search kar lete hain.');
         this.rewindTo(sessionId, BookingState.SHOWING_TRAINS);
         return { ...out, applied: ['CHANGE_TRAIN_REQUESTED'] };
       }
@@ -374,14 +377,14 @@ export class ContextualTurnApplier {
     // 5) Single station without role → resolve role from context, else ask.
     if (e.stationOnlyRaw && !e.originRaw && !e.destinationRaw) {
       const st = resolveStationToken(e.stationOnlyRaw);
-      if (!st) return fail('AMBIGUOUS_ROUTE', `"${e.stationOnlyRaw}" station samajh nahi aaya. Kaunsa station?`);
+      if (!st) return fail('AMBIGUOUS_ROUTE', `"${e.stationOnlyRaw}" station samajh nahi aaya.`);
       const s = S();
       const pend = s.pendingInteraction?.type;
       if (pend === 'ORIGIN_REQUIRED' && !s.pendingInteraction?.data?.route) e.originRaw = st.code;
       else if (pend === 'DESTINATION_REQUIRED' || (s.origin && !s.destination)) e.destinationRaw = st.code;
       else if (s.destination && !s.origin) e.originRaw = st.code;
       else {
-        return fail('AMBIGUOUS_ROUTE', `${shortName(st.name)} ko origin rakhna hai ya destination?`,
+        return fail('AMBIGUOUS_ROUTE', `${shortName(st.name)} ka role (origin ya destination) clear nahi hai.`,
           { type: 'CLARIFICATION_REQUIRED', data: { kind: 'STATION_ROLE', code: st.code, name: st.name } });
       }
     }
@@ -463,7 +466,11 @@ export class ContextualTurnApplier {
       const conv: NonNullable<typeof e.passengerUpdates> = [];
       for (const pc of e.passengerChanges) {
         const v = passengerChangeValidator.validate(S(), pc);
-        if (!v.ok) { emit('PASSENGER_CHANGE_REJECTED', { code: v.code, passengerIndex: v.passengerIndex, fields: v.fields }); return fail(v.code, v.message); }
+        if (!v.ok) {
+          emit('PASSENGER_CHANGE_REJECTED', { code: v.code, passengerIndex: v.passengerIndex, fields: v.fields, ...(v.reason ? { reason: v.reason } : {}) });
+          // P42.1 hardening: structured context for Muse (reason / field / user action) — the LLM words any question
+          return fail(v.code, v.message, undefined, v.reason ? { reason: v.reason, field: 'name', passengerIndex: v.passengerIndex, missingField: 'PASSENGER_DETAILS', userActionRequired: true } : undefined);
+        }
         conv.push({ ref: { kind: 'ID', value: v.passengerId }, fields: pc.changes as any, explicit: true });
       }
       e.passengerUpdates = [...(e.passengerUpdates || []), ...conv];
@@ -492,7 +499,7 @@ export class ContextualTurnApplier {
         const i = s.lastPassengerRefId ? s.passengers.findIndex(p => p.id === s.lastPassengerRefId) : (s.passengers.length === 1 ? 0 : -1);
         return i >= 0 ? { ok: true as const, passenger: s.passengers[i], index: i } : null;
       })();
-      if (!resolved) return fail('INVALID_PASSENGER_INDEX', 'Kis passenger ki detail badalni hai? Passenger number batayein.');
+      if (!resolved) return fail('INVALID_PASSENGER_INDEX', 'Passenger identify nahi hua.');
       // Prompt 19 (Part 14): a field outside the Passenger contract is rejected — never silently mapped to "name"
       if (!['name', 'age', 'gender', 'berthPreference', 'foodPreference'].includes(e.passengerFieldChange.field)) {
         return fail('INVALID_PASSENGER_FIELD', 'Passenger ke liye sirf naam, umar, gender, berth preference aur khane ki choice liye ja sakte hain.');
@@ -554,16 +561,16 @@ export class ContextualTurnApplier {
   }
 
   /** Contextual clarification for a short reply that has no meaning in the current state. */
-  private contextualNudge(s: BookingSession, mode: 'TEXT' | 'VOICE', rawText?: string): string {
-    const p = s.pendingInteraction && s.pendingInteraction.type !== 'NONE' ? s.pendingInteraction : derivePendingInteraction(s);
-    const q = questionFor(p, s, mode);
-    if (s.bookingState === BookingState.SHOWING_TRAINS) return `Abhi koi booking confirm karne ke liye pending nahi hai. ${q}`;
-    if (s.bookingState === BookingState.IRCTC_HANDOFF_READY) return 'Booking confirmation request pehle hi record ho chuki hai. Aur kuch madad chahiye?';
+  private contextualNudge(s: BookingSession, _mode: 'TEXT' | 'VOICE', rawText?: string): string {
+    // v0.42.1: facts only — no fixed follow-up question appended (the LLM reads this outcome and decides what to ask)
+    if (s.bookingState === BookingState.SHOWING_TRAINS) return 'Abhi koi booking confirm karne ke liye pending nahi hai.';
+    if (s.bookingState === BookingState.IRCTC_HANDOFF_READY) return 'Booking confirmation request pehle hi record ho chuki hai.';
     // Prompt 20 (Part 38/39): "confirm" / "book it" without a CURRENT review is never a booking
     const confirmWord = /\b(confirm|book\s+it|book\s+kar|book\s+karo|proceed)\b/i.test(rawText || '');
-    if (confirmWord) return `Abhi confirm karne ke liye koi current review nahi hai.${q ? ` ${q}` : ' Aap kis option ko continue karna chahte hain?'}`;
-    return q ? `Aap kis option ko continue karna chahte hain? ${q}` : 'Aap kis option ko continue karna chahte hain?';
+    if (confirmWord) return 'Abhi confirm karne ke liye koi current review nahi hai.';
+    return 'Abhi koi confirmation pending nahi hai.';
   }
+
 
   private rewindTo(sessionId: string, target: BookingState) {
     const s = this.state.getSession(sessionId);
@@ -579,11 +586,11 @@ export class ContextualTurnApplier {
     let date: string | null = null;
     if (e.originRaw) {
       o = resolveStationToken(e.originRaw);
-      if (!o) return { error: { code: 'AMBIGUOUS_ROUTE', message: `"${e.originRaw}" station samajh nahi aaya. Kahan se chalna hai?` }, pending: { type: 'ORIGIN_REQUIRED' }, applied };
+      if (!o) return { error: { code: 'AMBIGUOUS_ROUTE', message: `"${e.originRaw}" station samajh nahi aaya.` }, pending: { type: 'ORIGIN_REQUIRED' }, applied };
     }
     if (e.destinationRaw) {
       dst = resolveStationToken(e.destinationRaw);
-      if (!dst) return { error: { code: 'AMBIGUOUS_ROUTE', message: `"${e.destinationRaw}" station samajh nahi aaya. Kahan jaana hai?` }, pending: { type: 'DESTINATION_REQUIRED' }, applied };
+      if (!dst) return { error: { code: 'AMBIGUOUS_ROUTE', message: `"${e.destinationRaw}" station samajh nahi aaya.` }, pending: { type: 'DESTINATION_REQUIRED' }, applied };
     }
     if (e.dateRaw) {
       const r = /^\d{4}-\d{2}-\d{2}$/.test(e.dateRaw) ? resolveDate(e.dateRaw) : resolveDate(e.dateRaw);
@@ -593,7 +600,7 @@ export class ContextualTurnApplier {
     const newOrigin = o?.code ?? s.origin;
     const newDest = dst?.code ?? s.destination;
     if (newOrigin && newDest && newOrigin === newDest) {
-      return { error: { code: 'AMBIGUOUS_ROUTE', message: 'Shuruaat aur manzil ek hi station nahi ho sakte. Kahan jaana hai?' }, applied };
+      return { error: { code: 'AMBIGUOUS_ROUTE', message: 'Shuruaat aur manzil ek hi station nahi ho sakte.' }, applied };
     }
 
     const routeChanged = (o && o.code !== s.origin) || (dst && dst.code !== s.destination);
@@ -648,7 +655,7 @@ export class ContextualTurnApplier {
     if (!passengerCollection.validCount(n)) {
       // Prompt 19 (Part 3/47): typed, deterministic — an invalid count is never corrected or applied
       const v = validatePassengerCount(n);
-      return { error: { code: 'INVALID_PASSENGER_COUNT', message: v.ok ? 'Ek booking mein 1 se 6 passengers tak ho sakte hain. Kitne passengers hain?' : v.message }, notes: [], applied: [] };
+      return { error: { code: 'INVALID_PASSENGER_COUNT', message: v.ok ? 'Ek booking mein 1 se 6 passengers tak ho sakte hain.' : v.message }, notes: [], applied: [] };
     }
     if (n === s.passengersCount) return { notes: [], applied: [] };
     const prev = s.passengersCount;
@@ -706,7 +713,7 @@ export class ContextualTurnApplier {
     : { error?: OrchestratorError; pending?: PendingInteraction; softError?: OrchestratorError; notes: string[]; applied: string[] } {
     const s = this.state.getSession(sessionId);
     if (!s.passengersCount) {
-      return { error: { code: 'MISSING_PASSENGER_COUNT', message: 'Pehle bataiye kitne passengers hain?' }, pending: { type: 'PASSENGERS_REQUIRED' }, notes: [], applied: [] };
+      return { error: { code: 'MISSING_PASSENGER_COUNT', message: 'Passengers ki sankhya abhi set nahi hai.' }, pending: { type: 'PASSENGERS_REQUIRED' }, notes: [], applied: [] };
     }
     passengerCollection.ensureSlots(s);
     const r = passengerCollection.applyUpdates(s, e.passengerUpdates || []);
@@ -747,7 +754,7 @@ export class ContextualTurnApplier {
     s.carryOverSelection = undefined;
     const emit = (type: BookingEventType, data?: Record<string, any>) => { this.state.emit(sessionId, type, ctx.turnId, data); ctx.events.push(type); };
     const t = currentResults(s).find(x => x.trainNumber === co.trainNumber);
-    if (!t) return [`${co.trainNumber} nayi date ki list mein nahi hai — nayi train chuniye.`];
+    if (!t) return [`${co.trainNumber} nayi date ki list mein nahi hai.`];
     const notes = [...this.applyTrainSelection(sessionId, t, ctx, emit).notes];
     if (co.classCode && (t.classes || []).some(c => c.code === co.classCode)) {
       notes.push(...this.applyClassSelection(sessionId, co.classCode, ctx, emit).notes);
@@ -794,7 +801,7 @@ export class ContextualTurnApplier {
 
   private refine(s: BookingSession, kind: 'FASTEST' | 'EARLIEST_ARRIVAL' | 'ALTERNATIVES', value?: string): string {
     const ts = currentResults(s);
-    if (!ts.length) return 'Kaunsi train? Current search results available nahi hain. Pehle trains search kar lete hain.';
+    if (!ts.length) return 'Current search results available nahi hain. Pehle trains search kar lete hain.';
     if (kind === 'ALTERNATIVES') {
       const others = ts.filter(t => t.trainNumber !== value);
       if (!others.length) return `Is route aur date par ${value || 'is train'} ke alawa koi train nahi mili.`;

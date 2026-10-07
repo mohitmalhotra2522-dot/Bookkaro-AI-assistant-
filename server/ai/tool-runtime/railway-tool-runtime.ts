@@ -21,6 +21,10 @@ import type {
 import type { ToolCall } from '../tools/tool-registry';
 import type { ValidatedToolCall } from '../tools/tool-call-validator';
 import { resolveToolName, isStateAllowed } from './railway-tool-registry';
+import { sameTrainLimitsFromEnv } from '../../railway/same-train/same-train-engine';
+
+/** P42: runtime timeout for the composite search = engine total budget + one provider call + 3 s margin. */
+function sameTrainToolTimeoutMs(): number { const l = sameTrainLimitsFromEnv(); return l.totalTimeoutMs + l.perCallTimeoutMs + 3000; }
 import { normalizeToolArguments } from './tool-argument-normalizer';
 import { normalizeToolErrorCode, statusForError, safeErrorMessage, SAFE_ERROR_MESSAGE } from './tool-error-normalizer';
 import { syncJourneyVersion, journeyKeyOf } from './journey-version';
@@ -338,7 +342,8 @@ export class ToolTurn {
       raw = await Promise.race([
         // P37: executed on the LLM-selected provider connector ONLY (no failover chain, no hidden switch)
         inProviderScope(p.tc?.provider, () => executor.execute(p.vt, guard)),
-        new Promise(res => { timer = setTimeout(() => { timedOut = true; res({ __timeout: true }); }, this.timeoutMs); })
+        // P42: the composite Same Train Alternative search is bounded by its OWN engine budget (total + one call + margin)
+        new Promise(res => { timer = setTimeout(() => { timedOut = true; res({ __timeout: true }); }, p.vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? sameTrainToolTimeoutMs() : this.timeoutMs); })
       ]);
     } catch (e) { thrown = e; } finally { clearTimeout(timer); }
     const latencyMs = Date.now() - t0;

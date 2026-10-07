@@ -11,6 +11,7 @@
  */
 import type { BookingSession, Passenger } from '@shared/entities';
 import { berthOptionsForClass, isSeatPreferenceClass, FOOD_PREFERENCES } from '@shared/constants';
+import { isLatinName } from './passenger-validator';
 
 export type FoodOptionStatus = 'OFFERED' | 'NOT_INCLUDED' | 'UNKNOWN' | 'NOT_CHECKED';
 
@@ -44,24 +45,52 @@ export function passengerOptionsView(s: BookingSession) {
   const food = foodStatusOf(s);
   return {
     berth: berth.length
-      ? { options: [...berth], ask: true, ...(isSeatPreferenceClass(cls) ? { note: `${cls}: no berth — IRCTC seat preference only (WINDOW = Window Side)` } : {}) }
+      ? { options: [...berth], labels: berth.map(berthLabel), ask: true, ...(isSeatPreferenceClass(cls) ? { note: `${cls}: no berth — IRCTC seat preference only (WINDOW = Window Side)` } : {}) }
       : { options: [] as string[], ask: false, note: SEAT_CLASSES.has(cls.toUpperCase()) ? `${cls}: seat is allotted by the railway — no verified seat preference` : `${cls}: no verified berth choices` },
     food: food.status === 'OFFERED'
-      ? { status: food.status, options: [...FOOD_PREFERENCES], ask: true }
+      ? { status: food.status, options: [...FOOD_PREFERENCES], labels: FOOD_PREFERENCES.map(foodLabel), ask: true }
       : { status: food.status, options: [] as string[], ask: false,
           ...(food.status === 'NOT_CHECKED' ? { howToCheck: 'GET_TRAIN_INFO for the selected train (facilities.catering)' } : {}),
           ...(food.pantry === true ? { pantryCar: true } : {}) }
   };
 }
 
-/** Optional details still worth asking for ONE passenger (never the required ones — those are in `missing`). */
-export function optionalToAsk(s: BookingSession, p: Partial<Passenger> | undefined): Array<'berthPreference' | 'foodPreference'> {
+/**
+ * P42.1 hardening — optional details (berth / meal) are asked ONCE. The key binds the question to the selected train +
+ * class + stable passenger id, so a new train / class asks again. Session-scoped; holds no values.
+ */
+type OptionalField = 'berthPreference' | 'foodPreference';
+export function optionalAskKey(s: BookingSession, passengerId: string | undefined, field: OptionalField): string {
+  return `${selectedTrainNumber(s)}|${String(s.selectedClass || '')}|${passengerId || ''}|${field}`;
+}
+export function optionalAlreadyAsked(s: BookingSession, p: Partial<Passenger> | undefined, field: OptionalField): boolean {
+  const asked: unknown = (s as any).optionalAsked;
+  return !!p?.id && Array.isArray(asked) && asked.includes(optionalAskKey(s, p.id, field));
+}
+/** Record that the reply asked this optional detail (called once per turn by the orchestrator; values never stored). */
+export function markOptionalAsked(s: BookingSession, d: { passenger: number; field: string } | null | undefined): void {
+  if (!d || (d.field !== 'berthPreference' && d.field !== 'foodPreference')) return;
+  const p = (s.passengers || [])[d.passenger - 1];
+  if (!p?.id) return;
+  const key = optionalAskKey(s, p.id, d.field);
+  const asked: string[] = Array.isArray((s as any).optionalAsked) ? (s as any).optionalAsked : [];
+  if (!asked.includes(key)) (s as any).optionalAsked = [...asked, key].slice(-24);
+}
+
+/** Optional details still unanswered for ONE passenger that this train + class offer (asked or not). */
+export function optionalUnanswered(s: BookingSession, p: Partial<Passenger> | undefined): OptionalField[] {
   const o = passengerOptionsView(s);
   if (!o) return [];
-  const out: Array<'berthPreference' | 'foodPreference'> = [];
+  const out: OptionalField[] = [];
   if (o.berth.ask && !p?.berthPreference) out.push('berthPreference');
   if (o.food.ask && !p?.foodPreference) out.push('foodPreference');
   return out;
+}
+
+/** Optional details still worth asking for ONE passenger (never the required ones — those are in `missing`).
+ *  P42.1 hardening: a detail already asked once (and not answered) is not asked again. */
+export function optionalToAsk(s: BookingSession, p: Partial<Passenger> | undefined): OptionalField[] {
+  return optionalUnanswered(s, p).filter(f => !optionalAlreadyAsked(s, p, f));
 }
 
 /**
@@ -74,7 +103,8 @@ export function nextPassengerDetail(s: BookingSession): { passenger: number; fie
   for (let k = 0; k < count; k++) {
     const p: any = (s.passengers || [])[k] || {};
     const opt = optionalToAsk(s, (s.passengers || [])[k]);
-    const isMissing = (f: string) => p[f] === undefined || p[f] === null || p[f] === '';
+    // P42.1 hardening: a stored name that is not in Latin letters is not a valid IRCTC name → still open
+    const isMissing = (f: string) => p[f] === undefined || p[f] === null || p[f] === '' || (f === 'name' && !isLatinName(p[f]));
     const order = ['name', 'age', ...(opt.includes('berthPreference') ? ['berthPreference'] : []), 'gender', ...(opt.includes('foodPreference') ? ['foodPreference'] : [])] as const;
     const f = order.find(x => (x === 'berthPreference' || x === 'foodPreference') ? true : isMissing(x));
     if (f) return { passenger: k + 1, field: f as any };

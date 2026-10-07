@@ -90,14 +90,14 @@ export class TrainReferenceResolver {
         ok: false, code: 'MISSING_REQUIRED_FIELD',
         message: ref.kind === 'TRAIN_NUMBER'
           ? `${ref.value} abhi current search results mein nahi hai. Pehle route aur date ke liye trains search kar lete hain.`
-          : 'Kaunsi train? Current search results available nahi hain. Pehle trains search kar lete hain.'
+          : 'Current search results available nahi hain. Pehle trains search kar lete hain.'
       };
     }
     const one = (t: ResultTrain): TrainRefResolution => ({ ok: true, train: t, displayIndex: t.displayIndex });
     const choose = (cands: ResultTrain[], emptyMsg: string, ambiguousPrefix: string): TrainRefResolution => {
       if (cands.length === 1) return one(cands[0]);
       if (cands.length === 0) return { ok: false, code: 'INVALID_TRAIN_REFERENCE', message: emptyMsg, candidates: trains };
-      return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `${ambiguousPrefix} ${listTrains(cands)} — kaunsi chahiye?`, candidates: cands };
+      return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `${ambiguousPrefix} ${listTrains(cands)}.`, candidates: cands };
     };
     const selectedNum = session.selectedTrain ? ((session.selectedTrain as any).number || (session.selectedTrain as any).trainNumber) : undefined;
 
@@ -125,7 +125,7 @@ export class TrainReferenceResolver {
           const mid = trains.length >= 2 ? trains.slice(Math.max(0, trains.length / 2 - 1), trains.length / 2 + 1) : trains;
           return trains.length < 3
             ? { ok: false, code: 'INVALID_TRAIN_REFERENCE', message: `List mein beech wali train nahi hai: ${listTrains(trains)}.`, candidates: trains }
-            : { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `Beech mein ${listTrains(mid)} hain — kaunsi chahiye?`, candidates: mid };
+            : { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `Beech mein ${listTrains(mid)} hain.`, candidates: mid };
         }
         // THIS — the train in focus (selected / last discussed), else the only result.
         const focus = selectedNum || session.focusTrainNumber;
@@ -134,14 +134,14 @@ export class TrainReferenceResolver {
         if (focus && !f) {
           return { ok: false, code: 'INVALID_TRAIN_REFERENCE', message: `${focus} current results mein nahi hai. Available: ${listTrains(trains)}.`, candidates: trains };
         }
-        return choose(trains, '', '"Ye wali" se kaunsi train? Options:');
+        return choose(trains, '', '"Ye wali" se train clear nahi hai. Options:');
       }
       case 'PREVIOUS': {
         const prev = session.previousTrainNumber || session.focusTrainNumber;
         const p = prev ? trains.find(x => x.trainNumber === prev) : undefined;
         if (p) return one(p);
         return { ok: false, code: prev ? 'INVALID_TRAIN_REFERENCE' : 'AMBIGUOUS_REFERENCE',
-          message: prev ? `${prev} current results mein nahi hai. Available: ${listTrains(trains)}.` : `Kaunsi train ki baat kar rahe hain? ${listTrains(trains)}.`,
+          message: prev ? `${prev} current results mein nahi hai. Available: ${listTrains(trains)}.` : `Train reference clear nahi hai. Available: ${listTrains(trains)}.`,
           candidates: trains };
       }
       case 'ALTERNATIVE': {

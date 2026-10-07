@@ -20,6 +20,7 @@ import { BookingReadinessEvaluator, getNextRequiredField, defaultPolicy } from '
 import { reviewBuilder, reviewFingerprint } from '../../server/booking/review-builder';
 import { BookingState } from '../../shared/states';
 import type { BookingSession } from '../../shared/entities';
+import { nextPassengerDetail } from '../../server/booking/passenger-options';
 
 let state: ConversationStateManager;
 let orch: ConversationAgentOrchestrator;
@@ -65,20 +66,23 @@ describe('G2 — passenger collection only after train + class; one field at a t
     expect(r.newState).toBe(BookingState.BOOKING_PREPARE);
     expect(r.events).toContain('BOOKING_PREPARATION_STARTED');
     expect(r.pendingInteraction?.type).toBe('PASSENGERS_REQUIRED');
-    expect(r.responseMessage).toContain('Kitne passengers hain?');
+    expect(r.responseMessage).not.toMatch(/\?/);                     // P42.1: structured PASSENGERS_REQUIRED, no backend question
     expect(r.context.selectedTrain.number).toBe('12014');            // train not discarded
     r = await say(sid, '2 passengers');
     expect(r.newState).toBe(BookingState.COLLECTING_PASSENGER_DETAILS);
     expect(r.context.passengers.map((p: any) => p.id)).toEqual(['P1', 'P2']);   // stable ids
     expect(r.pendingInteraction).toMatchObject({ type: 'PASSENGER_DETAILS_REQUIRED', data: { field: 'name', passengerId: 'P1' } });
     r = await say(sid, 'Rahul Sharma');
-    expect(r.responseMessage).toMatch(/Rahul Sharma ki umar kitni hai\?$/);
+    expect(nextPassengerDetail(state.getSession(sid))).toEqual({ passenger: 1, field: 'age' });   // P42.1: structured, no backend question
+    expect(r.responseMessage).not.toMatch(/\?/);
     expect(r.responseMessage).not.toMatch(/gender/);                   // one question at a time
     r = await say(sid, '34');
-    expect(r.responseMessage).toMatch(/gender — male, female ya other\?$/);
+    // P42.1: structured next detail (v0.39.6 order: CC seat preference before gender); no backend question
+    expect(nextPassengerDetail(state.getSession(sid))).toEqual({ passenger: 1, field: 'berthPreference' });
+    expect(r.responseMessage).not.toMatch(/\?/);
     r = await say(sid, 'male');
     expect(r.pendingInteraction?.data).toMatchObject({ field: 'name', passengerId: 'P2' });
-    expect(r.responseMessage).toMatch(/Doosre passenger ka naam/);
+    expect(r.responseMessage).not.toMatch(/\?/);   // P42.1: the structured pending (above) carries it; the LLM asks
   });
 });
 
@@ -195,7 +199,8 @@ describe('G2 — corrections without restart', () => {
     expect(r.responseMessage).toMatch(/Passenger 1 ka naam Rahul Sharma se Rohit Sharma kar diya/);
     expect(r.events).toContain('CORRECTION_APPLIED');
     expect(r.newState).toBe(BookingState.COLLECTING_PASSENGER_DETAILS);
-    expect(r.responseMessage).toMatch(/Rohit Sharma ki umar kitni hai\?$/);   // continues, no restart
+    expect(nextPassengerDetail(state.getSession(sid))).toEqual({ passenger: 1, field: 'age' });   // continues, no restart (P42.1: structured)
+    expect(r.responseMessage).not.toMatch(/\?/);
   });
 
   it('[11] age and gender corrections by name / index; implicit values never silently overwrite', async () => {
@@ -220,7 +225,7 @@ describe('G2 — corrections without restart', () => {
     await toAwaiting(sid);
     let r = await say(sid, 'Passenger 2 ka naam change karo');
     expect(r.pendingInteraction).toMatchObject({ type: 'PASSENGER_DETAILS_REQUIRED', data: { passengerId: 'P2', field: 'name', correction: true } });
-    expect(r.responseMessage).toMatch(/naya naam kya hai\?/);
+    expect(r.responseMessage).not.toMatch(/\?/);   // P42.1: the structured pending (above) carries the request; the LLM asks
     r = await say(sid, 'Neha Verma');
     expect(r.context.passengers[1].name).toBe('Neha Verma');
     expect(r.context.passengers[0].name).toBe('Rahul Sharma');
@@ -240,7 +245,9 @@ describe('G2 — passenger count changes & removal', () => {
     expect(r.context.fare).toBeUndefined();                           // dependent fare invalidated
     expect(r.events).toEqual(expect.arrayContaining(['PASSENGER_COUNT_UPDATED', 'REVIEW_INVALIDATED']));
     expect(r.newState).toBe(BookingState.COLLECTING_PASSENGER_DETAILS);
-    expect(r.responseMessage).toMatch(/Teesre passenger ka naam bataiye/);
+    expect(r.context.passengers[2].name).toBeFalsy();                 // P3 still open
+    expect(nextPassengerDetail(state.getSession(sid))).toEqual({ passenger: 1, field: 'berthPreference' });   // P42.1: structured next detail (P1's optional seat preference comes first)
+    expect(r.responseMessage).not.toMatch(/\?|bataiye/);
   });
 
   it('[14] "ek aur add kar do" and "Sirf 1 passenger": delta + shrink keep entered details', async () => {

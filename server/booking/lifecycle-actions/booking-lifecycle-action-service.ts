@@ -211,7 +211,7 @@ export class BookingLifecycleActionService {
     if (res.kind === 'AMBIGUOUS') {
       s.lifecycleClarification = { action: intent.action, candidateIds: res.candidates.map(r => r.bookingId), setAtTurnId: o.turnId, awaiting: 'BOOKING', retry: intent.retry, changes: { ...(intent.changes.journeyDate ? { journeyDate: intent.changes.journeyDate } : {}), ...(intent.changes.travelClass ? { travelClass: intent.changes.travelClass } : {}) } };
       const verb = intent.family === 'CANCEL' ? 'cancel karni hai' : intent.family === 'REFUND' ? 'ka refund status chahiye' : 'change karni hai';
-      return this.reject(sessionId, o, intent.action, null, 'MULTIPLE_BOOKINGS_MATCHED', res.message.replace(/dekhna chahte ho\?$/, `${verb}?`));
+      return this.reject(sessionId, o, intent.action, null, 'MULTIPLE_BOOKINGS_MATCHED', res.message);
     }
     const r = res.record;
     s.activeBookingId = r.bookingId;
@@ -257,7 +257,7 @@ export class BookingLifecycleActionService {
       // missing details → ask one short question (with a typed rejection, nothing sent)
       if (v.code === 'MODIFICATION_NOT_ELIGIBLE' && action === 'REQUEST_JOURNEY_CHANGE' && !intent.changes.journeyDate && !intent.changeError) {
         s.lifecycleClarification = { action, candidateIds: [r.bookingId], setAtTurnId: o.turnId, awaiting: 'DATE' };
-        return this.reject(sessionId, o, action, r, 'MODIFICATION_NOT_ELIGIBLE', o.mode === 'VOICE' ? 'Nayi journey date kya chahiye?' : 'Nayi journey date batayein — jaise "25 October kar do". (Date backend resolve karega; provider confirm karega tabhi change hoga.)', v.capability);
+        return this.reject(sessionId, o, action, r, 'MODIFICATION_NOT_ELIGIBLE', o.mode === 'VOICE' ? 'Nayi journey date abhi nahi mili.' : 'Nayi journey date abhi nahi mili (jaise "25 October kar do"). (Date backend resolve karega; provider confirm karega tabhi change hoga.)', v.capability);
       }
       if (v.code === 'MODIFICATION_NOT_ELIGIBLE' && action === 'REQUEST_CLASS_CHANGE' && !intent.changes.travelClass) {
         s.lifecycleClarification = { action, candidateIds: [r.bookingId], setAtTurnId: o.turnId, awaiting: 'CLASS' };
@@ -274,7 +274,7 @@ export class BookingLifecycleActionService {
       case 'REQUEST_MODIFICATION': {
         const opts = [caps!.CHANGE_JOURNEY ? 'journey date' : '', caps!.CHANGE_CLASS ? 'class' : '', caps!.CHANGE_PASSENGER ? 'passenger details' : ''].filter(Boolean);
         if (!opts.length) return this.reject(sessionId, o, action, r, 'ACTION_NOT_SUPPORTED', LIFECYCLE_MESSAGES.MODIFY_UNSUPPORTED, 'MODIFY_BOOKING');
-        return { type: 'DIRECT', answer: `Kya change karna hai — ${opts.join(', ')}? Jaise "date 25 October kar do"${caps!.CHANGE_CLASS ? ' ya "CC se 2A kar do"' : ''}.` };
+        return { type: 'DIRECT', answer: `Is booking mein ye change ho sakte hain: ${opts.join(', ')} (jaise "date 25 October kar do"${caps!.CHANGE_CLASS ? ' ya "CC se 2A kar do"' : ''}).` };
       }
       default: return { type: 'ASYNC', plan: { kind: 'PREPARE', action, bookingId: r.bookingId, changes: intent.changes } };
     }
@@ -368,14 +368,14 @@ export class BookingLifecycleActionService {
     let message: string;
     if (isCancel) {
       message = ctx.mode === 'VOICE'
-        ? `Main ${rec.train.trainNumber} ki booking cancel karne ki request prepare kar raha hoon. Kya aap cancellation confirm karte hain?`
-        : `Main ${rec.train.trainNumber} ki booking cancel karne ki request prepare kar raha hoon (${label}). Kya aap cancellation confirm karte hain? "Haan / confirm" bolne par hi request provider ko jayegi — final result provider batayega.`;
+        ? `Main ${rec.train.trainNumber} ki booking cancel karne ki request prepare kar raha hoon. Confirm karne par hi request provider ko jayegi.`
+        : `Main ${rec.train.trainNumber} ki booking cancel karne ki request prepare kar raha hoon (${label}). "Haan / confirm" bolne par hi request provider ko jayegi — final result provider batayega.`;
     } else {
       const desc = this.changeDesc(changeType!, plan.changes);
       const fareTxt = fare ? (fare.amount > 0 ? ` Provider ke hisaab se fare difference: ${money(fare.amount, fare.currency)} extra.` : fare.amount < 0 ? ` Provider ke hisaab se fare ${money(fare.amount, fare.currency)} kam hoga.` : ' Provider ke hisaab se koi fare difference nahi hai.') : '';
       message = ctx.mode === 'VOICE'
-        ? `Main ${rec.train.trainNumber} booking mein ${desc} ki request prepare kar raha hoon.${fareTxt} Kya aap confirm karte hain?`
-        : `Main ${rec.train.trainNumber} booking (${label}) mein ${desc} ki request prepare kar raha hoon.${fareTxt} Kya aap ye change confirm karte hain? Confirm karne par request provider ko jayegi — change tabhi hoga jab provider confirm kare.`;
+        ? `Main ${rec.train.trainNumber} booking mein ${desc} ki request prepare kar raha hoon.${fareTxt} Confirm karne par hi request provider ko jayegi.`
+        : `Main ${rec.train.trainNumber} booking (${label}) mein ${desc} ki request prepare kar raha hoon.${fareTxt} Confirm karne par request provider ko jayegi — change tabhi hoga jab provider confirm kare.`;
     }
     return { message, card: { type: 'booking_action', data: this.view(act) } };
   }

@@ -50,7 +50,7 @@ describe('P25 G2 — claim classification + structured railway claims', () => {
     expect(g.provenance!.every(p => p.claimType === 'GENERAL_KNOWLEDGE')).toBe(true);
     // same explanation in a NON-general turn (train list on screen, no availability result): not a live claim
     const mid = await compose(session(), 'RAC mein do passengers ek berth share karte hain. 12014 mein seats available hain.', { userText: 'RAC kya hota hai?' });
-    expect(mid.text).toBe('RAC mein do passengers ek berth share karte hain. Kaunsi train chahiye?');
+    expect(mid.text).toBe('RAC mein do passengers ek berth share karte hain.');   // P42.1: no backend-appended question
     expect(reasons(mid)).toEqual(['UNVERIFIED_AVAILABILITY']);
     // live Muse regression: HOW RAC works ("seat confirm ho jaati hai") is an explanation, not a seat claim — even with trains on screen
     const how = await compose(session(), 'RAC matlab Reservation Against Cancellation. RAC mein aadhi berth milti hai aur cancellation hone par seat confirm ho jaati hai. Chart ke baad bhi confirmed seat mil sakti hai.', { general: true, userText: 'RAC kya hota hai?' });
@@ -69,7 +69,7 @@ describe('P25 G2 — claim classification + structured railway claims', () => {
     const s = session();
     const ok = await compose(s, '12014 sabse pehle 10:50 par pahunchti hai.', { general: true, userText: 'Inme se sabse pehle kaunsi pahunchti hai?' });
     expect(ok).toMatchObject({ source: 'LLM', rejected: [] });
-    expect(ok.text).toBe('12014 sabse pehle 10:50 par pahunchti hai. Kaunsi train chahiye?');
+    expect(ok.text).toBe('12014 sabse pehle 10:50 par pahunchti hai.');   // P42.1
     expect(ok.provenance![0]).toMatchObject({ claimType: 'TOOL_DERIVED_FACT', sourceTool: 'SEARCH_TRAINS', sourceResultId: 'rs:1', fields: ['trainNumber', 'arrival'] });
     const idx = buildFactIndex(s, []);
     expect(judgeTimes('12014 13:50 par pahunchti hai.', idx).reason).toBe('TIME_MISMATCH:12014@13:50');       // 13:50 is 12497's arrival
@@ -88,7 +88,7 @@ describe('P25 G2 — claim classification + structured railway claims', () => {
     expect(repairClassList('CC and 2S are available.')).toBe('CC and 2S classes are listed.');
     const s = session();
     const r = await compose(s, '12014 Amritsar Shatabdi – 04:55 se 10:50, CC aur 2S available. 12014 mein 3A available hai. CC mein seats available hain.');
-    expect(r.text).toBe('12014 Amritsar Shatabdi – 04:55 se 10:50, CC aur 2S classes listed. Kaunsi train chahiye?');
+    expect(r.text).toBe('12014 Amritsar Shatabdi – 04:55 se 10:50, CC aur 2S classes listed.');   // P42.1
     expect(reasons(r)).toEqual(['UNVERIFIED_AVAILABILITY', 'UNVERIFIED_AVAILABILITY']);   // P26: a single-class "available hai" is a seat claim
     expect(r.repaired).toBe(1);
     expect(r.provenance![0]).toMatchObject({ claimType: 'TOOL_DERIVED_FACT', sourceTool: 'SEARCH_TRAINS' });
@@ -129,7 +129,7 @@ describe('P25 G2 — claim classification + structured railway claims', () => {
     expect(derivedTrainCounts('subah ki 2 trains hain', idx)).toEqual([2]);
     expect(derivedTrainCounts('3A wali 2 trainein', idx)).toEqual([2]);
     const r = await compose(s, 'Kal 3 trainein mili hain. Subah ki 2 trains hain. Raat ki 4 trainein hain.');
-    expect(r.text).toBe('Kal 3 trainein mili hain. Subah ki 2 trains hain. Kaunsi train chahiye?');
+    expect(r.text).toBe('Kal 3 trainein mili hain. Subah ki 2 trains hain.');   // P42.1
     expect(reasons(r)).toEqual(['UNGROUNDED_COUNT:4 trainein']);
     expect(r.provenance![0]).toMatchObject({ claimType: 'TOOL_DERIVED_FACT', fields: ['resultCount'] });
   });
@@ -141,17 +141,17 @@ describe('P25 G2 — response cleanup, question, language', () => {
     expect(toSentences('Options hain: 1. 12014 10:50. 2. 12497')).toEqual(['Options hain.', '12014 10:50.', '12497.']);
     const s = session();
     const r = await compose(s, 'Kal 3 trainein mili hain:\n1. 12014 – fare ₹999.\n2. 12497 – 06:35 se 13:50.\n- \nAur 12497 sabse pehle pahunchti hai. Aur 12014 04:55 pe nikalti hai.');
-    expect(r.text).toBe('Kal 3 trainein mili hain. 12497 – 06:35 se 13:50. 12014 04:55 pe nikalti hai. Kaunsi train chahiye?');
+    expect(r.text).toBe('Kal 3 trainein mili hain. 12497 – 06:35 se 13:50. 12014 04:55 pe nikalti hai.');   // P42.1
     expect(r.text).not.toMatch(/(^|\s)\d\.(\s|$)|(^|\s)[-•](\s|$)/);
   });
 
-  it('[11b] no duplicate question: a reply that already asks ("…bata dijiye.") gets no extra pending question; English → English question', async () => {
+  it('[11b] no backend question is ever added (P42.1): a reply that asks keeps its own question; an English reply stays English', async () => {
     const s = session({ pendingInteraction: { type: 'PASSENGERS_REQUIRED' } });
     const r = await compose(s, 'Main ticket book ya payment nahi kar sakta. Kitne passengers hain, bata dijiye.', { q: 'Kitne passengers hain?', userText: 'book karke payment bhi kar do', general: true });
     expect(r.text).toBe('Main ticket book ya payment nahi kar sakta. Kitne passengers hain, bata dijiye.');
     const e = await compose(session(), '12014 Amritsar Shatabdi reaches New Delhi first, at 10:50.', { userText: 'Which of these trains reaches Delhi earliest?', general: true });
     expect(e.language).toBe('ENGLISH');
-    expect(e.text).toBe('12014 Amritsar Shatabdi reaches New Delhi first, at 10:50. Which train would you like?');
+    expect(e.text).toBe('12014 Amritsar Shatabdi reaches New Delhi first, at 10:50.');
   });
 
   it('[7] language = dominant language of the latest user turn (shared words carry no weight)', () => {

@@ -147,7 +147,7 @@ describe('P22 G3 — the LLM is the conversational intelligence', () => {
       [['Amritsar se Delhi kal', 'last wali'], '18238', undefined, /18238.*3A ya SL/],
       [['Amritsar se Delhi kal', '12014 wali', 'ye wali'], '12014', undefined, /12014 hi selected hai/],
       [['Amritsar se Delhi kal', '12014 wali', 'AC wali'], '12014', 'CC', /CC theek hai/],
-      [['Amritsar se Delhi kal', '12497 wali', 'AC wali'], '12497', undefined, /3A aur CC.*\?/],          // ambiguous → one question
+      [['Amritsar se Delhi kal', '12497 wali', 'AC wali'], '12497', undefined, /12497 mein AC classes 3A aur CC hain\./],   // ambiguous → the candidates as a fact (P42.1: no backend question)
       [['Amritsar se Delhi kal', 'subah wali'], undefined, undefined, /12014 \(04:55\) ya 12497 \(06:35\)/]
     ];
     for (const [turns, train, cls, speech] of cases) {
@@ -249,7 +249,7 @@ describe('P22 G3 — the LLM is the conversational intelligence', () => {
     expect(calls).toEqual(['decision', 'decision', 'speech']);
     expect(ok.newState).toBe('SHOWING_TRAINS');
     expect(ok.speech.source).toBe('LLM');
-    expect(ok.voice.speechText).toBe('Kal ke liye 3 trainein mili hain. Sabse pehli 12014 hai, subah 4:55 wali. Kaunsi train chahiye?');
+    expect(ok.voice.speechText).toBe('Kal ke liye 3 trainein mili hain. Sabse pehli 12014 hai, subah 4:55 wali. Kaunsi train chahiye?');   // P42.1: the LLM's OWN question is kept
     expect(ok.turnLog.llmProvider).toBe('openai-compatible');
     fail = true;
     const bad = await rh.say('12014 wali');
@@ -433,7 +433,8 @@ describe('P22 G3 — fresh data, booking boundary, parity', () => {
     expect(r.newState).toBe('CLASS_OPTIONS');
     expect(h.s().review?.valid).not.toBe(true);
     expect([rail.n.search - n0.search, (rail.n.avail || 0) - (n0.avail || 0), (rail.n.fare || 0) - (n0.fare || 0)]).toEqual([1, 0, 0]);
-    expect(r.voice.speechText).toMatch(/Kaunsi class chahiye\?$/);
+    expect(h.s().pendingInteraction?.type).toBe('CLASS_SELECTION_REQUIRED');   // P42.1: structured; the LLM asks
+    expect(r.voice.speechText).not.toMatch(/\?/);
     expect(r.voice.speechText).not.toMatch(/₹|available hain/);
   });
 

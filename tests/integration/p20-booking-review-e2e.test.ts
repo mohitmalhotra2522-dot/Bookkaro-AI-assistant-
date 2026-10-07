@@ -16,6 +16,8 @@ import { MockRailwayProvider } from '../../server/railway/providers/mock/mock-pr
 import { RailwayToolRuntime } from '../../server/ai/tool-runtime/railway-tool-runtime';
 import { IrctcHandoffAdapter } from '../../server/irctc/handoff/irctc-handoff-adapter';
 import { MOCK_BOOKING_SCENARIOS, type MockBookingScenario } from '../../server/booking/preparation/mock-booking-scenarios';
+import { nextPassengerDetail } from '../../server/booking/passenger-options';
+import { pendingConfirmationOf } from '../../server/ai/response/backend-question-policy';
 
 const meta = () => { const now = new Date().toISOString(); return { source: 'mock' as const, providerId: 'p20-spy', requestTimestamp: now, responseTimestamp: now, latencyMs: 1, cache: 'disabled' as const }; };
 
@@ -97,7 +99,10 @@ async function runScenario(sc: MockBookingScenario): Promise<string[]> {
     bookingState: s.bookingState, preparationState: p.bookingPreparationState, passengerCount: s.passengersCount, passengers: pax(h),
     reviewVersion: s.review?.reviewVersion ?? null, reviewStatus: p.reviewStatus, confirmationStatus: p.confirmationStatus,
     availabilityStatus: p.availabilityStatus, fareStatus: p.fareStatus, selectedTrain: s.selectedTrain?.number ?? null,
-    selectedClass: s.selectedClass ?? null, errorCode: r.error?.code ?? null, errorType: p.errorType ?? null, toolsExecuted: ran(r)
+    selectedClass: s.selectedClass ?? null, errorCode: r.error?.code ?? null, errorType: p.errorType ?? null, toolsExecuted: ran(r),
+    // P42.1: what the backend waits for is STRUCTURED (the LLM words the question)
+    pendingType: s.pendingInteraction?.type ?? null,
+    nextDetail: ((d) => d ? `${d.passenger}.${d.field}` : null)(nextPassengerDetail(s))
   };
   for (const k of Object.keys(e)) {
     if (k === 'responseMatches') { for (const x of e[k]) if (!new RegExp(x, 'i').test(r.responseMessage)) bad.push(`reply !~ /${x}/`); continue; }
@@ -137,7 +142,8 @@ describe('P20 G3 — Part 54 scenarios A–F', () => {
     r = await h.say('second wali');
     expect(h.s().selectedTrain.number).toBe(h.s().searchResults.trains[1].trainNumber);
     r = await h.say('CC');
-    expect(r.responseMessage).toMatch(/2 passengers ke details chahiye/i);
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'name' });   // P42.1: structured next detail; the LLM asks
+    expect(r.responseMessage).not.toMatch(/\?/);
     expect(prep(r).bookingPreparationState).toBe('COLLECTING_PASSENGER_DETAILS');
   });
 
@@ -195,7 +201,8 @@ describe('P20 G3 — Part 54 scenarios A–F', () => {
     expect(prep(no)).toMatchObject({ errorType: 'INVALID_CONFIRMATION', confirmationStatus: 'NOT_REQUESTED' });
     const c = mk();
     const none = await c.say('haan');
-    expect(none.responseMessage).toMatch(/Aap kis option ko continue karna chahte hain\?/i);
+    expect(none.responseMessage).toMatch(/Abhi koi confirmation pending nahi hai/i);   // P42.1: fact; the LLM asks what next
+    expect(none.responseMessage).not.toMatch(/\?/);
   });
 });
 
@@ -212,7 +219,7 @@ describe('P20 G3 — state actions, review presentation, observability (Parts 36
     r = await h.say('Mohit 31 male');
     expect(r.error?.code).toBe('UNSUPPORTED_ACTION');
     expect(pax(h)).toEqual(['_/_/_', '_/_/_']);
-    expect(r.responseMessage).toMatch(/pehle passenger ka naam/i);
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'name' });   // P42.1: structured next detail
     await h.say('Mohit 31 male');
     expect(rail.total()).toBe(n0);
   });
@@ -222,7 +229,10 @@ describe('P20 G3 — state actions, review presentation, observability (Parts 36
     await run(h, REVIEW_2);
     let r = await h.say('Review dikhao');
     expect(r.responseMessage).toMatch(/Review \(v1\)/);
-    expect((r.responseMessage.match(/Confirm karna hai/g) || []).length).toBe(1);
+    // P42.1: no backend-appended confirm question; the confirmation stays REQUIRED (structured, backend-verified)
+    expect((r.responseMessage.match(/Confirm karna hai/g) || []).length).toBe(0);
+    expect(h.s().bookingState).toBe('AWAITING_CONFIRMATION');
+    expect(pendingConfirmationOf(h.s(), false)).toEqual({ action: 'BOOKING_CONFIRMATION', confirmationRequired: true, confirmationStatus: 'PENDING' });
     expect(h.s().review.reviewVersion).toBe(1);
     r = await h.say('Second passenger ka naam Ravi hai.');
     expect(r.responseMessage).toMatch(/pehle se Ravi hai/i);

@@ -33,6 +33,9 @@ import { enabledWebConnectors, webCapabilityMatrix } from './railway/providers/w
 import { IRCTC_BRIDGE_TOKEN_HEADER } from '@shared/irctc-handoff';
 import { mockIrctcEnabled, renderMockIrctc, MOCK_IRCTC_SCENARIOS } from './irctc/mock/mock-irctc';
 import { MOCK_IRCTC_REAL_SCENARIOS } from './irctc/mock/mock-irctc-real';
+import { EXECUTION_LOCKED_STATES } from '@shared/states';
+import { sameTrainAlternativesEnabledFromEnv } from './ai/tools/tool-registry';
+import { currentSameTrainKey, revalidateSameTrainAlternative } from './railway/same-train/same-train-service';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -216,6 +219,27 @@ server.post('/api/session/:id/passenger-form', async (request, reply) => {
 });
 
 /** Prompt 18: barge-in / stop — marks the presentation or in-flight turn INTERRUPTED (no provider cancel, session untouched). */
+/**
+ * P42 — "Use this option" on a Same Train Alternative: FRESH revalidation only (same providers, same ticket pair). The
+ * BookingSession is NOT changed here — on success the client sends the returned handoffText as the user's explicit
+ * choice, so the existing chat flow (Muse → SESSION_UPDATE → validators) prepares the booking. Metadata-only log.
+ */
+server.post('/api/session/:id/same-train-alternative/select', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  const body = (request.body || {}) as any;
+  const s: any = stateManager.getSession(id);
+  if (EXECUTION_LOCKED_STATES.has(s.bookingState)) return reply.status(409).send({ ok: false, code: 'INVALID_ACTION_FOR_STATE', message: 'Booking process chal raha hai — abhi option change nahi ho sakta.' });
+  const stored = s.sameTrainAlternatives;
+  const key = stored ? currentSameTrainKey(s, stored) : '';
+  const t0 = Date.now();
+  const out = await revalidateSameTrainAlternative(stored, String(body.alternativeSearchId || ''), String(body.alternativeId || ''), key,
+    { acknowledgeUnverifiedRules: body.acknowledgeUnverifiedRules === true });
+  console.log(JSON.stringify({ event: 'same_train_select', ok: out.ok, code: out.code || null, alternativeSearchId: stored?.alternativeSearchId || null,
+    alternativeId: String(body.alternativeId || '').slice(0, 6), providers: (out.fresh || []).map(f => f.provider).join(','), latencyMs: Date.now() - t0 }));
+  return reply.status(out.ok ? 200 : out.code === 'ALTERNATIVE_RESULT_STALE' || out.code === 'ALTERNATIVE_NOT_FOUND' ? 409 : 422).send(out);
+});
+
 server.post('/api/session/:id/interrupt', async (request, reply) => {
   const { id } = request.params as any;
   if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
@@ -442,7 +466,9 @@ server.get('/api/health', async (_, reply) => {
     // Prompt 35: provider chain + per-provider configured flag (NEVER key values) and WEB_EXTERNAL gate
     railwayProviders: liveProviderStatus(),
     webResearch: webResearchStatus(),
-    voice: voiceProviderStatus(process.env, batchStt)
+    voice: voiceProviderStatus(process.env, batchStt),
+    // P42: Same Train Alternative tool exposed to the LLM (feature flag only)
+    sameTrainAlternatives: { enabled: sameTrainAlternativesEnabledFromEnv() }
   });
 });
 
@@ -455,4 +481,5 @@ if (llmSelection.info.fallback) console.log(`LLM fallback model: ${llmSelection.
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Railway provider chain (RAILWAY_PROVIDER=live): ${liveProviderStatus().filter(p => p.priority).sort((a, b) => a.priority! - b.priority!).map(p => `${p.provider}${p.configured ? '' : '(no key)'}`).join(' → ')}`);
 console.log(`Voice STT (batch): elevenlabs/${batchStt.model} — ${batchStt.configured() ? 'configured' : 'not configured (browser speech fallback)'} · language=${batchStt.languageMode} · keyterms=${batchStt.keytermSet}`);
+console.log(`Same Train Alternative (P42): ${sameTrainAlternativesEnabledFromEnv() ? 'enabled (LLM-chosen tool)' : 'disabled (SAME_TRAIN_ALTERNATIVES_ENABLED not set)'}`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

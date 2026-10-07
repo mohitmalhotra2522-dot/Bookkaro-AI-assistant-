@@ -605,3 +605,66 @@ pronunciation (`renderForSpeech`, client) → existing TTS. TEXT mode is untouch
   metadata-only `voice_stt_audio` event: audioMs, wallMs, captureRatio (≪ 1 = dropped buffers), peak/RMS dBFS,
   languageMode, keytermSet, detectedLanguage, languageRetry, attempts — never audio, transcript or session id.
 - Tests: `tests/unit/p41-stt2-server.test.ts` (9), `tests/unit/p41-stt2-capture.test.ts` (6, SIMULATED).
+
+## P42 — Same Train Alternative (LOCAL ONLY — NOT committed / pushed / deployed; STOP after P42)
+Base: `main` = `origin/main` = `4d9939d` (STT2 live). All P42 work is uncommitted in the working tree.
+
+**Principle:** Muse decides everything (whether / when to search, providers, interpretation, ranking, wording). The backend
+only executes one bounded composite tool and enforces hard constraints. No WL ⇒ alternative router, never an automatic
+fallback, normal search unchanged. Feature flag **`SAME_TRAIN_ALTERNATIVES_ENABLED=1`** (default OFF → tools not exposed,
+health `sameTrainAlternatives.enabled=false`, UI chip hidden). Render needs this env var set before it is usable there.
+
+**Tools** (env-gated `COMPOSITE_TOOL_REGISTRY`, NOT in the locked `RailwayToolName` enum):
+- `SEARCH_SAME_TRAIN_ALTERNATIVES` — trainNumber (req), travelClass, date/dateExpression, origin, destination, passengersCount,
+  originSweep, destinationSweep, destinationExtensionStations (5–7, default 6), combinedPairs AUTO|ALWAYS|NEVER,
+  providers (CSV), routeProvider, includeFare, webEvidence.
+- `PRESENT_SAME_TRAIN_ALTERNATIVES` — alternativeSearchId, bestMatch, order (Muse's ranking → card `presentation.decidedBy='MUSE'`).
+
+**Files:** `shared/same-train-alternatives.ts` (contracts, error codes, limits) · `server/railway/same-train/same-train-engine.ts`
+(route normalise → plan P0/P1/P2/P3 → bounded fresh fan-out → validate → merge) · `same-train-service.ts` (provider resolution,
+live deps, revalidation, stale key) · `same-train-view.ts` (compact LLM view keyed by id, card data, fallback line) ·
+`server/ai/response/same-train-claims.ts` (unverified "book X, board Y" guard — applied in orchestrator compose AND
+NaturalResponseComposer sentence loop) · validator / runtime / orchestrator hooks · `POST /api/session/:id/same-train-alternative/select`
+(explicit "Use this option" → fresh revalidation; never mutates the BookingSession; ok → handoff text into the normal chat flow) ·
+UI `src/components/trains/SameTrainAlternatives.tsx` (+ `bk-sta*` CSS), chip "↗ Same Train Alternative" on the selected TrainCard.
+
+**Engine rules:** route only from the chosen route-capable provider (GET_TIMETABLE), never hardcoded / no failover · origin sweep
+train origin → requested origin (≤12) · destination == terminal → `NONE_TERMINAL`, else 5–7 downstream, never past terminal ·
+P3 combined only per policy (AUTO = only when P0–P2 found no AVAILABLE/RAC) · cap 40 pairs · per-provider pool `maxParallel`,
+9 s/call, 45 s total · fare only after availability success, provider numbers only · answer for another train/date/class →
+REJECTED; all rejected → INVALID (hidden) · providers disagree (incl. WL 12 vs WL 15) → CONFLICTING · no success → UNKNOWN
+(never NOT_AVAILABLE); unrecognised status → UNKNOWN/UNVERIFIED · rule NOT_REQUIRED when ticket = travel station, else
+UNVERIFIED unless a rule-evidence source verifies it · web evidence = `UNVERIFIED_WEB` only · every search fresh (new ids).
+Env limits: `SAME_TRAIN_MAX_CANDIDATE_PAIRS / _MAX_ORIGIN_SWEEP / _MAX_DESTINATION_SWEEP / _MAX_PARALLEL / _CALL_TIMEOUT_MS / _TOTAL_TIMEOUT_MS / _MAX_WEB_CHECKS` (clamped).
+
+**Transcript budget:** native tool results are clipped at 3500 chars; the composite result alone gets
+`MAX_SAME_TRAIN_RESULT_CHARS=14000` (worst case 40 pairs fits — unit [39]). Other tools unchanged.
+
+**Tests (MOCK only):** `tests/unit/p42-same-train.test.ts` (46) · `tests/integration/p42-same-train-e2e.test.ts` (14, fake Muse).
+Final runs: G1 tsc clean + vite build OK · G2 170/173 (3 pre-existing: p22 unit [9], p32 unit [13], p7 unit Group 2) ·
+G3 47/47 (p42 e2e, p37, p39-web-conflict, p23). Real-provider / real-device runs: NOT RUN.
+
+### v0.42.1 (on top of P42, LOCAL ONLY) — the backend never appends a fixed question (user decision 2026-10-07)
+"Fixed swaal kahin bhi jodo mat — let Muse / gpt-oss decide." What to ask next is the LLM's decision; the pending
+interaction + `nextToAsk` still reach the LLM in its authoritative context (and the wording call gets `pendingQuestion`
+as context only). Removed: orchestrator trailing append (`questionFor` after every reply), validator-error append,
+guard-fallback appends (action / reference / outcome), deterministic voice speech question, composer append + the
+sentence/length reserved for it, "nayi booking … Kahan se kahan jaana hai?", "booking aage nahi badha raha. Kya badalna
+hai…?", `contextualNudge` questions. User choices: both LLMs down → honest error only; sensitive input → refusal only;
+IRCTC confirm question → Muse words it (backend still only accepts a confirmation for a CURRENT valid review + explicit
+user confirm; the review card keeps its Confirm button / prompt). NOT changed (pending user decision): backend error /
+lifecycle messages that contain a question inside their own text (e.g. "station samajh nahi aaya. Kaunsa station?",
+cancellation confirm). Legacy `AIOrchestrator` (tests only) untouched.
+Focused group (21 files): before 13 failed / 368 passed → after 41 failed / 340 passed. All 28 new failures verified as
+old-rule assertions (expected fixed question text / exact fixed reply / review voice path & reply-length comparisons that
+depended on the appended question); no state / booking / safety assertion broke. Old tests NOT edited (user rule).
+
+### P42.1 — no backend conversational questions; safety confirmations stay backend-authoritative (LOCAL ONLY — NOT committed / pushed / deployed)
+- New `server/ai/response/backend-question-policy.ts` (`asksUser`, `factOnly`, `missingInfoOf`, `pendingInfoView`, `pendingConfirmationOf`, `missingInformationOf`). Every backend reply goes through `factOnly` (quoted user phrases ignored); a turn with no facts left gets the existing SAFE_LINE.
+- **Category A** (missing info / conversational errors) → structured context only (`missingInformation`, hint-free `pendingInteraction`, `bookingPreparation.nextToAsk`, error `{errorCode, missingField, userActionRequired}`); the LLM (Muse / gpt-oss) decides whether and how to ask. No fixed questions anywhere (text or voice).
+- **Category B** (booking / cancellation / destructive confirmation, security refusals) → `pendingConfirmation {action, confirmationRequired:true, confirmationStatus:'PENDING'}`; the backend still independently verifies the explicit confirm (ambiguous "theek hai" → `AMBIGUOUS_CONFIRMATION_FACT`, no mutation). Real cancellation stays disabled. Sensitive input: refusal only, never sent to the LLM. LLM failure: honest error only.
+- Composer: the length budget once reserved for the backend question now belongs to the LLM's OWN first question (`LLM_QUESTION_ALLOWANCE_CHARS/WORDS`) — otherwise Muse's question was cut as TOO_LONG.
+- Orchestrator: a bare-day ("22") DATE_MONTH clarification stays the structured pending until the date resolves (it was overwritten by the post-turn derivation).
+- `mock-natural-voice`: the class-change ack no longer needs a backend question. P20 scenario fixture expectations gained `pendingType` / `nextDetail`.
+- Tests: new `tests/integration/p42-1-no-backend-questions.test.ts` (12/12); affected expectations in 21 test files switched to structured assertions (no safety assertion weakened).
+- Known gap (pre-existing, flagged): an LLM sentence like "Age 31 noted" without the tool call is not rejected by the action-claim guard (nothing is stored; `nextToAsk` stays correct).

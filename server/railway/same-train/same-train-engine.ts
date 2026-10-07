@@ -1,0 +1,492 @@
+/**
+ * PROMPT 42 — Same Train Alternative engine (execution + hard constraints only).
+ *
+ * Pure planning / merging functions + a bounded parallel runner with injected provider adapters, so the logic is
+ * testable without a network and never depends on a specific provider. The engine:
+ *   - takes the route ONLY from a route-capable provider response (never hardcoded, never invented);
+ *   - builds candidate pairs in a fixed, documented SEARCH-BUDGET order (P0 requested, P1 upstream origins → requested
+ *     destination, P2 requested origin → downstream extension, P3 combined) — this is not a ranking;
+ *   - calls each chosen provider FRESH for every candidate (no cache), bounded by concurrency + timeouts;
+ *   - validates every provider answer against the request (train / date / class), keeps UNKNOWN / TIMEOUT distinct from
+ *     NOT_AVAILABLE, never computes a fare, reports provider disagreement as CONFLICTING (never merged / averaged);
+ *   - marks boarding / alighting at a station other than the ticket station UNVERIFIED unless a rule-evidence source
+ *     verified it.
+ * It never ranks, never chooses a best match and never touches the BookingSession — Muse and the user decide.
+ */
+import { randomUUID } from 'node:crypto';
+import {
+  type AvailabilityCategory, type CandidatePair, type CandidatePriority, type CombinedAvailability, type EvidenceLevel,
+  type ProviderEvidence, type RouteStation, type RuleStatus, type SameTrainAlternative, type SameTrainAlternativesResult,
+  type SameTrainErrorCode, type SameTrainLimits, type VerificationStatus, type WebRouteEvidence,
+  SameTrainErrorCode as E, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_DEFAULT_LIMITS, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX,
+  sameTrainJourneyKeyString
+} from '@shared/same-train-alternatives';
+
+// ------------------------------------------------------------------ limits
+
+const envNum = (env: NodeJS.ProcessEnv, k: string, d: number, lo: number, hi: number): number => {
+  const n = Number(env[k]);
+  return Number.isFinite(n) && env[k] !== undefined && env[k] !== '' ? Math.min(hi, Math.max(lo, Math.round(n))) : d;
+};
+
+/** Env-configurable limits, clamped to safe ranges (never unbounded). */
+export function sameTrainLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): SameTrainLimits {
+  const D = SAME_TRAIN_DEFAULT_LIMITS;
+  return {
+    maxCandidatePairs: envNum(env, 'SAME_TRAIN_MAX_CANDIDATE_PAIRS', D.maxCandidatePairs, 1, 60),
+    maxOriginSweepStations: envNum(env, 'SAME_TRAIN_MAX_ORIGIN_SWEEP', D.maxOriginSweepStations, 0, 30),
+    maxDestinationSweep: envNum(env, 'SAME_TRAIN_MAX_DESTINATION_SWEEP', D.maxDestinationSweep, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX),
+    maxParallel: envNum(env, 'SAME_TRAIN_MAX_PARALLEL', D.maxParallel, 1, 12),
+    perCallTimeoutMs: envNum(env, 'SAME_TRAIN_CALL_TIMEOUT_MS', D.perCallTimeoutMs, 500, 30000),
+    totalTimeoutMs: envNum(env, 'SAME_TRAIN_TOTAL_TIMEOUT_MS', D.totalTimeoutMs, 1000, 90000),
+    maxWebChecks: envNum(env, 'SAME_TRAIN_MAX_WEB_CHECKS', D.maxWebChecks, 0, 20)
+  };
+}
+
+// ------------------------------------------------------------------ route
+
+const CODE_RE = /^[A-Z][A-Z0-9]{0,5}$/;
+
+/**
+ * Provider timetable stops → ordered route stations. Accepts the normalized timetable shapes of the existing providers
+ * ({station|stationCode|code, stationName|name, arrival, departure, day}). Returns null codes for unusable rows;
+ * a route with fewer than two valid stations is INVALID_TRAIN_ROUTE. A station that appears twice (loop route) is
+ * reported in `duplicates` — it can never be used as a ticket station (ambiguous order).
+ */
+export function normalizeRoute(stops: unknown): { ok: true; stations: RouteStation[]; duplicates: Set<string> } | { ok: false; code: SameTrainErrorCode; message: string } {
+  const rows: any[] = Array.isArray(stops) ? stops : Array.isArray((stops as any)?.stops) ? (stops as any).stops : [];
+  const stations: RouteStation[] = [];
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const r of rows) {
+    const code = String(r?.station ?? r?.stationCode ?? r?.code ?? '').trim().toUpperCase();
+    if (!CODE_RE.test(code)) continue;
+    if (seen.has(code)) {
+      if (stations[stations.length - 1]?.code !== code) duplicates.add(code);   // consecutive repeat = same halt
+      continue;
+    }
+    seen.add(code);
+    const name = r?.stationName ?? r?.name;
+    stations.push({ code, index: stations.length, ...(name ? { name: String(name).slice(0, 60) } : {}),
+      ...(r?.arrival ? { arrival: String(r.arrival).slice(0, 8) } : {}), ...(r?.departure ? { departure: String(r.departure).slice(0, 8) } : {}),
+      ...(Number.isFinite(Number(r?.day)) && r?.day !== undefined && r?.day !== null ? { day: Number(r.day) } : {}) });
+  }
+  if (stations.length < 2) return { ok: false, code: E.INVALID_TRAIN_ROUTE, message: 'Train ka route provider se verify nahi ho paaya.' };
+  return { ok: true, stations, duplicates };
+}
+
+// ------------------------------------------------------------------ planning
+
+export interface PlanInput {
+  origin: string;
+  destination: string;
+  originSweep: boolean;
+  destinationSweep: boolean;
+  /** Muse-chosen extension length; clamped to 5..7, default limits.maxDestinationSweep */
+  destinationExtensionStations?: number;
+  /** AUTO = P3 only when P0–P2 found no AVAILABLE / RAC (second phase) · ALWAYS · NEVER */
+  combinedPairs?: 'AUTO' | 'ALWAYS' | 'NEVER';
+}
+
+export interface CandidatePlan {
+  route: RouteStation[];
+  originIndex: number;
+  destinationIndex: number;
+  originAlternatives: RouteStation[];      // route order
+  destinationExtension: RouteStation[];    // route order
+  destinationSweep: 'NONE_TERMINAL' | 'EXTENSION' | 'DISABLED';
+  phase1: CandidatePair[];                 // P0, P1, P2
+  phase2: CandidatePair[];                 // P3 (combined) — run per combinedPairs policy
+  truncated: boolean;
+}
+
+const pairOf = (route: RouteStation[], oi: number, di: number, priority: CandidatePriority): CandidatePair => ({
+  pairId: `${route[oi].code}-${route[di].code}`, priority,
+  kind: priority === 'P0' ? 'REQUESTED' : priority === 'P1' ? 'ORIGIN_ALTERNATIVE' : priority === 'P2' ? 'DESTINATION_EXTENSION' : 'ORIGIN_AND_DESTINATION',
+  ticketOrigin: route[oi].code, ticketDestination: route[di].code, originIndex: oi, destinationIndex: di
+});
+
+export function planCandidates(stations: RouteStation[], duplicates: Set<string>, input: PlanInput, limits: SameTrainLimits)
+  : { ok: true; plan: CandidatePlan } | { ok: false; code: SameTrainErrorCode; message: string } {
+  const o = String(input.origin || '').toUpperCase();
+  const d = String(input.destination || '').toUpperCase();
+  const oi = stations.findIndex(s => s.code === o);
+  const di = stations.findIndex(s => s.code === d);
+  if (oi < 0 || di < 0) return { ok: false, code: E.INVALID_STATION_PAIR, message: `${oi < 0 ? o : d} is train ke route par nahi mila.` };
+  if (duplicates.has(o) || duplicates.has(d)) return { ok: false, code: E.INVALID_TRAIN_ROUTE, message: 'Route mein station do baar aata hai — order verify nahi ho sakta.' };
+  if (oi >= di) return { ok: false, code: E.INVALID_STATION_PAIR, message: `${o} → ${d} is train ki direction mein nahi hai.` };
+  const terminal = stations.length - 1;
+
+  // origin sweep: train origin … requested origin (inclusive of the requested origin = P0), bounded, never a duplicate station
+  const originAlternatives = input.originSweep
+    ? stations.slice(Math.max(0, oi - limits.maxOriginSweepStations), oi).filter(s => !duplicates.has(s.code))
+    : [];
+  // destination: requested destination == terminal → no sweep; else extend downstream 5..7 (never past the terminal)
+  let destinationSweep: CandidatePlan['destinationSweep'];
+  let destinationExtension: RouteStation[] = [];
+  if (di === terminal) destinationSweep = 'NONE_TERMINAL';
+  else if (!input.destinationSweep) destinationSweep = 'DISABLED';
+  else {
+    destinationSweep = 'EXTENSION';
+    const raw = Number(input.destinationExtensionStations);
+    const n = Number.isFinite(raw) && raw > 0 ? Math.min(DESTINATION_EXTENSION_MAX, Math.max(DESTINATION_EXTENSION_MIN, Math.round(raw))) : limits.maxDestinationSweep;
+    destinationExtension = stations.slice(di + 1, Math.min(terminal, di + n) + 1).filter(s => !duplicates.has(s.code));
+  }
+
+  const nearestOrigins = [...originAlternatives].sort((a, b) => b.index - a.index);       // closest to the requested origin first
+  const nearestDests = [...destinationExtension].sort((a, b) => a.index - b.index);       // closest to the requested destination first
+  const all: CandidatePair[] = [pairOf(stations, oi, di, 'P0')];
+  for (const s of nearestOrigins) all.push(pairOf(stations, s.index, di, 'P1'));
+  for (const s of nearestDests) all.push(pairOf(stations, oi, s.index, 'P2'));
+  const combined: CandidatePair[] = [];
+  if (input.combinedPairs !== 'NEVER') {
+    for (const so of nearestOrigins) for (const sd of nearestDests) combined.push(pairOf(stations, so.index, sd.index, 'P3'));
+    combined.sort((a, b) => ((oi - a.originIndex) + (a.destinationIndex - di)) - ((oi - b.originIndex) + (b.destinationIndex - di)) || b.originIndex - a.originIndex);
+  }
+  const cap = limits.maxCandidatePairs;
+  const seen = new Set<string>();
+  const phase1 = all.filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, cap);
+  const phase2 = combined.filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, Math.max(0, cap - phase1.length));
+  const truncated = all.length > phase1.length || combined.length > phase2.length;
+  return { ok: true, plan: { route: stations, originIndex: oi, destinationIndex: di, originAlternatives, destinationExtension, destinationSweep, phase1, phase2, truncated } };
+}
+
+// ------------------------------------------------------------------ provider answers
+
+/** Provider status string → canonical category. Anything unrecognised stays UNKNOWN (never NOT_AVAILABLE). */
+export function availabilityCategory(status: unknown): AvailabilityCategory {
+  const s = String(status ?? '').trim().toUpperCase().replace(/[_-]+/g, ' ');
+  if (!s) return 'UNKNOWN';
+  if (/^(CURR\s?)?(AVAILABLE|AVL|AVBL)\b/.test(s)) return 'AVAILABLE';
+  if (/^RAC\b/.test(s)) return 'RAC';
+  if (/^(GNWL|RLWL|PQWL|TQWL|RSWL|NPWL|CKWL|WL|WAITLIST(ED)?|WAITING)\b/.test(s)) return 'WAITLIST';
+  if (/^(REGRET|NOT AVAILABLE|NOT AVBL|NO ROOM|TRAIN CANCELLED|TRAIN DEPARTED)\b/.test(s)) return 'NOT_AVAILABLE';
+  return 'UNKNOWN';
+}
+
+/** category + first position number — two providers "agree" only when both match ("WL 12" ≠ "WL 15"). */
+export function statusKey(status: string): string {
+  const cat = availabilityCategory(status);
+  const n = String(status).match(/(\d{1,4})/);
+  return `${cat}:${n ? String(Number(n[1])) : ''}`;
+}
+
+const TIMEOUT_CODES = new Set(['PROVIDER_TIMEOUT', 'TIMEOUT', 'TOOL_TIMEOUT', 'ALTERNATIVE_SEARCH_TIMEOUT']);
+const normDate = (v: unknown) => String(v ?? '').slice(0, 10);
+
+export interface ProviderRef { id: string; label?: string; level: EvidenceLevel; isMock?: boolean }
+
+export interface AvailabilityQuery { trainNumber: string; travelClass: string; date: string; origin: string; destination: string; passengersCount: number }
+
+export interface SameTrainDeps {
+  limits: SameTrainLimits;
+  getRoute: (provider: ProviderRef, trainNumber: string) => Promise<any>;
+  checkAvailability: (provider: ProviderRef, q: AvailabilityQuery) => Promise<any>;
+  getFare?: (provider: ProviderRef, q: AvailabilityQuery) => Promise<any>;
+  /** public-web listing check (UNVERIFIED_WEB) — does the same train run between this pair? */
+  webListsTrain?: (provider: ProviderRef, q: { trainNumber: string; origin: string; destination: string; date: string }) => Promise<{ ok: true; listed: boolean } | { ok: false; code: string }>;
+  /** optional boarding / alighting rule evidence source; absent → UNVERIFIED */
+  ruleEvidence?: (q: { kind: 'BOARDING' | 'ALIGHTING'; trainNumber: string; ticketStation: string; travelStation: string; travelClass: string }) => Promise<'VERIFIED' | 'UNVERIFIED'>;
+  /** false once the journey / turn this search belongs to is superseded → remaining calls are skipped */
+  isCurrent?: () => boolean;
+  now?: () => number;
+  log?: (event: string, fields: Record<string, unknown>) => void;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<{ timedOut: true } | { timedOut: false; value: T }> {
+  return new Promise(resolve => {
+    const t = setTimeout(() => resolve({ timedOut: true }), ms);
+    p.then(v => { clearTimeout(t); resolve({ timedOut: false, value: v }); },
+      e => { clearTimeout(t); resolve({ timedOut: false, value: { ok: false, error: { code: String(e?.code || 'PROVIDER_ERROR'), message: 'provider call failed' } } as any }); });
+  });
+}
+
+/** Bounded parallel map (each provider gets its own pool of `limit`). */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) { const i = next++; out[i] = await fn(items[i]); }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/** Validate one provider availability answer against the request binding (no silent substitution). */
+export function evaluateAvailabilityAnswer(resp: any, q: AvailabilityQuery): Pick<ProviderEvidence, 'outcome' | 'availability' | 'errorCode' | 'rejectedReason'> {
+  if (!resp || typeof resp !== 'object') return { outcome: 'FAILED', errorCode: 'MALFORMED_PROVIDER_RESPONSE' };
+  if (resp.ok !== true) {
+    const code = String(resp.error?.code || 'PROVIDER_ERROR');
+    return { outcome: TIMEOUT_CODES.has(code) ? 'TIMEOUT' : 'FAILED', errorCode: code };
+  }
+  const d = resp.data;
+  if (!d || typeof d !== 'object' || !String(d.status ?? '').trim()) return { outcome: 'REJECTED', rejectedReason: 'MALFORMED', errorCode: 'MALFORMED_PROVIDER_RESPONSE' };
+  if (d.trainNumber !== undefined && String(d.trainNumber).trim() !== q.trainNumber) return { outcome: 'REJECTED', rejectedReason: 'WRONG_TRAIN', errorCode: 'RESULT_IDENTITY_MISMATCH' };
+  if (d.date && normDate(d.date) !== q.date) return { outcome: 'REJECTED', rejectedReason: 'WRONG_DATE', errorCode: 'RESULT_IDENTITY_MISMATCH' };
+  if (d.travelClass && String(d.travelClass).toUpperCase() !== q.travelClass) return { outcome: 'REJECTED', rejectedReason: 'WRONG_CLASS', errorCode: 'RESULT_IDENTITY_MISMATCH' };
+  const status = String(d.status).replace(/\s+/g, ' ').trim().slice(0, 40);
+  return { outcome: 'SUCCESS', availability: { category: availabilityCategory(status), status,
+    ...(d.statusText ? { statusText: String(d.statusText).slice(0, 80) } : {}), ...(d.quota ? { quota: String(d.quota).slice(0, 8) } : {}),
+    ...(d.providerUpdatedAt ? { providerUpdatedAt: String(d.providerUpdatedAt).slice(0, 40) } : {}) } };
+}
+
+/** Provider fare (never computed): total / perPassenger must be positive provider numbers for this train + class. */
+export function evaluateFareAnswer(resp: any, q: AvailabilityQuery): { ok: true; total?: number; perPassenger?: number; currency?: string } | { ok: false; code: string; timeout: boolean } {
+  if (!resp || resp.ok !== true || !resp.data) {
+    const code = String(resp?.error?.code || 'FARE_UNAVAILABLE');
+    return { ok: false, code, timeout: TIMEOUT_CODES.has(code) };
+  }
+  const d = resp.data;
+  if (d.trainNumber !== undefined && String(d.trainNumber) !== q.trainNumber) return { ok: false, code: 'RESULT_IDENTITY_MISMATCH', timeout: false };
+  if (d.travelClass && String(d.travelClass).toUpperCase() !== q.travelClass) return { ok: false, code: 'RESULT_IDENTITY_MISMATCH', timeout: false };
+  const pos = (v: any) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+  const total = pos(d.total); const perPassenger = pos(d.perPassenger);
+  if (total === undefined && perPassenger === undefined) return { ok: false, code: 'FARE_UNAVAILABLE', timeout: false };
+  return { ok: true, ...(total !== undefined ? { total } : {}), ...(perPassenger !== undefined ? { perPassenger } : {}), currency: String(d.currency || 'INR').slice(0, 3) };
+}
+
+// ------------------------------------------------------------------ merging
+
+export interface MergeContext {
+  trainNumber: string; trainName?: string; date: string; travelClass: string; passengersCount: number;
+  requestedOrigin: string; requestedDestination: string; names: Map<string, string | undefined>; includeFare: boolean;
+}
+
+/**
+ * Merge all provider evidence for ONE candidate pair. Disagreeing providers → CONFLICTING (no value shown as fact);
+ * no successful provider answer → UNKNOWN (never NOT_AVAILABLE); every answer rejected → INVALID (hidden).
+ */
+export function mergeCandidate(pair: CandidatePair, evidence: ProviderEvidence[], web: WebRouteEvidence[], rules: { boarding: RuleStatus; alighting: RuleStatus }, ctx: MergeContext, fetchedAt: string)
+  : Omit<SameTrainAlternative, 'alternativeId'> {
+  const api = evidence.filter(e => e.level === 'PROVIDER_API');
+  // an answered call whose status is not recognisable stays UNKNOWN: it neither verifies availability nor "conflicts"
+  const ok = api.filter(e => e.outcome === 'SUCCESS' && e.availability && e.availability.category !== 'UNKNOWN');
+  const keys = new Set(ok.map(e => statusKey(e.availability!.status)));
+  const conflicting = keys.size > 1;
+  let availability: CombinedAvailability = 'UNKNOWN';
+  let statusText: string | undefined;
+  if (conflicting) availability = 'CONFLICTING';
+  else if (ok.length) { availability = ok[0].availability!.category; statusText = ok[0].availability!.status; }
+
+  // fare: provider numbers only; disagreement → CONFLICTING (no fare shown)
+  let fare: SameTrainAlternative['fare'] = { status: ctx.includeFare ? 'UNAVAILABLE' : 'NOT_REQUESTED' };
+  const fares = api.filter(e => e.fare && (e.fare.total !== undefined || e.fare.perPassenger !== undefined));
+  if (fares.length) {
+    const fk = new Set(fares.map(e => `${e.fare!.total ?? ''}|${e.fare!.perPassenger ?? ''}`));
+    fare = fk.size > 1 ? { status: 'CONFLICTING' }
+      : { status: 'PROVIDER', provider: fares[0].provider, currency: fares[0].fare!.currency || 'INR',
+        ...(fares[0].fare!.total !== undefined ? { total: fares[0].fare!.total } : {}), ...(fares[0].fare!.perPassenger !== undefined ? { perPassenger: fares[0].fare!.perPassenger } : {}) };
+  }
+
+  const allRejected = api.length > 0 && api.every(e => e.outcome === 'REJECTED');
+  const rulesOk = (r: RuleStatus) => r === 'NOT_REQUIRED' || r === 'VERIFIED';
+  const verificationStatus: VerificationStatus = allRejected ? 'INVALID'
+    : conflicting ? 'CONFLICTING'
+    : !ok.length ? 'UNVERIFIED'
+    : rulesOk(rules.boarding) && rulesOk(rules.alighting) ? 'VERIFIED' : 'PARTIALLY_VERIFIED';
+  const warnings: SameTrainErrorCode[] = [];
+  if (conflicting) warnings.push(E.PROVIDER_DATA_CONFLICT);
+  if (rules.boarding === 'UNVERIFIED') warnings.push(E.BOARDING_RULE_UNVERIFIED);
+  if (rules.alighting === 'UNVERIFIED') warnings.push(E.ALIGHTING_RULE_UNVERIFIED);
+  const isRequestedPair = pair.priority === 'P0';
+  return {
+    pairId: pair.pairId, priority: pair.priority, kind: pair.kind, isRequestedPair,
+    trainNumber: ctx.trainNumber, ...(ctx.trainName ? { trainName: ctx.trainName } : {}), date: ctx.date, travelClass: ctx.travelClass, passengersCount: ctx.passengersCount,
+    requestedOrigin: ctx.requestedOrigin, requestedDestination: ctx.requestedDestination,
+    ticketOrigin: pair.ticketOrigin, ticketOriginName: ctx.names.get(pair.ticketOrigin),
+    ticketDestination: pair.ticketDestination, ticketDestinationName: ctx.names.get(pair.ticketDestination),
+    // a passenger travels on the ticket stations unless a VERIFIED rule allows boarding / alighting elsewhere
+    boardingStation: rules.boarding === 'VERIFIED' ? ctx.requestedOrigin : pair.ticketOrigin,
+    alightingStation: rules.alighting === 'VERIFIED' ? ctx.requestedDestination : pair.ticketDestination,
+    intendedBoardingStation: ctx.requestedOrigin, intendedAlightingStation: ctx.requestedDestination,
+    boardingRuleStatus: rules.boarding, alightingRuleStatus: rules.alighting,
+    availability, ...(statusText ? { availabilityStatusText: statusText } : {}),
+    fare, verificationStatus, actionable: verificationStatus === 'VERIFIED',
+    evidence, webEvidence: web, warnings,
+    ...(conflicting ? { conflict: { providers: ok.map(e => e.provider), values: ok.map(e => ({ provider: e.provider, status: e.availability!.status })) } } : {}),
+    extensionStations: 0,   // set by the runner (route index distance past the requested destination)
+    fetchedAt
+  };
+}
+
+// ------------------------------------------------------------------ runner
+
+export interface SameTrainSearchRequest {
+  sessionId: string; turnId: string | null; requestId: string | null; journeyVersion: number | null;
+  trainNumber: string; trainName?: string; date: string; travelClass: string; passengersCount: number;
+  origin: string; destination: string; originName?: string; destinationName?: string;
+  originSweep: boolean; destinationSweep: boolean; destinationExtensionStations?: number; combinedPairs?: 'AUTO' | 'ALWAYS' | 'NEVER';
+  includeFare: boolean; webEvidence: boolean;
+  providers: ProviderRef[]; routeProvider: ProviderRef; webProviders: ProviderRef[];
+}
+
+export type SameTrainRunOutcome =
+  | { ok: true; result: SameTrainAlternativesResult }
+  | { ok: false; code: SameTrainErrorCode; message: string; partial?: Partial<SameTrainAlternativesResult> };
+
+const shortId = () => randomUUID().replace(/-/g, '').slice(0, 12);
+
+export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: SameTrainDeps): Promise<SameTrainRunOutcome> {
+  const now = deps.now || Date.now;
+  const L = deps.limits;
+  const t0 = now();
+  const startedAt = new Date(t0).toISOString();
+  const deadline = t0 + L.totalTimeoutMs;
+  const alternativeSearchId = `sta_${shortId()}`;
+  const current = () => (deps.isCurrent ? deps.isCurrent() : true);
+  const isMock = [req.routeProvider, ...req.providers].some(p => p.isMock);
+
+  // 1) route — from the Muse-chosen route provider only (no hidden failover)
+  const routeResp = await withTimeout(Promise.resolve().then(() => deps.getRoute(req.routeProvider, req.trainNumber)), L.perCallTimeoutMs);
+  if (routeResp.timedOut) return { ok: false, code: E.SEARCH_TIMEOUT, message: `${req.routeProvider.label || req.routeProvider.id} se route time par nahi aaya.` };
+  const rv: any = routeResp.value;
+  if (!rv || rv.ok !== true) {
+    const code = String(rv?.error?.code || '');
+    return { ok: false, code: TIMEOUT_CODES.has(code) ? E.SEARCH_TIMEOUT : E.INVALID_TRAIN_ROUTE, message: `Train ${req.trainNumber} ka route ${req.routeProvider.label || req.routeProvider.id} se verify nahi ho paaya.` };
+  }
+  const route = normalizeRoute(rv.data);
+  if (!route.ok) return { ok: false, code: route.code, message: route.message };
+  const planned = planCandidates(route.stations, route.duplicates, req, L);
+  if (!planned.ok) return { ok: false, code: planned.code, message: planned.message };
+  const plan = planned.plan;
+  const routeFetchedAt = new Date(now()).toISOString();
+
+  // 2) fresh provider calls per candidate × provider (bounded per provider)
+  const evidenceByPair = new Map<string, ProviderEvidence[]>();
+  let skippedStale = false;
+  const runPhase = async (pairs: CandidatePair[]) => {
+    await Promise.all(req.providers.map(provider => mapLimit(pairs, L.maxParallel, async pair => {
+      const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: req.travelClass, date: req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
+      const base = { provider: provider.id, ...(provider.label ? { providerLabel: provider.label } : {}), level: provider.level,
+        requestId: req.requestId || alternativeSearchId, toolExecutionId: `${alternativeSearchId}:${provider.id}:${pair.pairId}`,
+        trainNumber: q.trainNumber, ticketOrigin: q.origin, ticketDestination: q.destination, travelClass: q.travelClass, date: q.date, passengersCount: q.passengersCount };
+      const s = now();
+      let ev: ProviderEvidence;
+      if (!current()) { skippedStale = true; ev = { ...base, fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.RESULT_STALE }; }
+      else if (s >= deadline) ev = { ...base, fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.SEARCH_TIMEOUT };
+      else {
+        const r = await withTimeout(Promise.resolve().then(() => deps.checkAvailability(provider, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - s)));
+        const at = now();
+        const evald = r.timedOut ? { outcome: 'TIMEOUT' as const, errorCode: 'PROVIDER_TIMEOUT' } : evaluateAvailabilityAnswer(r.value, q);
+        ev = { ...base, fetchedAt: new Date(at).toISOString(), latencyMs: at - s, ...evald };
+        if (req.includeFare && deps.getFare && ev.outcome === 'SUCCESS' && current() && now() < deadline) {
+          const fr = await withTimeout(Promise.resolve().then(() => deps.getFare!(provider, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - now())));
+          const fa = fr.timedOut ? { ok: false as const, code: 'PROVIDER_TIMEOUT', timeout: true } : evaluateFareAnswer(fr.value, q);
+          if (fa.ok) { ev.fare = { ...(fa.total !== undefined ? { total: fa.total } : {}), ...(fa.perPassenger !== undefined ? { perPassenger: fa.perPassenger } : {}), currency: fa.currency, fetchedAt: new Date(now()).toISOString() }; ev.fareOutcome = 'SUCCESS'; }
+          else ev.fareOutcome = fa.timeout ? 'TIMEOUT' : 'FAILED';
+        }
+      }
+      const list = evidenceByPair.get(pair.pairId) || [];
+      list.push(ev);
+      evidenceByPair.set(pair.pairId, list);
+    })));
+  };
+  await runPhase(plan.phase1);
+  const policy = req.combinedPairs || 'AUTO';
+  const goodCategory = (pairs: CandidatePair[]) => pairs.some(p => (evidenceByPair.get(p.pairId) || []).some(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS' && (e.availability?.category === 'AVAILABLE' || e.availability?.category === 'RAC')));
+  const runCombined = plan.phase2.length > 0 && (policy === 'ALWAYS' || (policy === 'AUTO' && !goodCategory(plan.phase1)));
+  if (runCombined) await runPhase(plan.phase2);
+  const pairs = [...plan.phase1, ...(runCombined ? plan.phase2 : [])];
+
+  // 3) optional public-web route evidence (UNVERIFIED_WEB — never availability, never authoritative)
+  const errors: SameTrainErrorCode[] = [];
+  const webByPair = new Map<string, WebRouteEvidence[]>();
+  let webEvidence: SameTrainAlternativesResult['webEvidence'] = 'NOT_REQUESTED';
+  if (req.webEvidence) {
+    if (!req.webProviders.length || !deps.webListsTrain) { webEvidence = 'UNAVAILABLE'; errors.push(E.WEB_EVIDENCE_UNAVAILABLE); }
+    else {
+      webEvidence = 'COLLECTED';
+      const targets = pairs.filter(p => p.priority !== 'P0').slice(0, L.maxWebChecks);
+      for (const wp of req.webProviders) {
+        await mapLimit(targets, Math.min(3, L.maxParallel), async p => {
+          if (!current() || now() >= deadline) return;
+          const r = await withTimeout(Promise.resolve().then(() => deps.webListsTrain!(wp, { trainNumber: req.trainNumber, origin: p.ticketOrigin, destination: p.ticketDestination, date: req.date })), L.perCallTimeoutMs);
+          const at = new Date(now()).toISOString();
+          const w: WebRouteEvidence = r.timedOut ? { provider: wp.id, level: 'UNVERIFIED_WEB', ticketOrigin: p.ticketOrigin, ticketDestination: p.ticketDestination, listed: null, fetchedAt: at, errorCode: 'PROVIDER_TIMEOUT' }
+            : (r.value as any).ok ? { provider: wp.id, level: 'UNVERIFIED_WEB', ticketOrigin: p.ticketOrigin, ticketDestination: p.ticketDestination, listed: !!(r.value as any).listed, fetchedAt: at }
+            : { provider: wp.id, level: 'UNVERIFIED_WEB', ticketOrigin: p.ticketOrigin, ticketDestination: p.ticketDestination, listed: null, fetchedAt: at, errorCode: String((r.value as any).code || 'WEB_ERROR') };
+          webByPair.set(p.pairId, [...(webByPair.get(p.pairId) || []), w]);
+        });
+      }
+      if (![...webByPair.values()].flat().some(w => w.listed !== null)) { webEvidence = 'UNAVAILABLE'; errors.push(E.WEB_EVIDENCE_UNAVAILABLE); }
+    }
+  }
+
+  // 4) rules + merge (dedup by train + origin + destination + class + date)
+  const names = new Map<string, string | undefined>(plan.route.map(s => [s.code, s.name]));
+  const destIdx = plan.destinationIndex;
+  const ctx: MergeContext = { trainNumber: req.trainNumber, trainName: req.trainName, date: req.date, travelClass: req.travelClass, passengersCount: req.passengersCount,
+    requestedOrigin: plan.route[plan.originIndex].code, requestedDestination: plan.route[destIdx].code, names, includeFare: req.includeFare };
+  const ruleOf = async (kind: 'BOARDING' | 'ALIGHTING', ticketStation: string, travelStation: string): Promise<RuleStatus> => {
+    if (ticketStation === travelStation) return 'NOT_REQUIRED';
+    if (!deps.ruleEvidence) return 'UNVERIFIED';
+    try { return (await deps.ruleEvidence({ kind, trainNumber: req.trainNumber, ticketStation, travelStation, travelClass: req.travelClass })) === 'VERIFIED' ? 'VERIFIED' : 'UNVERIFIED'; }
+    catch { return 'UNVERIFIED'; }
+  };
+  const merged = new Map<string, Omit<SameTrainAlternative, 'alternativeId'>>();
+  const fetchedAt = new Date(now()).toISOString();
+  for (const p of pairs) {
+    const key = [req.trainNumber, p.ticketOrigin, p.ticketDestination, req.travelClass, req.date].join('|');
+    const prev = merged.get(key);
+    const ev = [...(prev?.evidence || []), ...(evidenceByPair.get(p.pairId) || [])];
+    const rules = { boarding: await ruleOf('BOARDING', p.ticketOrigin, ctx.requestedOrigin), alighting: await ruleOf('ALIGHTING', p.ticketDestination, ctx.requestedDestination) };
+    const m = mergeCandidate(p, ev, webByPair.get(p.pairId) || [], rules, ctx, fetchedAt);
+    m.extensionStations = Math.max(0, p.destinationIndex - destIdx);
+    merged.set(key, m);
+  }
+  const all = [...merged.values()];
+  const visible = all.filter(a => a.verificationStatus !== 'INVALID')
+    .sort((a, b) => Number(b.isRequestedPair) - Number(a.isRequestedPair) || a.priority.localeCompare(b.priority) || routePos(plan, a) - routePos(plan, b));
+  const alternatives: SameTrainAlternative[] = visible.map((a, i) => ({ alternativeId: `A${i + 1}`, ...a }));
+
+  // 5) provider coverage + overall status
+  const allEv = [...evidenceByPair.values()].flat();
+  const providers = req.providers.map(p => {
+    const mine = allEv.filter(e => e.provider === p.id);
+    return { provider: p.id, ...(p.label ? { label: p.label } : {}), level: p.level, requested: mine.length,
+      succeeded: mine.filter(e => e.outcome === 'SUCCESS').length, failed: mine.filter(e => e.outcome === 'FAILED' || e.outcome === 'REJECTED').length,
+      timeouts: mine.filter(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT)).length };
+  });
+  const apiEv = allEv.filter(e => e.level === 'PROVIDER_API');
+  const anySuccess = apiEv.some(e => e.outcome === 'SUCCESS');
+  const completedAt = new Date(now()).toISOString();
+  const latencyMs = now() - t0;
+  deps.log?.('same_train_search', { alternativeSearchId, providers: req.providers.map(p => p.id).join(','), candidateCount: pairs.length,
+    resultCount: alternatives.length, succeeded: apiEv.filter(e => e.outcome === 'SUCCESS').length, timeouts: apiEv.filter(e => e.outcome === 'TIMEOUT').length, latencyMs });
+  if (skippedStale || !current()) return { ok: false, code: E.STALE_RESULT, message: 'Journey badal gayi — yeh alternative result ab purana hai.' };
+  if (!anySuccess) {
+    const allTimeout = apiEv.length > 0 && apiEv.every(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT));
+    return { ok: false, code: allTimeout ? E.SEARCH_TIMEOUT : E.SEARCH_FAILED, message: SAME_TRAIN_ALL_FAILED_MESSAGE };
+  }
+  const anyFailure = apiEv.some(e => e.outcome !== 'SUCCESS');
+  if (anyFailure && apiEv.some(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT))) errors.push(E.SEARCH_TIMEOUT);
+  if (alternatives.some(a => a.verificationStatus === 'CONFLICTING')) errors.push(E.PROVIDER_DATA_CONFLICT);
+  const foundAlternative = alternatives.some(a => !a.isRequestedPair && (a.availability === 'AVAILABLE' || a.availability === 'RAC') && (a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED'));
+  if (!foundAlternative) errors.push(E.NOT_FOUND);
+  const journeyKey = sameTrainJourneyKeyString({ trainNumber: req.trainNumber, date: req.date, travelClass: req.travelClass, origin: ctx.requestedOrigin, destination: ctx.requestedDestination, passengersCount: req.passengersCount });
+  const result: SameTrainAlternativesResult = {
+    kind: 'SAME_TRAIN_ALTERNATIVES', alternativeSearchId, resultSetId: `sts_${shortId()}`,
+    sessionId: req.sessionId, turnId: req.turnId, requestId: req.requestId, journeyVersion: req.journeyVersion, journeyKey,
+    trainNumber: req.trainNumber, ...(req.trainName ? { trainName: req.trainName } : {}), date: req.date, travelClass: req.travelClass, passengersCount: req.passengersCount,
+    requestedOrigin: ctx.requestedOrigin, requestedOriginName: req.originName || names.get(ctx.requestedOrigin),
+    requestedDestination: ctx.requestedDestination, requestedDestinationName: req.destinationName || names.get(ctx.requestedDestination),
+    route: { provider: req.routeProvider.id, fetchedAt: routeFetchedAt, trainOrigin: plan.route[0].code, trainTerminal: plan.route[plan.route.length - 1].code,
+      stationCount: plan.route.length, originSweep: plan.originAlternatives.map(s => s.code), destinationExtension: plan.destinationExtension.map(s => s.code),
+      destinationSweep: plan.destinationSweep,
+      stations: plan.route.slice(Math.max(0, (plan.originAlternatives[0]?.index ?? plan.originIndex)), (plan.destinationExtension[plan.destinationExtension.length - 1]?.index ?? plan.destinationIndex) + 1) },
+    providers, candidateCount: pairs.length, candidatesTruncated: plan.truncated,
+    alternatives, invalidCount: all.length - visible.length,
+    status: anyFailure ? 'PARTIAL' : foundAlternative ? 'OK' : 'NOT_FOUND',
+    errors: [...new Set(errors)], webEvidence,
+    presentation: { bestMatchId: null, order: alternatives.map(a => a.alternativeId), decidedBy: 'NONE' },
+    fresh: true, cached: false, startedAt, completedAt, latencyMs, isMock
+  };
+  return { ok: true, result };
+}
+
+function routePos(plan: CandidatePlan, a: { ticketOrigin: string; ticketDestination: string }): number {
+  // neutral route order: earlier ticket origin first, then nearer ticket destination
+  const oi = plan.route.findIndex(s => s.code === a.ticketOrigin);
+  const di = plan.route.findIndex(s => s.code === a.ticketDestination);
+  return oi * 1000 + di;
+}

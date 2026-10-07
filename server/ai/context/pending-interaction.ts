@@ -26,7 +26,7 @@ export function derivePendingInteraction(s: BookingSession): PendingInteraction 
     case BookingState.REVIEW:
       return { type: 'REVIEW_APPROVAL_REQUIRED', data: { reviewVersion: s.review?.reviewVersion } };
     case BookingState.PASSENGERS_READY:
-      return { type: 'CLARIFICATION_REQUIRED', hint: 'Dobara check karun? Haan boliye.', data: { kind: 'RETRY_PREPARATION' } };
+      return { type: 'CLARIFICATION_REQUIRED', data: { kind: 'RETRY_PREPARATION' } };
     case BookingState.COLLECTING_PASSENGER_DETAILS: {
       const nf: any = getNextRequiredField(s);
       if (nf && ['name', 'age', 'gender'].includes(nf.field)) {

@@ -17,6 +17,7 @@ import { railwayRegistry } from '../../server/railway/registry/provider-registry
 import { MockRailwayProvider } from '../../server/railway/providers/mock/mock-provider';
 import { IrctcHandoffAdapter } from '../../server/irctc/handoff/irctc-handoff-adapter';
 import { BookingState } from '../../shared/states';
+import { pendingConfirmationOf } from '../../server/ai/response/backend-question-policy';
 
 // ---- instrumented providers (mock, non-live data) ----
 class CountingProvider extends MockRailwayProvider {
@@ -75,7 +76,9 @@ describe('G3 — preparation → fresh data → review → confirmation', () => 
     expect(r.events).toEqual(expect.arrayContaining(['PASSENGER_DETAILS_VALIDATED', 'AVAILABILITY_REFRESHED', 'FARE_REFRESHED', 'REVIEW_CREATED', 'CONFIRMATION_REQUESTED']));
     expect(r.newState).toBe(BookingState.AWAITING_CONFIRMATION);
     expect(r.pendingInteraction).toMatchObject({ type: 'CONFIRMATION_REQUIRED', data: { reviewVersion: 1 } });
-    expect(r.responseMessage).toMatch(/Confirm karna hai\? Haan ya nahi boliye\.$/);
+    // P42.1 (Category B): the confirmation requirement stays backend-authoritative and STRUCTURED; the wording is the LLM's
+    expect(pendingConfirmationOf(state.getSession(sid), false)).toEqual({ action: 'BOOKING_CONFIRMATION', confirmationRequired: true, confirmationStatus: 'PENDING' });
+    expect(r.responseMessage).not.toMatch(/\?/);
     const card = r.cards!.find((c: any) => c.type === 'review')!.data;
     expect(card).toMatchObject({ reviewVersion: 1, selectedClass: 'CC', passengersCount: 2, realBooking: false, confirmationRequired: true });
     expect(card.fare).toMatchObject({ verified: true, perPassenger: 520, total: 1040 });

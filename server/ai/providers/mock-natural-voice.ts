@@ -252,8 +252,9 @@ export function mockSpokenResponse(i: SpokenResponseInput): string | null {
     return en ? `Okay, ${trainNow}. Which class — ${enOpts}?`
       : pick([`Haan, ${trainNow}. ${opts} — kaunsi class chahiye?`, `Theek hai, ${trainNow} rakh li. Kaunsi class — ${opts}?`], seed);
   }
-  if (s.selectedClass && s.selectedClass !== i.selectedClassBefore && q) {
-    return en ? `${s.selectedClass}, got it. ${q}` : `${s.selectedClass} theek hai. ${q}`;
+  // P42.1: the mock wording no longer depends on a backend question (none is sent) — it adds one only if given
+  if (s.selectedClass && s.selectedClass !== i.selectedClassBefore) {
+    return en ? `${s.selectedClass}, got it.${q ? ` ${q}` : ''}` : `${s.selectedClass} theek hai.${q ? ` ${q}` : ''}`;
   }
   // Part 23 — passengers: conversational, one field at a time
   const pq = passengerQuestion(s, en, seed);

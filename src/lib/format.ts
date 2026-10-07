@@ -87,7 +87,9 @@ const TOOL_LABELS: Record<string, string> = {
   TRACK_TRAIN: 'Tracking the train',
   CHECK_PNR: 'Checking PNR status',
   GET_CANCELLED_TRAINS: 'Checking cancelled trains',
-  WEB_RAILWAY_RESEARCH: 'Looking up railway information'
+  WEB_RAILWAY_RESEARCH: 'Looking up railway information',
+  SEARCH_SAME_TRAIN_ALTERNATIVES: 'Checking same train alternatives',
+  PRESENT_SAME_TRAIN_ALTERNATIVES: 'Preparing options'
 };
 export function toolProgressLabel(activeTools: string[] | null | undefined, fallbackText?: string | null): string | null {
   const tools = (activeTools || []).filter(Boolean);

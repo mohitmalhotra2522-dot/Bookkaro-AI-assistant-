@@ -21,6 +21,8 @@ import { parseLifecycleAction, NO_ACTION_CAPABILITIES } from '../../shared/booki
 import { lifecycleClaimGuard } from '../../server/ai/agent/conversation-agent-orchestrator';
 import { findSensitiveFields } from '../../server/booking/handoff/sensitive-data-guard';
 import type { NormalizedBookingResult } from '../../shared/booking-record';
+/** P42.1: the backend states that the explicit confirmation is REQUIRED (it verifies it itself); no backend question. */
+const CONFIRM_REQUIRED = /(bolne|karne) par hi request provider ko jayegi/;
 
 const istDay = (ms: number) => new Date(ms + 5.5 * 3600_000).toISOString().slice(0, 10);
 const TODAY = istDay(Date.now());
@@ -145,7 +147,7 @@ describe('G2 — confirmation guard', () => {
     const { svc, sid, p, state } = setup({ cancel: 'CONFIRMED' });
     const a = await turn(svc, sid, '12014 wali booking cancel kar do');
     expect(a.msg).toContain('Main 12014 ki booking cancel karne ki request prepare kar raha hoon');
-    expect(a.msg).toContain('Kya aap cancellation confirm karte hain?');
+    expect(a.msg).toMatch(CONFIRM_REQUIRED); expect(a.msg).not.toMatch(/\?/);   // P42.1: confirmation-required fact; the LLM words the question
     expect(p.cancelCalls).toBe(0);
     const pend = state.getSession(sid).pendingLifecycleAction!;
     expect(svc.actions.get(pend.actionId)!.status).toBe('AWAITING_ACTION_CONFIRMATION');
@@ -202,7 +204,7 @@ describe('G2 — cancellation outcomes', () => {
     expect(r.msg).toMatch(/reject kar di.*Booking abhi bhi confirmed hai/);
     expect(cur(store, sid, rec.bookingId)).toMatchObject({ bookingStatus: 'CONFIRMED', cancellationStatus: 'FAILED' });
     const again = await turn(svc, sid, 'booking cancel kar do');
-    expect(again.msg).toContain('Kya aap cancellation confirm karte hain?');
+    expect(again.msg).toMatch(CONFIRM_REQUIRED); expect(again.msg).not.toMatch(/\?/);   // P42.1: confirmation-required fact; the LLM words the question
     expect(p.cancelCalls).toBe(1);
   });
   it('[11] timeout without status support → MANUAL_VERIFICATION_REQUIRED (never CANCELLED); "phir se cancel karo" blocked', async () => {
@@ -276,7 +278,7 @@ describe('G2 — modification', () => {
     expect((await turn(none.svc, none.sid, 'journey date parso kar do')).msg).toBe('Is booking ke liye date modification available nahi hai.');
     const cls = setup({ modify: 'MODIFIED', modifyTypes: ['CLASS'], modifyEligibility: 'ELIGIBLE' });
     expect((await turn(cls.svc, cls.sid, 'journey date parso kar do')).msg).toBe('Is booking ke liye date modification available nahi hai.');
-    expect((await turn(cls.svc, cls.sid, 'booking change karni hai')).msg).toMatch(/Kya change karna hai — class/);
+    expect((await turn(cls.svc, cls.sid, 'booking change karni hai')).msg).toMatch(/change ho sakte hain: class/);   // P42.1: fact (options); the LLM asks
     expect(cls.p.modifyCalls).toBe(0);
   });
   it('[17] validation: same class, invalid passenger, ADD passenger, missing fare → rejected, nothing sent', async () => {

@@ -32,9 +32,18 @@ const NOT_A_NAME = /\b(hai|hain|galat|sahi|theek|karo|kardo|train|fare|ticket|cl
 
 export interface PassengerFieldError {
   field: string;
-  code: 'INVALID_PASSENGER_DETAILS';
+  /** P42.1 hardening: INVALID_PASSENGER_NAME_SCRIPT = a name that is not in Latin / English letters (IRCTC). */
+  code: 'INVALID_PASSENGER_DETAILS' | 'INVALID_PASSENGER_NAME_SCRIPT';
   message: string;
 }
+
+/**
+ * P42.1 hardening: IRCTC accepts passenger names in Latin (English) letters only — the same rule as the P38 passenger
+ * form (LATIN_NAME) and the IRCTC handoff formatter (NAME_NOT_LATIN_LETTERS). A name in another script (e.g. Devanagari
+ * from STT: "रवि") is never stored as a valid name and never transliterated by the backend.
+ */
+export const LATIN_NAME_RE = /^[A-Za-z][A-Za-z .'-]*$/;
+export const isLatinName = (n: unknown): boolean => typeof n === 'string' && LATIN_NAME_RE.test(n.trim());
 
 export interface PassengerValidationResult {
   /** Canonical, valid values only. */
@@ -54,20 +63,22 @@ export class PassengerValidator {
       switch (k as PassengerField) {
         case 'name': {
           const n = canonicalName(v);
-          if (n) out.valid.name = n;
+          // P42.1 hardening: a recognisable name in a non-Latin script is refused (structured code; no transliteration)
+          if (n && !isLatinName(n)) out.errors.push({ field: 'name', code: 'INVALID_PASSENGER_NAME_SCRIPT', message: `${label} ka naam IRCTC ke liye English (Latin) letters mein hona zaroori hai — yeh naam save nahi hua.` });
+          else if (n) out.valid.name = n;
           else out.errors.push({ field: 'name', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ka naam samajh nahi aaya. Sirf naam batayein, jaise "Rahul Sharma".` });
           break;
         }
         case 'age': {
           const a = typeof v === 'number' ? (Number.isInteger(v) && v >= 1 && v <= 120 ? v : null) : strictAge(String(v));
           if (a !== null) out.valid.age = a;
-          else out.errors.push({ field: 'age', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ki umar 1 se 120 ke beech number mein batayein.` });
+          else out.errors.push({ field: 'age', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ki umar 1 se 120 ke beech number honi chahiye.` });
           break;
         }
         case 'gender': {
           const g = GENDERS.includes(String(v).toUpperCase() as Gender) ? (String(v).toUpperCase() as Gender) : resolvePassengerGender(String(v));
           if (g) out.valid.gender = g;
-          else out.errors.push({ field: 'gender', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ka gender male, female ya other batayein.` });
+          else out.errors.push({ field: 'gender', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ka gender male, female ya other hona chahiye.` });
           break;
         }
         case 'berthPreference': {
@@ -79,7 +90,7 @@ export class PassengerValidator {
         case 'foodPreference': {
           const f = String(v).toUpperCase().trim().replace(/[\s-]+/g, '_').replace(/^NONVEG$/, 'NON_VEG').replace(/^NOFOOD$/, 'NO_FOOD') as FoodPreference;
           if (FOODS.includes(f)) out.valid.foodPreference = f;
-          else out.errors.push({ field: 'foodPreference', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ke khane ki choice Veg, Non-veg ya No food batayein.` });
+          else out.errors.push({ field: 'foodPreference', code: 'INVALID_PASSENGER_DETAILS', message: `${label} ke khane ki choice Veg, Non-veg ya No food honi chahiye.` });
           break;
         }
       }

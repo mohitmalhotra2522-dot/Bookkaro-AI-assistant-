@@ -36,6 +36,9 @@ export interface BookingScenarioExpectation {
   /** Case-insensitive regex sources the reply must / must not match. */
   responseMatches?: string[];
   responseExcludes?: string[];
+  /** P42.1: what the backend waits for (structured) — the LLM words any question. */
+  pendingType?: string | null;
+  nextDetail?: string | null;
   /** Regex the frozen ReviewSnapshot.dataSource must match (mock data is always labelled non-live). */
   reviewDataSource?: string;
   /** ReviewSnapshot.fare.status (VERIFIED | FARE_UNAVAILABLE | NOT_VERIFIED). */
@@ -58,37 +61,37 @@ const T = (text: string, mode: 'TEXT' | 'VOICE' = 'TEXT'): ScenarioStep => ({ te
 export const MOCK_BOOKING_SCENARIOS: readonly MockBookingScenario[] = Object.freeze([
   { id: 'B01_COUNT', title: 'passenger count after class → collection starts',
     steps: [...UPTO_CLASS, T('2 log')],
-    expect: { preparationState: 'COLLECTING_PASSENGER_DETAILS', passengerCount: 2, passengers: ['_/_/_', '_/_/_'], toolsExecuted: [], responseMatches: ['2 passengers ke details', 'naam'] } },
+    expect: { preparationState: 'COLLECTING_PASSENGER_DETAILS', passengerCount: 2, passengers: ['_/_/_', '_/_/_'], toolsExecuted: [], nextDetail: '1.name', responseExcludes: ['\\?'] } },
   { id: 'B02_INVALID_COUNT', title: '0 passengers → INVALID_PASSENGER_COUNT, nothing stored',
     steps: [...UPTO_CLASS, T('0 passengers')],
     expect: { errorType: 'INVALID_PASSENGER_COUNT', toolsExecuted: [], selectedClass: 'CC', responseExcludes: ['0 passengers ke details'] } },
   { id: 'B03_ONE_COMPLETE', title: 'one passenger, all fields → review + confirmation question',
     steps: [...UPTO_CLASS, T('1 passenger. Mohit 31 male')],
-    expect: { bookingState: 'AWAITING_CONFIRMATION', preparationState: 'AWAITING_CONFIRMATION', passengers: ['Mohit/31/MALE'], reviewVersion: 1, reviewStatus: 'CURRENT', fareStatus: 'AVAILABLE', availabilityStatus: 'AVAILABLE', responseMatches: ['520', 'confirm'] } },
+    expect: { bookingState: 'AWAITING_CONFIRMATION', preparationState: 'AWAITING_CONFIRMATION', passengers: ['Mohit/31/MALE'], reviewVersion: 1, reviewStatus: 'CURRENT', fareStatus: 'AVAILABLE', availabilityStatus: 'AVAILABLE', responseMatches: ['520'], pendingType: 'CONFIRMATION_REQUIRED' } },
   { id: 'B04_ONE_INCOMPLETE', title: 'one passenger, name only → asks ONLY the age',
     steps: [...UPTO_CLASS, T('1 passenger'), T('Mohit')],
-    expect: { preparationState: 'COLLECTING_PASSENGER_DETAILS', passengers: ['Mohit/_/_'], reviewVersion: null, responseMatches: ['umar|age'], responseExcludes: ['gender', 'naam bataiye'] } },
+    expect: { preparationState: 'COLLECTING_PASSENGER_DETAILS', passengers: ['Mohit/_/_'], reviewVersion: null, nextDetail: '1.age', responseExcludes: ['gender', 'naam bataiye', '\\?'] } },
   { id: 'B05_TWO_COMPLETE', title: 'two passengers in one line → review',
     steps: REVIEW_2,
     expect: { preparationState: 'AWAITING_CONFIRMATION', passengerCount: 2, passengers: ['Mohit/31/MALE', 'Ravi/28/MALE'], reviewVersion: 1, responseMatches: ['1040'] } },
   { id: 'B06_MULTI_FIELD', title: 'multi-field input fills P1 and moves to P2',
     steps: [...UPTO_CLASS, T('2 passengers'), T('Mohit 31 male')],
-    expect: { passengers: ['Mohit/31/MALE', '_/_/_'], preparationState: 'COLLECTING_PASSENGER_DETAILS', responseMatches: ['doosre passenger ka naam'] } },
+    expect: { passengers: ['Mohit/31/MALE', '_/_/_'], preparationState: 'COLLECTING_PASSENGER_DETAILS', nextDetail: '1.berthPreference' } },
   { id: 'B07_CORRECTION', title: 'field-only correction rebuilds the review (v2)',
     steps: [...REVIEW_2, T('First passenger ki age 32 kar do')],
     expect: { passengers: ['Mohit/32/MALE', 'Ravi/28/MALE'], reviewVersion: 2, reviewStatus: 'CURRENT', preparationState: 'AWAITING_CONFIRMATION', toolsExecuted: ['CHECK_AVAILABILITY', 'GET_FARE'], responseMatches: ['31 se 32'] } },  // P33: a new review version is built from THIS turn's availability + fare (review-boundary refresh)
   { id: 'B08_COUNT_INCREASE', title: '2 → 3 keeps both passengers, review stale, asks for P3',
     steps: [...REVIEW_2, T('3 passengers kar do')],
-    expect: { passengerCount: 3, passengers: ['Mohit/31/MALE', 'Ravi/28/MALE', '_/_/_'], reviewStatus: 'STALE', preparationState: 'COLLECTING_PASSENGER_DETAILS', responseMatches: ['teesre passenger'] } },
+    expect: { passengerCount: 3, passengers: ['Mohit/31/MALE', 'Ravi/28/MALE', '_/_/_'], reviewStatus: 'STALE', preparationState: 'COLLECTING_PASSENGER_DETAILS', nextDetail: '1.berthPreference' } },
   { id: 'B09_COUNT_DECREASE', title: '"Actually 2 hi hain" removes P3, fresh fare, review v2',
     steps: [...UPTO_CLASS, T('3 passengers. Mohit 31 male, Ravi 28 male, Amit 40 male.'), T('Actually 2 hi hain.')],
     expect: { passengerCount: 2, passengers: ['Mohit/31/MALE', 'Ravi/28/MALE'], reviewVersion: 2, reviewStatus: 'CURRENT', toolsExecuted: ['CHECK_AVAILABILITY', 'GET_FARE'], responseMatches: ['3 se 2', '1040'] } },  // P33: fresh availability + fare for the new review
   { id: 'B10_TRAIN', title: '"12014 wali" stores the actual train from the current results',
     steps: [T('Amritsar se Delhi kal'), T('12014 wali kar do')],
-    expect: { selectedTrain: '12014', selectedClass: null, bookingState: 'CLASS_OPTIONS', responseMatches: ['CC aur 2S'] } },
+    expect: { selectedTrain: '12014', selectedClass: null, bookingState: 'CLASS_OPTIONS', pendingType: 'CLASS_SELECTION_REQUIRED' } },
   { id: 'B11_CLASS', title: 'class from the train\'s real classes',
     steps: UPTO_CLASS,
-    expect: { selectedTrain: '12014', selectedClass: 'CC', preparationState: 'COLLECTING_PASSENGERS', responseMatches: ['kitne passengers|passengers'] } },
+    expect: { selectedTrain: '12014', selectedClass: 'CC', preparationState: 'COLLECTING_PASSENGERS', pendingType: 'PASSENGERS_REQUIRED' } },
   { id: 'B12_INVALID_CLASS', title: '3A is not on 12014 → refused, real classes offered',
     steps: [T('Amritsar se Delhi kal'), T('12014 wali kar do'), T('3A')],
     expect: { selectedTrain: '12014', selectedClass: null, responseMatches: ['CC'] } },

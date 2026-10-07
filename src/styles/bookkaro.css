@@ -542,3 +542,38 @@ img, svg { display: block; }
 .bk-irctc__lang { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .bk-irctc__pax { padding: 4px 0 8px; border-bottom: 1px dashed var(--border); }
 .bk-irctc__pax:last-child { border-bottom: 0; }
+
+/* ───────────── P42 — Same Train Alternative (card + panel) ───────────── */
+.bk-sta { padding: 14px 16px; display: grid; gap: 8px; }
+.bk-sta__eyebrow { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--navy-700); }
+.bk-sta__title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.bk-sta__name { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bk-sta__sub { font-size: 13.5px; color: var(--text-3); }
+.bk-sta__sub b { color: var(--text); font-weight: 600; }
+.bk-sta__tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.bk-sta__preview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--r-md); background: var(--navy-50); }
+.bk-sta__best { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; color: var(--navy-800); text-transform: uppercase; letter-spacing: 0.04em; }
+.bk-sta__line { font-size: 14px; color: var(--text); }
+.bk-sta__line b { font-size: 11px; letter-spacing: 0.06em; color: var(--text-3); margin-right: 4px; }
+.bk-sta-panel { display: grid; gap: 14px; padding-bottom: 8px; }
+.bk-sta-panel__head { display: grid; gap: 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.bk-sta-panel__h { display: flex; align-items: center; gap: 6px; margin: 4px 0 8px; font-size: 12px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-3); }
+.bk-sta-banner { display: flex; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: var(--r-md); background: var(--navy-50); color: var(--navy-800); font-size: 13.5px; }
+.bk-sta-banner--bad { background: var(--bad-bg); color: var(--bad); }
+.bk-sta-opt { display: grid; gap: 8px; padding: 12px 14px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.bk-sta-opt.is-best { border-color: var(--navy-700); box-shadow: 0 0 0 3px var(--navy-50); }
+.bk-sta-opt__top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.bk-sta-opt__fare { margin-left: auto; font-weight: 700; color: var(--text); }
+.bk-sta-lines { display: grid; gap: 4px; }
+.bk-sta-row { display: grid; grid-template-columns: 74px 1fr; align-items: baseline; gap: 8px; font-size: 14px; }
+.bk-sta-k { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; color: var(--text-3); }
+.bk-sta-v { color: var(--text); font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.bk-sta-row--warn .bk-sta-k, .bk-sta-row--warn .bk-sta-v { color: var(--warn); font-weight: 600; }
+.bk-sta-note { font-size: 12.5px; color: var(--text-3); }
+.bk-sta-note--bad { color: var(--bad); }
+.bk-sta-evidence { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--text-3); }
+.bk-sta-web { color: var(--warn); }
+.bk-sta-confirm { display: grid; gap: 8px; padding: 10px 12px; border-radius: var(--r-md); background: var(--warn-bg); font-size: 13.5px; color: var(--text); }
+.bk-sta-confirm p { margin: 0; }
+.bk-sta-foot { display: flex; align-items: flex-start; gap: 6px; margin: 0; font-size: 12.5px; color: var(--text-3); }
+.bk-train__same { margin-left: auto; }

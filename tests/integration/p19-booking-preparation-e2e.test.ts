@@ -17,6 +17,7 @@ import { MockRailwayProvider } from '../../server/railway/providers/mock/mock-pr
 import { RailwayToolRuntime } from '../../server/ai/tool-runtime/railway-tool-runtime';
 import { IrctcHandoffAdapter } from '../../server/irctc/handoff/irctc-handoff-adapter';
 import { BookingState } from '../../shared/states';
+import { nextPassengerDetail } from '../../server/booking/passenger-options';
 
 const meta = () => { const now = new Date().toISOString(); return { source: 'mock' as const, providerId: 'p19-spy', requestTimestamp: now, responseTimestamp: now, latencyMs: 1, cache: 'disabled' as const }; };
 
@@ -89,12 +90,15 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
   it('[01 count] "12014 wali kar do" → "CC" → "2 passengers" → "2 passengers ke details chahiye"', async () => {
     const h = mk();
     let r = await run(h, UPTO_CLASS);
-    expect(r.responseMessage).toMatch(/Kitne passengers hain\?/);
+    // P42.1: the missing count is STRUCTURED (pending PASSENGERS_REQUIRED); the LLM words the question
+    expect(h.s().pendingInteraction?.type).toBe('PASSENGERS_REQUIRED');
+    expect(r.responseMessage).not.toMatch(/\?/);
     expect(prep(r).bookingPreparationState).toBe('COLLECTING_PASSENGERS');
     expect(prep(r).preparationPath).toEqual(['CLASS_SELECTED', 'BOOKING_PREPARE', 'COLLECTING_PASSENGERS']);
     r = await h.say('2 passengers');
     expect(h.s().passengersCount).toBe(2);
-    expect(r.responseMessage).toMatch(/2 passengers ke details chahiye\. Pehle passenger ka naam bataiye\./);
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'name' });   // P42.1: structured next detail, no backend question
+    expect(r.responseMessage).not.toMatch(/\?/);
     expect(prep(r)).toMatchObject({ bookingPreparationState: 'COLLECTING_PASSENGER_DETAILS', passengerCount: 2, passengersComplete: 0 });
     expect(ran(r)).toEqual([]);                                                       // no provider call for a count
   });
@@ -108,7 +112,8 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
       expect(r.error?.code, t).toBe('INVALID_PASSENGER_COUNT');
       expect(h.s().passengersCount ?? null, t).toBeNull();
       expect(h.s().pendingInteraction?.type).toBe('PASSENGERS_REQUIRED');
-      expect(r.responseMessage).toMatch(/kitne passengers hain\?/i);
+      expect(r.responseMessage, t).toMatch(/Kam se kam 1 passenger|negative nahi|maximum 6 passengers/i);   // P42.1: the rule (fact), no question
+      expect(r.responseMessage, t).not.toMatch(/\?/);
       expect(r.turnLog.events).toContain('PASSENGER_COUNT_REJECTED');
     }
     expect(rail.n).toEqual(before);
@@ -131,11 +136,14 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     await run(h, [...UPTO_CLASS, '2 passengers']);
     let r = await h.say('First passenger ka naam Mohit hai.');
     expect(pax(h)[0]).toBe('Mohit/_/_');
-    expect(r.responseMessage).toMatch(/umar/i);
-    expect(r.responseMessage).not.toMatch(/gender|naam bataiye/i);
+    // P42.1: the next detail is structured (age of passenger 1 only); the LLM asks
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'age' });
+    expect(r.responseMessage).not.toMatch(/gender|naam bataiye|\?/i);
     r = await h.say('Age 31.');
     expect(pax(h)[0]).toBe('Mohit/31/_');
-    expect(r.responseMessage).toMatch(/gender/i);
+    // P42.1: structured next detail — CC offers a seat preference, so (v0.39.6 order name → age → berth → gender) P1's berth
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'berthPreference' });
+    expect(r.responseMessage).not.toMatch(/\?/);
     await h.say('Male.');
     expect(pax(h)[0]).toBe('Mohit/31/MALE');
   });
@@ -145,7 +153,7 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     await run(h, [...UPTO_CLASS, '2 passengers']);
     const r = await h.say('First passenger Mohit, 31 male.');
     expect(pax(h)).toEqual(['Mohit/31/MALE', '_/_/_']);
-    expect(r.responseMessage).toMatch(/Doosre passenger ka naam/);
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'berthPreference' });   // P42.1: structured next detail (CC seat preference of P1, then P2)
     expect(prep(r).passengersComplete).toBe(1);
   });
 
@@ -159,7 +167,9 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     expect(pax(h)).toEqual(['Mohit/31/MALE', 'Ravi/32/FEMALE']);
     expect(r.responseMessage).not.toMatch(/Kis passenger/);
     r = await h.say('Naam galat hai.');
-    expect(r.responseMessage).toMatch(/naya naam kya hai\?/);
+    // P42.1: the correction is pending as STRUCTURED data (name correction); the LLM asks for the new name
+    expect(h.s().pendingInteraction).toMatchObject({ type: 'PASSENGER_DETAILS_REQUIRED', data: { field: 'name', correction: true } });
+    expect(r.responseMessage).not.toMatch(/\?/);
     expect(pax(h)).toEqual(['Mohit/31/MALE', 'Ravi/32/FEMALE']);                       // nothing renamed to "Hai"
     r = await h.say('Rohit');
     expect(pax(h)).toEqual(['Mohit/31/MALE', 'Rohit/32/FEMALE']);
@@ -186,7 +196,7 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     const r = await h.say('Mohit 31 male, Ravi 28 male');
     expect(r.error?.code).toBe('BOOKING_PREPARATION_NOT_READY');
     expect(r.responseMessage).toMatch(/current search results mein nahi hai/);
-    expect(r.responseMessage).toMatch(/\?/);
+    expect(r.responseMessage).not.toMatch(/\?/);   // P42.1: fact only; the LLM decides what to ask
     expect(h.s().review?.valid).toBeFalsy();
     expect(rail.n.avail || 0).toBe(before.avail || 0);
     expect(rail.n.fare || 0).toBe(before.fare || 0);
@@ -208,7 +218,8 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     const r = await h.say('CC nahi 3A kar do');
     expect(r.error?.code).toBe('INVALID_CLASS_SELECTION');
     expect(h.s().selectedClass).toBe('CC');
-    expect(r.responseMessage).toMatch(/available nahi hai.*\?/);
+    expect(r.responseMessage).toMatch(/available nahi hai/);
+    expect(r.responseMessage).not.toMatch(/\?/);   // P42.1: fact only (available classes listed); the LLM asks
     expect(prep(r)).toMatchObject({ reviewVersion: 1, reviewStatus: 'CURRENT' });
   });
 
@@ -314,7 +325,7 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     expect(h.s().selectedClass).toBeFalsy();
     expect(h.s().review.valid).toBe(false);
     expect(prep(r)).toMatchObject({ reviewStatus: 'STALE', fareStatus: 'NOT_REQUESTED', availabilityStatus: 'NOT_REQUESTED', bookingPreparationState: 'NOT_STARTED' });
-    expect(r.responseMessage).toMatch(/Kaunsi class chahiye\?/);
+    expect(h.s().pendingInteraction?.type).toBe('CLASS_SELECTION_REQUIRED');   // P42.1: structured; the LLM asks
     expect(pax(h)).toEqual(['Mohit/31/MALE', 'Ravi/28/MALE']);                           // passengers survive
   });
 
@@ -342,7 +353,7 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
       expect(prep(b).bookingPreparationState, x).toBe(prep(a).bookingPreparationState);
       expect(v.s().bookingState).toBe(t.s().bookingState);
       expect((b.responseMessage.match(/\?/g) || []).length, x).toBeLessThanOrEqual(1);
-      if (x === 'do passengers') expect(b.responseMessage).toBe('Pehle passenger ka naam?');
+      if (x === 'do passengers') { expect(nextPassengerDetail(v.s())).toEqual({ passenger: 1, field: 'name' }); expect(b.responseMessage).not.toMatch(/\?/); }   // P42.1
     }
     expect(prep(await v.say('haan', 'VOICE')).confirmationStatus).toBe('CONFIRMATION_REQUESTED');
   });
@@ -352,7 +363,7 @@ describe('P19 G3 — booking preparation pipeline (Part 56)', () => {
     await run(h, [...UPTO_CLASS, '2 passengers', 'Mohit 31 male']);
     const r = await h.say('Actually 3 passengers.');
     expect(pax(h)).toEqual(['Mohit/31/MALE', '_/_/_', '_/_/_']);
-    expect(r.responseMessage).toMatch(/Doosre passenger ka naam/);
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'berthPreference' });   // P42.1: structured next detail (P1's optional seat preference first)
     expect(prep(r)).toMatchObject({ passengerCount: 3, passengersComplete: 1 });
   });
 

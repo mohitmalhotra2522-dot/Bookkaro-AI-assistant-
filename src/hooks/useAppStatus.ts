@@ -12,9 +12,11 @@ export interface AppStatus {
   llmConfigured: boolean;
   llmMock: boolean;
   realBookingEnabled: boolean | null;
+  /** P42: Same Train Alternative tool enabled on the server (feature flag). */
+  sameTrainAlternatives: boolean;
 }
 
-const INITIAL: AppStatus = { state: 'loading', railwayKind: null, llmConfigured: false, llmMock: false, realBookingEnabled: null };
+const INITIAL: AppStatus = { state: 'loading', railwayKind: null, llmConfigured: false, llmMock: false, realBookingEnabled: null, sameTrainAlternatives: false };
 
 export function useAppStatus(): AppStatus {
   const [status, setStatus] = useState<AppStatus>(INITIAL);
@@ -31,7 +33,8 @@ export function useAppStatus(): AppStatus {
           railwayKind: kind,
           llmConfigured: !!h?.llm?.configured,
           llmMock: /mock/i.test(llmId),
-          realBookingEnabled: typeof h?.executionCapability?.realBookingEnabled === 'boolean' ? h.executionCapability.realBookingEnabled : null
+          realBookingEnabled: typeof h?.executionCapability?.realBookingEnabled === 'boolean' ? h.executionCapability.realBookingEnabled : null,
+          sameTrainAlternatives: h?.sameTrainAlternatives?.enabled === true
         });
       })
       .catch(() => { if (live) setStatus({ ...INITIAL, state: 'unavailable' }); });

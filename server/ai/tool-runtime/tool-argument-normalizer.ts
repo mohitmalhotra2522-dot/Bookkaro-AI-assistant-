@@ -44,7 +44,7 @@ const SENSITIVE_VALUE: RegExp[] = [
   /\b(password|otp|captcha|upi pin|cvv)\b/i
 ];
 
-const DATE_TOOLS = new Set(['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'CHECK_AVAILABILITY', 'GET_FARE', 'TRACK_TRAIN']);
+const DATE_TOOLS = new Set(['SEARCH_TRAINS', 'GET_TRAIN_INFO', 'CHECK_AVAILABILITY', 'GET_FARE', 'TRACK_TRAIN', /* P42 */ 'SEARCH_SAME_TRAIN_ALTERNATIVES']);
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const CODE = /^[A-Z]{2,5}$/;
 
@@ -97,12 +97,12 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
     delete args.dateExpression;
     if (expr) {
       const r = resolveDate(expr);
-      if (!r.ok) return { ok: false, code: r.error === 'AMBIGUOUS_DATE' ? 'AMBIGUOUS_DATE' : 'INVALID_DATE', message: 'Kis date ko? Thoda saaf bata dijiye (jaise kal / parso / 12 October).' };
+      if (!r.ok) return { ok: false, code: r.error === 'AMBIGUOUS_DATE' ? 'AMBIGUOUS_DATE' : 'INVALID_DATE', message: 'Journey date clear nahi hai (jaise kal / parso / 12 October).', details: { missingField: 'DATE' } } as any;
       if (args.date && args.date !== r.date) corrections.push(`date: ${args.date} → ${r.date} (DateResolver)`);
       args.date = r.date;
     } else if (typeof args.date === 'string' && args.date && !ISO.test(args.date)) {
       const r = resolveDate(args.date);
-      if (!r.ok) return { ok: false, code: r.error === 'AMBIGUOUS_DATE' ? 'AMBIGUOUS_DATE' : 'INVALID_DATE', message: 'Kis date ko? Thoda saaf bata dijiye (jaise kal / parso / 12 October).' };
+      if (!r.ok) return { ok: false, code: r.error === 'AMBIGUOUS_DATE' ? 'AMBIGUOUS_DATE' : 'INVALID_DATE', message: 'Journey date clear nahi hai (jaise kal / parso / 12 October).', details: { missingField: 'DATE' } } as any;
       corrections.push(`date: "${args.date}" → ${r.date} (DateResolver)`);
       args.date = r.date;
     }
@@ -118,7 +118,7 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
     for (const f of ['origin', 'destination'] as const) {
       if (args[f] === undefined) continue;
       const r = resolveStationArg(args[f]);
-      if (!r) return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${args[f]}" kaunsa station hai? Thoda saaf bata dijiye.`, details: { field: f } };
+      if (!r) return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${args[f]}" station identify nahi hua.`, details: { field: f, missingField: 'STATION' } };
       if (r.code !== args[f]) corrections.push(`${f}: "${args[f]}" → ${r.code} (RouteResolver)`);
       args[f] = r.code;
     }
@@ -130,7 +130,7 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
       if (args[f] === undefined) continue;
       const r = resolveStationArg(args[f]);
       const cur = session[f];
-      if (!r) return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${args[f]}" kaunsa station hai? Thoda saaf bata dijiye.`, details: { field: f } };
+      if (!r) return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${args[f]}" station identify nahi hua.`, details: { field: f, missingField: 'STATION' } };
       if (cur && r.code !== cur) {
         return { ok: false, code: 'CONTEXT_CONFLICT', message: `Abhi journey ${session.origin} → ${session.destination} hai. ${f === 'origin' ? 'Origin' : 'Destination'} ${r.code} karna hai to pehle journey badal dijiye.`, details: { field: f, current: cur, proposed: r.code } };
       }

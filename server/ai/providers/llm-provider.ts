@@ -76,8 +76,13 @@ export interface LLMTurnInput {
 /** Prompt 23: the backend's validated outcome of one update_booking_session proposal (never raw user secrets). */
 export interface SessionUpdateOutcomeView {
   applied: string[];
-  error?: { code: string; message: string };
-  /** Backend notes for this proposal (e.g. an ambiguity question) — authoritative wording of the outcome. */
+  /** P42.1: fact-only message + structured missing info; the LLM decides whether / how to ask. */
+  error?: { code: string; message: string; missingField?: string; userActionRequired?: boolean;
+    /** P42.1 hardening: structured reason / field (e.g. INVALID_PASSENGER_NAME_SCRIPT, name) — the LLM words any question */
+    reason?: string; field?: string; passengerIndex?: number };
+  /** P42.1 hardening: proposed passenger fields NOT stored (index + field + reason; never the value). */
+  rejectedPassengerFields?: Array<{ passengerIndex: number | null; field: string; reason: string; userActionRequired: boolean }>;
+  /** Backend notes for this proposal — facts only (P42.1: asking sentences removed; the LLM phrases any question). */
   notes: string[];
   replan?: boolean;
   blocked?: boolean;

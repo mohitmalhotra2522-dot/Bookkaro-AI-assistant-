@@ -15,6 +15,8 @@
  * (no upgrade "available" over WL / RAC, exact WL / RAC numbers) and ₹ amounts only from fare fields. Live-status
  * turns (PNR / running status / cancelled trains) keep the authoritative rendering of the provider result.
  */
+import { humanizePreferenceCodes } from './preference-labels';
+import { verifyPassengerUpdateClaim } from './passenger-claims';
 import type { LLMProvider, TurnToolResultView } from '../providers/llm-provider';
 import type { BookingSession } from '@shared/entities';
 import { BookingState } from '@shared/states';
@@ -32,6 +34,7 @@ import { ClaimEntityBinder, verifyBoundClaim, diagnoseCrossEntity, resultTrainsO
 import { explicitDates } from './claim-dates';
 import { RESULT_REF_RE } from '../tool-runtime/tool-result-identity';
 import { actionLedgerFromSteps, guardActionSentence, type ActionLedger, type ActionClaimDiagnostic } from './action-claims';
+import { guardSameTrainRuleClaims } from './same-train-claims';
 import { verifyReferenceClaims, type ReferenceClaimDiagnostic } from './reference-claims';
 import { verifyOutcomeClaims, type OutcomeClaimDiagnostic } from './outcome-claims';
 import { verifyBookingStateClaim } from './booking-state-claims';
@@ -59,6 +62,9 @@ export interface NaturalComposeInput {
   steps: any[];
   appliedActions: string[];
   changes: Array<{ field: string; corrected: boolean }>;
+  /** P42.1: `P1.age`-style keys of passenger fields REALLY changed this turn (orchestrator before / after snapshot);
+   *  undefined → no passenger-update claim judging. */
+  passengerFieldsUpdated?: string[];
   error: { code: string; message: string; details?: { blockers?: string[] } } | null;
   pendingQuestionCode: string | null;
   pendingQuestion: string | null;
@@ -213,18 +219,10 @@ function collectFare(into: Set<number>, v: any, key = '', inFare = false, depth 
   if (Array.isArray(v)) { for (const x of v.slice(0, 40)) collectFare(into, x, key, f, depth + 1); return; }
   if (typeof v === 'object') for (const [k, x] of Object.entries(v)) collectFare(into, x, k, f, depth + 1);
 }
-const SHORT_Q: Record<string, string> = {
-  TRAIN_SELECTION_REQUIRED: 'Kaunsi train chahiye?', CLASS_SELECTION_REQUIRED: 'Kaunsi class chahiye?',
-  REVIEW_APPROVAL_REQUIRED: 'Confirm karna hai?', CONFIRMATION_REQUIRED: 'Confirm karna hai?'
-};
-/** Prompt 25 Part 7: the backend's OWN appended question follows the user's language (the LLM's text is never rewritten). */
-const SHORT_Q_EN: Record<string, string> = {
-  ORIGIN_REQUIRED: 'Where will you be travelling from?', DESTINATION_REQUIRED: 'Where would you like to go?',
-  DATE_REQUIRED: 'Which date would you like to travel?', PASSENGERS_REQUIRED: 'How many passengers?',
-  TRAIN_SELECTION_REQUIRED: 'Which train would you like?', CLASS_SELECTION_REQUIRED: 'Which class would you like?',
-  PASSENGER_DETAILS_REQUIRED: 'Could you share the passenger details — name, age and gender?',
-  REVIEW_APPROVAL_REQUIRED: 'Shall I go ahead and confirm?', CONFIRMATION_REQUIRED: 'Shall I go ahead and confirm?'
-};
+// P42.1: the backend's fixed short questions (SHORT_Q / SHORT_Q_EN) were removed — the LLM phrases any question.
+/** P42.1: length allowance for the LLM's own (single) follow-up question — what was reserved for the backend question. */
+const LLM_QUESTION_ALLOWANCE_CHARS = 80;
+const LLM_QUESTION_ALLOWANCE_WORDS = 12;
 /** A sentence that already asks the user for something ("…bata dijiye.", "Please share…") — no second question. */
 const ASKS_RE = /(\?|\b(bata\s?(o|iye|ie|ein|yein|dijiye|dein|do|dena)|batayein|bataiye|batao|share (karein|kijiye|kar dijiye)|let me know|tell me|please (confirm|share|tell|choose|select|provide)|chun (lijiye|lein|lo)|select kar(ein|iye| lijiye)|confirm kar(ein|iye| dijiye))\b[^.!?]*[.!]?\s*$)/i;
 const LEAD_CONJ = /^(aur|and|lekin|but|par|magar|ya|or|also|bhi|toh|to|so)\b[,\s]+/i;
@@ -449,9 +447,10 @@ export class NaturalResponseComposer {
     // handed to speech until every guarantee below has passed (or the deterministic fallback was chosen) — never
     // "LLM → TTS → later validation". Segments are emitted exactly once, from the final result.
     const pendingType = String(s.pendingInteraction?.type || '');
-    const question = !i.pendingQuestion ? null
-      : language === 'ENGLISH' && SHORT_Q_EN[pendingType] ? SHORT_Q_EN[pendingType]
-      : (SHORT_Q[pendingType] || SHORT_Q[i.pendingQuestionCode || ''] || i.pendingQuestion);
+    // P42.1: no backend question text reaches the wording LLM — only the structured pendingQuestionCode (+ the
+    // pending interaction / missing information in the session); the LLM decides whether and how to ask
+    void pendingType;
+    const question: string | null = null;
     // Part 18 — voice stays concise: never longer than the text reply (short replies may take a natural lead-in)
     const maxLen = general ? (mode === 'TEXT' ? 900 : 320)
       : agentText ? (mode === 'TEXT' ? 600 : 260)
@@ -581,7 +580,8 @@ export class NaturalResponseComposer {
     let repaired = 0;
     let prevRejected = false;
     const take = (sentence: string) => {
-      let t = sentence.trim();
+      // P42.1 hardening: internal preference codes (NO_PREFERENCE, WINDOW, NON_VEG …) are spoken as natural labels
+      let t = humanizePreferenceCodes(sentence.trim());
       if (!t) return;
       // Prompt 25 Part 11: no orphan numbering / bullets / punctuation; a sentence that only continued a removed one
       // ("Aur …") loses the dangling conjunction instead of reading as a fragment
@@ -598,6 +598,12 @@ export class NaturalResponseComposer {
           t = ag.text;
         }
       }
+      // Prompt 42: "book X, board / deboard at Y" only with a VERIFIED boarding / alighting rule — same hard constraint
+      // as the screen reply (a removed claim never reaches the screen or TTS through this path either)
+      if (guardSameTrainRuleClaims(t, i.steps as any).removed.length) {
+        rejected.push({ sentence: t.slice(0, 120), reason: 'SAME_TRAIN_RULE_CLAIM' });
+        prevRejected = true; return;
+      }
       // Prompt 32: "koi train nahi mili" only after a real empty result (never after a timeout / failure / malformed
       // data); "railway data ke according" only with provider data; MOCK data is never "live"
       {
@@ -610,6 +616,11 @@ export class NaturalResponseComposer {
         const bv = verifyBookingStateClaim(t, s);
         outcomeDiag.push(...bv.diagnostics.map(d => ({ kind: 'BOOKING_STATE' as const, accepted: d.accepted, reason: d.reason, evidence: d.kind, sentence: d.sentence })));
         if (bv.reason) { rejected.push({ sentence: t.slice(0, 120), reason: `BOOKING_STATE_CLAIM:${bv.reason}` }); prevRejected = true; return; }
+      }
+      // P42.1: "Age 31 noted" / "naam save ho gaya" only when that passenger detail really changed THIS turn
+      {
+        const pv = verifyPassengerUpdateClaim(t, i.passengerFieldsUpdated);
+        if (pv) { rejected.push({ sentence: t.slice(0, 120), reason: `PASSENGER_UPDATE_CLAIM:${pv}` }); prevRejected = true; return; }
       }
       const hits: Hits = {};
       // Prompt 28: bind BEFORE judging (the binder tracks the reply's antecedents from every sentence the LLM wrote)
@@ -635,12 +646,16 @@ export class NaturalResponseComposer {
       if (why) { rejected.push({ sentence: t.slice(0, 120), reason: why }); prevRejected = true; return; }
       prevRejected = false;
       if (hits.text && hits.text !== t) { t = hits.text; repaired++; }
-      // Prompt 23: an agent-authored reply keeps one sentence free for the pending question the backend appends
-      const cap = agentText && question && !hasQ() && !t.includes('?') ? maxSentences - 1 : maxSentences;
+      // v0.42.1: no backend-appended question → no sentence / length reserved for one (the LLM decides what to ask)
+      const cap = maxSentences;
       if (accepted.length >= cap) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
-      const reserve = question && !hasQ() && !t.includes('?') ? question.length + 1 : 0;
-      if ((len() ? len() + 1 : 0) + t.length + reserve > (i.voiceBrief ? briefMaxLen : maxLen)) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
-      if (i.voiceBrief && wordCount(accepted.join(' ')) + wordCount(t) + (reserve ? wordCount(question || '') : 0) > maxWords) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
+      const reserve = 0;
+      // P42.1: the budget that used to be reserved for the backend's question now belongs to the LLM's OWN first
+      // question (the length limit follows the backend reply, which no longer carries a question) — never a second one
+      const ownQ = !hasQ() && ASKS_RE.test(t);
+      const qAllow = ownQ ? LLM_QUESTION_ALLOWANCE_CHARS : 0;
+      if ((len() ? len() + 1 : 0) + t.length + reserve > (i.voiceBrief ? briefMaxLen : maxLen) + qAllow) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
+      if (i.voiceBrief && wordCount(accepted.join(' ')) + wordCount(t) + (reserve ? wordCount(question || '') : 0) > maxWords + (ownQ ? LLM_QUESTION_ALLOWANCE_WORDS : 0)) { rejected.push({ sentence: t.slice(0, 120), reason: 'TOO_LONG' }); return; }
       accepted.push(t);
       {
         const p = classifyClaim(t, idx, hits, general);
@@ -704,9 +719,7 @@ export class NaturalResponseComposer {
     // Prompt 33 (§34): review blocked because availability / fare could not be verified → the reply must say so
     // (the backend message carries the real P32 reason); never a reply that hides the failure
     if (reviewBlocked && !FAILURE_ACK_RE.test(accepted.join(' '))) return fallback('REVIEW_BLOCK_REASON_MISSING', rejected);
-    if (question && !hasQ()) {
-      accepted.push(question);
-    }
+    // v0.42.1: the pending question is NOT appended — it was only context for the LLM (Muse / fallback decides)
     const segments = [...accepted];
     emitFinal(segments);
     return { text: accepted.join(' '), segments, source: 'LLM', language, rejected, streamed: segments.length, authoredBy: agentText ? 'AGENT' : 'WORDING', ...(general ? { general: true } : {}),

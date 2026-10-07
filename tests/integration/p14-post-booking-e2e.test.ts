@@ -177,10 +177,12 @@ describe('G3 — confirmed booking → BookingRecord → history / PNR answers',
     expect(live.trackCalls).toEqual(['12497', '12497']);
     expect(evts(sid, 'BOOKING_LIVE_STATUS_REQUESTED')).toHaveLength(2);
     expect(S(sid).selectedTrain?.number || S(sid).selectedTrain?.trainNumber).toBe('12497');   // nothing re-selected / changed
-    // no booking + no context → asks for the train number (never guesses)
+    // no booking + no context → the missing train number is stated (structured missingField TRAIN; never guesses —
+    // P42.1: the LLM words any question)
     const fresh = newSid();
     const r3 = await say(fresh, 'meri train abhi kaha hai?');
-    expect(r3.responseMessage).toMatch(/Train number batayein/);
+    expect(r3.responseMessage).toMatch(/train number nahi mila/i);
+    expect(r3.responseMessage).not.toMatch(/\?/);
     expect(live.trackCalls).toHaveLength(2);
   });
 });
@@ -258,7 +260,7 @@ describe('G3 — UNKNOWN / FAILED / duplicates / ambiguity / access', () => {
     expect(store.createBooking(seed('14542', '2222222222', 2)).ok).toBe(true);
     const r = await say(sid, 'Delhi wali booking ka PNR status check karo');
     expect(r.error?.code).toBe('MULTIPLE_BOOKINGS_MATCHED');
-    expect(r.responseMessage).toContain('Do Delhi bookings mil rahi hain. Aap 14542 wali dekhna chahte ho ya 12014 wali?');
+    expect(r.responseMessage).toContain('Do Delhi bookings mil rahi hain. (14542 / 12014)');   // P42.1: facts; the LLM asks which one
     expect(live.pnrCalls).toEqual([]);
     const r2 = await say(sid, '12014 wali');
     expect(live.pnrCalls).toEqual(['1111111111']);

@@ -415,7 +415,7 @@ export class BookingPreparationService {
     }
     out.error = { code: 'BOOKING_NOT_READY', message: this.blockerMessage(r, this.state.getSession(sessionId)), details: { blockers: r.blockers } };
     out.notes.push(out.error.message);
-    out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', hint: 'Dobara check karun? Haan boliye.', data: { kind: 'RETRY_PREPARATION', blockers: r.blockers } };
+    out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', data: { kind: 'RETRY_PREPARATION', blockers: r.blockers } };
     out.readiness = this.evaluate(sessionId, ctx);
     return out;
   }
@@ -449,7 +449,7 @@ export class BookingPreparationService {
     if (!r.ready) {
       out.error = { code: 'BOOKING_NOT_READY', message: this.blockerMessage(r, this.state.getSession(sessionId)), details: { blockers: r.blockers } };
       out.notes.push(out.error.message);
-      out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', hint: 'Dobara check karun? Haan boliye.', data: { kind: 'RETRY_PREPARATION', blockers: r.blockers } };
+      out.pendingOverride = { type: 'CLARIFICATION_REQUIRED', data: { kind: 'RETRY_PREPARATION', blockers: r.blockers } };
       return 'blocked';
     }
     this.createReview(sessionId, ctx, r, out);
@@ -720,7 +720,7 @@ export class BookingPreparationService {
       this.state.invalidate(sessionId, 'CLASS');
       s.selectedClass = undefined;
       this.state.tryTransition(sessionId, BookingState.CLASS_OPTIONS);
-      out.error = { code: 'INVALID_CLASS_SELECTION', message: 'Selected class is train ke liye valid nahi hai, isliye handoff nahi banaya. Kaunsi class chahiye?', details: { gatewayCode: code } };
+      out.error = { code: 'INVALID_CLASS_SELECTION', message: 'Selected class is train ke liye valid nahi hai, isliye handoff nahi banaya.', details: { gatewayCode: code } };
       out.notes.push(out.error.message);
       return out;
     }

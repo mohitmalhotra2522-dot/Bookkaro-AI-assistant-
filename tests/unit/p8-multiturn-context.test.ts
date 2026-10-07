@@ -16,6 +16,7 @@ import { TrainReferenceResolver } from '../../server/ai/context/train-reference-
 import { ClassReferenceResolver } from '../../server/ai/context/class-reference-resolver';
 import { derivePendingInteraction, isPureAffirmation, isPureNegation } from '../../server/ai/context/pending-interaction';
 import { BookingState } from '../../shared/states';
+import { missingInformationOf } from '../../server/ai/response/backend-question-policy';
 
 const D = (raw: string) => { const r = resolveDate(raw); if (!r.ok) throw new Error('bad date'); return r.date; };
 
@@ -67,7 +68,9 @@ describe('Group 2 — multi-turn context & slot filling', () => {
     let r = await say(sid, '2 passengers');
     expect(r.context.passengersCount).toBe(2);
     expect(toolNames(r)).toEqual([]);
-    expect(r.responseMessage).toContain('Kahan se kahan jaana hai?');
+    // P42.1: no backend question — the route is reported as STRUCTURED missing information (the LLM asks)
+    expect(missingInformationOf(state.getSession(sid))).toMatchObject({ origin: 'missing', destination: 'missing', passengersCount: 'present' });
+    expect(r.responseMessage).not.toMatch(/\?/);
     r = await say(sid, 'Amritsar se Delhi');
     expect(r.context.passengersCount).toBe(2);
     expect(r.responseMessage).toContain('Kis date ko jaana hai?');
@@ -94,7 +97,7 @@ describe('Group 2 — multi-turn context & slot filling', () => {
     // P9: preparation starts right after class selection; count is asked in BOOKING_PREPARE
     expect(r.newState).toBe(BookingState.BOOKING_PREPARE);
     expect(r.pendingInteraction?.type).toBe('PASSENGERS_REQUIRED');
-    expect(r.responseMessage).toContain('Kitne passengers hain?');
+    expect(r.responseMessage).not.toMatch(/\?/);   // P42.1: structured PASSENGERS_REQUIRED (above), no backend question
     r = await say(sid, '2');
     expect(r.context.passengersCount).toBe(2);
     expect(r.newState).toBe(BookingState.COLLECTING_PASSENGER_DETAILS);
@@ -290,7 +293,7 @@ describe('Group 2 — corrections (only the affected slot changes; dependents in
     await toTrainList(sid);
     let r = await say(sid, 'date change karo');
     expect(r.pendingInteraction?.type).toBe('DATE_REQUIRED');
-    expect(r.responseMessage).toContain('Nayi date');
+    expect(r.responseMessage).not.toMatch(/\?/);   // P42.1: structured DATE_REQUIRED, no backend question
     r = await say(sid, 'Actually Sunday ko jaana hai');
     expect(r.context.date).toBe(D('sunday'));
     expect(toolNames(r)).toEqual(['SEARCH_TRAINS']);

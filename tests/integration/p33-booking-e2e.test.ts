@@ -19,6 +19,8 @@ import { createLLMProvider } from '../../server/ai/providers/llm-provider-factor
 import { FakeOpenAI, type TurnView } from '../helpers/fake-openai-server';
 import { resolveDate } from '../../server/railway/resolvers/date-resolver';
 import { BookingState } from '../../shared/states';
+import { pendingConfirmationOf } from '../../server/ai/response/backend-question-policy';
+import { AMBIGUOUS_CONFIRMATION_FACT } from '../../server/booking/handoff/confirmation-policy';
 
 const pmeta = () => { const now = new Date().toISOString(); return { source: 'mock' as const, providerId: 'p33-spy', requestTimestamp: now, responseTimestamp: now, latencyMs: 1, cache: 'disabled' as const }; };
 type Mode = 'ok' | 'timeout' | 'fail' | 'malformed' | 'wl';
@@ -325,7 +327,9 @@ describe('P33 G3 — confirmation + handoff', () => {
     const r = await h.say('theek hai');
     expect(h.s().bookingState).toBe(BookingState.AWAITING_CONFIRMATION);
     expect(h.s().handoffSession).toBeUndefined();
-    expect(shown(r)).toMatch(/confirm karni hai\?/i);
+    // P42.1 (Category B): honest fact + a still-PENDING structured confirmation (backend-verified); the LLM words any question
+    expect(shown(r)).toContain(AMBIGUOUS_CONFIRMATION_FACT);
+    expect(pendingConfirmationOf(h.s(), false)).toEqual({ action: 'BOOKING_CONFIRMATION', confirmationRequired: true, confirmationStatus: 'PENDING' });
     await h.say('do it');
     expect(h.s().handoffSession).toBeUndefined();
     expect(h.s().bookingState).not.toBe(BookingState.IRCTC_HANDOFF_READY);

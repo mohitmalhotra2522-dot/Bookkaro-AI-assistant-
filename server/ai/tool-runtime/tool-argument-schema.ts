@@ -35,21 +35,21 @@ const show = (v: unknown): string => {
   return s.length > 40 ? `${s.slice(0, 37)}...` : s;
 };
 
-/** User-facing (Hinglish) clarification per argument — used only if the LLM keeps repeating the same invalid call. */
+/** User-facing (Hinglish) FACT per argument — used only if the LLM keeps repeating the same invalid call (P42.1: no question). */
 const CLARIFY: Record<string, string> = {
-  trainNumber: 'Train number sahi format mein nahi mila — kaunsi train? 5 digit ka train number bata dijiye.',
-  travelClass: 'Kaunsi class chahiye? Jaise 3A, SL, CC ya 2S.',
-  passengersCount: 'Kitne passengers hain? 1 se 6 ke beech bata dijiye.',
-  date: 'Kis date ko travel karna hai?',
-  origin: 'Kahan se travel karna hai?',
-  destination: 'Kahan tak jaana hai?'
+  trainNumber: 'Train number sahi format mein nahi mila (5 digit chahiye).',
+  travelClass: 'Class clear nahi hai (jaise 3A, SL, CC ya 2S).',
+  passengersCount: 'Passengers ki sankhya 1 se 6 ke beech honi chahiye.',
+  date: 'Journey date clear nahi hai.',
+  origin: 'Origin station clear nahi hai.',
+  destination: 'Destination station clear nahi hai.'
 };
 
 function fail(tool: string, issue: ArgumentIssue): SchemaCheck {
   return {
     ok: false, code: 'INVALID_ARGUMENT',
     message: `Invalid argument "${issue.argument}" for ${tool}: expected ${issue.expected}; received ${issue.received}. Correct it or ask the user.`,
-    details: { ...issue, tool, clarify: CLARIFY[issue.argument] || 'Thoda saaf bata dijiye?' }
+    details: { ...issue, tool, clarify: CLARIFY[issue.argument] || 'Ek detail clear nahi hai.' }
   };
 }
 

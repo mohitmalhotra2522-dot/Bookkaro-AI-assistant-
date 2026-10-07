@@ -153,7 +153,7 @@ describe('P30 G2 — display references resolve against the CURRENT result set o
     expect(res.ok).toBe(false);
     expect(res.code).toBe('AMBIGUOUS_REFERENCE');
     expect(res.message).toMatch(/12014/);
-    expect(res.message).toMatch(/\?/);
+    expect(res.message).not.toMatch(/\?/);   // P42.1: the candidates are a fact; the LLM asks
     expect(recordTrainReference({ kind: 'DEMONSTRATIVE', value: 'THIS' } as any, res, s)).toMatchObject({ status: 'AMBIGUOUS', ambiguityReason: 'NO_FOCUS_MULTIPLE_RESULTS', resolvedTrainNumber: null });
     expect(h.s().selectedTrain).toBeUndefined();
   });

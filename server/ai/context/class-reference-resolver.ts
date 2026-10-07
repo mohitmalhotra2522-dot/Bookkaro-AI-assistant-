@@ -42,13 +42,13 @@ export class ClassReferenceResolver {
     const available = trainClassCodes(train);
     const num = train?.number || train?.trainNumber || 'Is train';
     const tok = canonicalClassToken(raw) || String(raw || '').toUpperCase().trim();
-    const ask = `${num} mein available classes ${join(available)} hain. Kaunsi chahiye?`;
+    const ask = `${num} mein available classes ${join(available)} hain.`;
 
     if (tok === 'AC' || tok === 'NON_AC') {
       const cands = available.filter(c => tok === 'AC' ? AC_CLASSES.has(c) : !AC_CLASSES.has(c));
       if (cands.length === 1) return { ok: true, code: cands[0] };
       if (cands.length === 0) return { ok: false, code: 'INVALID_CLASS_SELECTION', message: `${num} mein koi ${tok === 'AC' ? 'AC' : 'non-AC'} class nahi hai. ${ask}`, available };
-      return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `${num} mein ${tok === 'AC' ? 'AC' : 'non-AC'} classes ${join(cands)} hain. Kaunsi chahiye?`, available };
+      return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `${num} mein ${tok === 'AC' ? 'AC' : 'non-AC'} classes ${join(cands)} hain.`, available };
     }
     if (available.includes(tok)) return { ok: true, code: tok };
     return { ok: false, code: 'INVALID_CLASS_SELECTION', message: `${tok} is train mein available nahi hai. ${ask}`, available };

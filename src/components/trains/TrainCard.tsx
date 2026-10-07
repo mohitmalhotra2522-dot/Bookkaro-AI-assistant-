@@ -12,6 +12,8 @@ interface Props {
   originLabel?: string;
   destinationLabel?: string;
   disabled?: boolean;
+  /** P42: optional "Same Train Alternative" action (shown only when the feature is enabled) — asks the agent, nothing more */
+  onSameTrain?: (trainNumber: string) => void;
 }
 
 /**
@@ -19,7 +21,7 @@ interface Props {
  * a class shows availability / fare only when the provider supplied them (never invented).
  * Selecting a train or class sends the same message as before, carrying the list version.
  */
-export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, onSelectClass, highlightedClass, originLabel, destinationLabel, disabled }) => {
+export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, onSelectClass, highlightedClass, originLabel, destinationLabel, disabled, onSameTrain }) => {
   const [open, setOpen] = useState(false);
   const detailsId = `td-${train.trainNumber}`;
   return (
@@ -63,6 +65,12 @@ export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, o
         <button type="button" className="bk-btn bk-btn--quiet" onClick={() => setOpen(o => !o)} aria-expanded={open} aria-controls={detailsId}>
           Details <IconChevronDown size={16} className={open ? 'bk-rot' : undefined} />
         </button>
+        {onSameTrain && isSelected && (
+          <button type="button" className="bk-btn bk-btn--quiet bk-train__same" onClick={() => onSameTrain(train.trainNumber)} disabled={disabled}
+            aria-label={`Same train alternative for ${train.trainNumber}`}>
+            ↗ Same Train Alternative
+          </button>
+        )}
       </div>
 
       {open && (
@@ -107,7 +115,8 @@ export const TrainResults: React.FC<{
   onSelectTrain: (n: string) => void;
   onSelectClass: (n: string, c: string) => void;
   disabled?: boolean;
-}> = ({ trains, source, retrievedAt, routeLabel, selectedTrainNumber, selectedClass, originLabel, onSelectTrain, onSelectClass, disabled }) => {
+  onSameTrain?: (n: string) => void;
+}> = ({ trains, source, retrievedAt, routeLabel, selectedTrainNumber, selectedClass, originLabel, onSelectTrain, onSelectClass, disabled, onSameTrain }) => {
   const INITIAL = 4;
   const [all, setAll] = useState(trains.length <= INITIAL + 1);
   const shown = all ? trains : trains.slice(0, INITIAL);
@@ -130,7 +139,7 @@ export const TrainResults: React.FC<{
           isSelected={!!selectedTrainNumber && selectedTrainNumber === t.trainNumber}
           highlightedClass={selectedTrainNumber === t.trainNumber ? selectedClass : undefined}
           originLabel={originLabel(t.origin)} destinationLabel={originLabel(t.destination)}
-          onSelectTrain={onSelectTrain} onSelectClass={onSelectClass} disabled={disabled} />
+          onSelectTrain={onSelectTrain} onSelectClass={onSelectClass} disabled={disabled} onSameTrain={onSameTrain} />
       ))}
       {!all && trains.length > INITIAL && (
         <button type="button" className="bk-btn bk-btn--ghost bk-results__more" onClick={() => setAll(true)}>

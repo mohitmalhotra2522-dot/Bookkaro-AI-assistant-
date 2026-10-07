@@ -69,7 +69,7 @@ describe('P16 ContextPatchValidator (LLM proposes → backend validates)', () =>
     const r = V.review(s, { destinationRaw: 'Delhi' } as any, 'subah wali train dikhao');
     expect(r.ok).toBe(false);
     expect(r).toMatchObject({ code: 'CONTEXT_CONFLICT' });
-    expect((r as any).message).toBe('Abhi destination Ludhiana hai. Kya destination New Delhi karna hai?');
+    expect((r as any).message).toBe('Abhi destination Ludhiana hai; New Delhi par badlav abhi apply nahi hua.');   // P42.1: fact, no question
     expect((r as any).pending).toMatchObject({ type: 'CLARIFICATION_REQUIRED', data: { kind: 'CONTEXT_CONFLICT', field: 'destination', proposedCode: 'NDLS' } });
   });
 

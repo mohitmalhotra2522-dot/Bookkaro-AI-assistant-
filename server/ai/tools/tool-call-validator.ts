@@ -17,7 +17,9 @@ import { validateWebQuery } from '../../research/web-research-service';
  * INVALID_ACTION_FOR_STATE — RailwayProvider is NOT called.
  */
 import type { BookingSession } from '@shared/entities';
-import { BookingState } from '@shared/states';
+import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
+import { SameTrainErrorCode } from '@shared/same-train-alternatives';
+import { resolveSameTrainProviders, isSameTrainResultStale } from '../../railway/same-train/same-train-service';
 import { REGISTERED_TOOLS, getToolDefinition, type ToolCall, type ToolDefinition, type RegisteredToolName, type ToolParam } from './tool-registry';
 import type { OrchestratorError } from '../decisions/agent-decision';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
@@ -104,9 +106,84 @@ export class ToolCallValidator {
         if (!q.ok) return { ok: false, error: { code: 'INVALID_TOOL_CALL', message: q.message } as OrchestratorError };
         return { ok: true, v: { name: def.name, callId: call.callId, arguments: { query: q.query }, tool: def } };
       }
+      case 'SEARCH_SAME_TRAIN_ALTERNATIVES': return this.validateSameTrainSearch(call.callId, def, args, session, ground);
+      case 'PRESENT_SAME_TRAIN_ALTERNATIVES': return this.validateSameTrainPresent(call.callId, def, args, session);
       default:
         return { ok: false, error: { code: 'UNKNOWN_TOOL', message: `"${def.name}" tool मौजूद नहीं है।` } };
     }
+  }
+
+  /**
+   * Prompt 42 — SEARCH_SAME_TRAIN_ALTERNATIVES. Hard constraints only (Muse chose to call it):
+   *   - the train must be grounded (shown results / selection / focus / last train info / the user's own words);
+   *   - class, date, requested origin + destination and passengers resolve from the arguments or the session journey;
+   *   - providers / routeProvider must be configured connectors with the needed capability (no arbitrary ids);
+   *   - never while a booking execution is locked.
+   */
+  private validateSameTrainSearch(callId: string, def: ToolDefinition, args: Record<string, any>, session: BookingSession, g?: ToolGrounding) {
+    const E = (code: any, message: string, details?: any) => ({ ok: false as const, error: { code, message, ...(details ? { details } : {}) } as OrchestratorError });
+    if (EXECUTION_LOCKED_STATES.has(session.bookingState as BookingState)) return E('INVALID_ACTION_FOR_STATE', 'Booking process chal raha hai — abhi same train alternative check nahi kar sakte.');
+    const s: any = session;
+    const train = String(args.trainNumber ?? '').trim();
+    if (!/^\d{5}$/.test(train)) return E('INVALID_TOOL_CALL', 'Train number 5 digits ka hona chahiye.');
+    const sel: any = s.selectedTrain;
+    const known = new Set<string>([
+      ...((s.searchResults?.trains || []) as any[]).map(t => String(t.trainNumber || t.number)),
+      ...(sel ? [String(sel.number || sel.trainNumber)] : []),
+      ...(s.focusTrainNumber ? [String(s.focusTrainNumber)] : []),
+      ...(s.lastTrainInfo?.trainNumber ? [String(s.lastTrainInfo.trainNumber)] : []),
+      ...(s.carryOverSelection?.trainNumber ? [String(s.carryOverSelection.trainNumber)] : [])
+    ]);
+    const typed = !!g && [...String(g.userText || '').matchAll(/(?<!\d)(\d{5})(?!\d)/g)].some(m => m[1] === train);
+    if (!known.has(train) && !typed) return E('AUTHORITATIVE_DATA_REQUIRED', 'Same train alternative ke liye train identify nahi hui.', { missingField: 'TRAIN' });
+    const travelClass = String(args.travelClass || s.selectedClass || '').toUpperCase();
+    if (!travelClass) return E(SameTrainErrorCode.NOT_READY, 'Kaunsi class ke liye check karna hai? (jaise CC, 3A, SL)', { missing: 'travelClass' });
+    const row = ((s.searchResults?.trains || []) as any[]).find(t => String(t.trainNumber || t.number) === train);
+    const rowClasses: string[] = row ? [...(row.classes || []).map((c: any) => String(c.code || c).toUpperCase()), ...(row.availableClasses || []).map((c: any) => String(c).toUpperCase())] : [];
+    if (rowClasses.length && !rowClasses.includes(travelClass)) return E('INVALID_TOOL_CALL', `${train} mein ${travelClass} class nahi hai (${rowClasses.join(', ')}).`);
+    const date = this.resolveDateStr(args.date || s.date);
+    if (!date) return E(SameTrainErrorCode.NOT_READY, 'Journey date abhi set nahi hai.', { missing: 'date', missingField: 'DATE' });
+    const o = this.resolveStation(String(args.origin || s.origin || '').trim());
+    const d = this.resolveStation(String(args.destination || s.destination || '').trim());
+    if (!o || !d) return E(SameTrainErrorCode.NOT_READY, 'Route (origin / destination) abhi set nahi hai.', { missing: !o ? 'origin' : 'destination', missingField: !o ? 'ORIGIN' : 'DESTINATION' });
+    if (o.code === d.code) return E(SameTrainErrorCode.INVALID_STATION_PAIR, 'Origin aur destination ek jaise nahi ho sakte.');
+    const pax = args.passengersCount !== undefined ? Number(args.passengersCount) : Number(s.passengersCount || 1);
+    if (!Number.isInteger(pax) || pax < 1 || pax > 6) return E('INVALID_TOOL_CALL', 'Passengers 1 se 6 ke beech hone chahiye.');
+    if (args.destinationExtensionStations !== undefined) {
+      const n = Number(args.destinationExtensionStations);
+      if (!Number.isInteger(n) || n < 5 || n > 7) return E('INVALID_TOOL_CALL', 'destinationExtensionStations 5 se 7 ke beech hona chahiye.');
+    }
+    const pr = resolveSameTrainProviders(args.providers, args.routeProvider);
+    if (!pr.ok) return E(pr.code, pr.message);
+    const canonical: Record<string, any> = {
+      trainNumber: train, travelClass, date, origin: o.code, destination: d.code, passengersCount: pax,
+      originSweep: args.originSweep !== false, destinationSweep: args.destinationSweep !== false,
+      ...(args.destinationExtensionStations !== undefined ? { destinationExtensionStations: Number(args.destinationExtensionStations) } : {}),
+      combinedPairs: args.combinedPairs || 'AUTO',
+      providers: pr.providers.map(p => p.id).join(','), routeProvider: pr.routeProvider.id, providerSelection: pr.selection,
+      includeFare: args.includeFare === true, webEvidence: args.webEvidence === true
+    };
+    return { ok: true as const, v: { name: def.name, callId, arguments: canonical, tool: def } };
+  }
+
+  /** Prompt 42 — PRESENT_SAME_TRAIN_ALTERNATIVES: Muse's ranking must reference the CURRENT result's shown ids only. */
+  private validateSameTrainPresent(callId: string, def: ToolDefinition, args: Record<string, any>, session: BookingSession) {
+    const E = (code: any, message: string, details?: any) => ({ ok: false as const, error: { code, message, ...(details ? { details } : {}) } as OrchestratorError });
+    const r: any = (session as any).sameTrainAlternatives;
+    const id = String(args.alternativeSearchId || '').trim();
+    if (!r || r.alternativeSearchId !== id) return E(SameTrainErrorCode.NOT_FOUND, 'Yeh alternativeSearchId current Same Train Alternative result nahi hai.');
+    if (isSameTrainResultStale(session, r)) return E(SameTrainErrorCode.STALE_RESULT, 'Journey badal gayi — yeh alternative result stale hai.');
+    const shown = new Map<string, any>((r.alternatives || []).map((a: any) => [a.alternativeId, a]));
+    const best = args.bestMatch ? String(args.bestMatch).trim().toUpperCase() : '';
+    if (best) {
+      const a = shown.get(best);
+      if (!a) return E('INVALID_TOOL_CALL', `bestMatch ${best} is result mein nahi hai (${[...shown.keys()].join(', ')}).`);
+      if (a.verificationStatus !== 'VERIFIED' && a.verificationStatus !== 'PARTIALLY_VERIFIED') return E('INVALID_TOOL_CALL', `${best} ${a.verificationStatus} hai — best match sirf VERIFIED / PARTIALLY_VERIFIED ho sakta hai.`);
+    }
+    const order = String(args.order || '').split(',').map(x => x.trim().toUpperCase()).filter(Boolean);
+    const unknown = order.filter(x => !shown.has(x));
+    if (unknown.length) return E('INVALID_TOOL_CALL', `order mein unknown ids: ${unknown.join(', ')}.`);
+    return { ok: true as const, v: { name: def.name, callId, arguments: { alternativeSearchId: id, ...(best ? { bestMatch: best } : {}), order: [...new Set(order)].join(',') }, tool: def } };
   }
 
   /**
@@ -117,7 +194,7 @@ export class ToolCallValidator {
    * The provider is NOT called on any of these errors.
    */
   private validatePnr(callId: string, def: ToolDefinition, args: Record<string, any>, _session: BookingSession, g?: ToolGrounding) {
-    const E = (code: any, message: string) => ({ ok: false as const, error: { code, message } as OrchestratorError });
+    const E = (code: any, message: string, details?: any) => ({ ok: false as const, error: { code, message, ...(details ? { details } : {}) } as OrchestratorError });
     const has = (v: any) => v !== undefined && v !== null && v !== '';
     if (has(args.pnr) && has(args.bookingId)) return E('INVALID_TOOL_CALL', 'CHECK_PNR: pnr ya bookingId — dono nahi.');
     if (has(args.pnr)) {
@@ -135,8 +212,8 @@ export class ToolCallValidator {
       : g?.bookings.length === 1 ? g.bookings[0].bookingId : undefined;
     if (!id) {
       return (g?.bookings.length || 0) > 1
-        ? E('MULTIPLE_BOOKINGS_MATCHED', 'Kaunsi booking ka PNR status dekhna hai? Train number ya date batayein.')
-        : E('BOOKING_CONTEXT_MISSING', 'Kaunsa PNR check karna hai? 10-digit PNR number batayein.');
+        ? E('MULTIPLE_BOOKINGS_MATCHED', 'Is session mein ek se zyada booking match hui.', { missingField: 'BOOKING' })
+        : E('BOOKING_CONTEXT_MISSING', 'PNR number nahi mila (10-digit chahiye).', { missingField: 'PNR' });
     }
     const owner = g ? g.bookingOwner(id) : 'NONE';
     if (owner === 'OTHER') return E('BOOKING_ACCESS_DENIED', 'Yeh booking is session ki nahi hai.');
@@ -151,7 +228,7 @@ export class ToolCallValidator {
    * (results / selection / focus) or this session's booking record — never an LLM guess.
    */
   private validateTrack(callId: string, def: ToolDefinition, args: Record<string, any>, session: BookingSession, g?: ToolGrounding) {
-    const E = (code: any, message: string) => ({ ok: false as const, error: { code, message } as OrchestratorError });
+    const E = (code: any, message: string, details?: any) => ({ ok: false as const, error: { code, message, ...(details ? { details } : {}) } as OrchestratorError });
     const explicit = args.trainNumber !== undefined && args.trainNumber !== null && args.trainNumber !== '';
     const sel: any = session.selectedTrain;
     const sessionTrains = new Set<string>([
@@ -164,14 +241,14 @@ export class ToolCallValidator {
       if (!/^\d{4,5}$/.test(s)) return E('INVALID_TOOL_CALL', 'Train number 4-5 digits ka hona chahiye.');
       const typed = !!g && [...g.userText.matchAll(/(?<!\d)(\d{4,5})(?!\d)/g)].some(m => m[1] === s);
       const own = g?.bookings.find(b => b.trainNumber === s);
-      if (!typed && !own && !sessionTrains.has(s)) return E('AUTHORITATIVE_DATA_REQUIRED', 'Kaunsi train track karni hai? Train number batayein.');
+      if (!typed && !own && !sessionTrains.has(s)) return E('AUTHORITATIVE_DATA_REQUIRED', 'Track karne ke liye train identify nahi hui.', { missingField: 'TRAIN' });
       return { ok: true as const, v: { name: def.name, callId, arguments: { trainNumber: s, ...(own ? { bookingId: own.bookingId } : {}) }, tool: def } };
     }
     const b = g && (g.bookings.find(x => x.bookingId === g.activeBookingId) || (g.bookings.length === 1 ? g.bookings[0] : undefined));
     if (b) return { ok: true as const, v: { name: def.name, callId, arguments: { trainNumber: b.trainNumber, bookingId: b.bookingId }, tool: def } };
     const focus = (sel && String(sel.number || sel.trainNumber)) || session.focusTrainNumber;
     if (focus) return { ok: true as const, v: { name: def.name, callId, arguments: { trainNumber: String(focus) }, tool: def } };
-    return E('MISSING_REQUIRED_FIELD', 'Kaunsi train track karni hai? Train number batayein.');
+    return E('MISSING_REQUIRED_FIELD', 'Track karne ke liye train number nahi mila.', { missingField: 'TRAIN' });
   }
 
   private resolveStation(raw: string): { code: string; name: string } | null {
@@ -226,7 +303,7 @@ export class ToolCallValidator {
     const trainNumber = this.focusTrain(args, session);
     if (!trainNumber) return explicit
       ? { ok:false as const, error:{ code:'INVALID_TOOL_CALL' as const, message:'Train number चाहिए (4-5 अंक)।' } }
-      : { ok:false as const, error:{ code:'MISSING_REQUIRED_FIELD' as const, message:'Kaunsi train ki jaankari chahiye? Train number batayein.' } };
+      : { ok:false as const, error:{ code:'MISSING_REQUIRED_FIELD' as const, message:'Train number nahi mila.', details: { missingField: 'TRAIN' } } };
     const date = args.date ? this.resolveDateStr(args.date) : undefined;
     if (args.date && !date) return { ok:false as const, error:{ code:'AMBIGUOUS_DATE' as const, message:'तारीख समझ नहीं आयी।' } };
     return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber, ...(date ? { date } : {}) }, tool: def } };
@@ -234,7 +311,7 @@ export class ToolCallValidator {
 
   private validateTimetable(callId: string, def: ToolDefinition, args: Record<string,any>, _session: BookingSession) {
     const trainNumber = this.focusTrain(args, _session);
-    if (!trainNumber) return { ok:false as const, error:{ code:'MISSING_REQUIRED_FIELD' as const, message:'Kis train ka timetable chahiye? Train number batayein.' } };
+    if (!trainNumber) return { ok:false as const, error:{ code:'MISSING_REQUIRED_FIELD' as const, message:'Timetable ke liye train number nahi mila.', details: { missingField: 'TRAIN' } } };
     return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber }, tool: def } };
   }
 

@@ -7,6 +7,7 @@
  * afterEach: IrctcHandoffAdapter.executeHandoff never called, fetch never called,
  * DisabledBookingExecutorAdapter.execute never invoked.
  */
+import { AMBIGUOUS_CONFIRMATION_FACT } from '../../server/booking/handoff/confirmation-policy';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { MockLLMProvider } from '../../server/ai/providers/mock-llm';
 import type { LLMProvider } from '../../server/ai/providers/llm-provider';
@@ -141,12 +142,13 @@ describe('G3 — confirmation → handoff → handoff session → disabled adapt
     }
   });
 
-  it('[17] ambiguous replies (theek hai / okay / haan? / hmm) → "Booking confirm karni hai?", nothing created; explicit "haan" then works', async () => {
+  // P42.1: the backend states the fact (confirmation still REQUIRED + verified by the backend); the LLM words any question
+  it('[17] ambiguous replies (theek hai / okay / haan? / hmm) → confirmation-required fact, nothing created; explicit "haan" then works', async () => {
     const sid = state.createSession().sessionId;
     await toAwaiting(sid);
     for (const t of ['theek hai', 'okay', 'haan?', 'hmm', 'ok']) {
       const r = await say(sid, t);
-      expect([t, r.responseMessage, r.error?.code, r.newState, r.pendingInteraction?.type]).toEqual([t, 'Booking confirm karni hai?', 'INVALID_CONFIRMATION', BookingState.AWAITING_CONFIRMATION, 'CONFIRMATION_REQUIRED']);
+      expect([t, r.responseMessage, r.error?.code, r.newState, r.pendingInteraction?.type]).toEqual([t, AMBIGUOUS_CONFIRMATION_FACT, 'INVALID_CONFIRMATION', BookingState.AWAITING_CONFIRMATION, 'CONFIRMATION_REQUIRED']);
     }
     expect(S(sid).handoffSession).toBeUndefined();
     expect(S(sid).confirmation).toBeUndefined();
@@ -372,7 +374,7 @@ describe('G3 — safety: no credentials / OTP / CAPTCHA / payment / PNR / fake s
     const sid2 = state.createSession().sessionId;
     await toAwaiting(sid2, 'VOICE');
     const a = await say(sid2, 'theek hai', 'VOICE');
-    expect(a.responseMessage).toBe('Booking confirm karni hai?');
+    expect(a.responseMessage).toBe(AMBIGUOUS_CONFIRMATION_FACT);
     const b = await say(sid2, 'haan', 'TEXT');
     expect(b.newState).toBe(BookingState.IRCTC_HANDOFF_READY);
     expect(count(sid2, 'BOOKING_HANDOFF_SESSION_CREATED')).toBe(1);

@@ -163,23 +163,23 @@ export class BookingActionValidator {
   validateChanges(action: ParsedLifecycleAction, r: Readonly<BookingRecord>, c: RequestedChanges, today: string): string | null {
     const cur = { journeyDate: r.current?.journeyDate ?? r.journeyDate, travelClass: r.current?.travelClass ?? r.travelClass, passengers: r.current?.passengersCount ?? r.passengersSummary.count };
     if (action === 'REQUEST_JOURNEY_CHANGE') {
-      if (!c.journeyDate || !/^\d{4}-\d{2}-\d{2}$/.test(c.journeyDate)) return 'Nayi journey date clear nahi hai — jaise "25 October" batayein.';
-      if (c.journeyDate < today) return 'Nayi journey date beet chuki hai — aage ki date batayein.';
+      if (!c.journeyDate || !/^\d{4}-\d{2}-\d{2}$/.test(c.journeyDate)) return 'Nayi journey date clear nahi hai (jaise "25 October").';
+      if (c.journeyDate < today) return 'Nayi journey date beet chuki hai.';
       if (c.journeyDate === cur.journeyDate) return 'Booking already isi date ki hai — koi change ki zaroorat nahi.';
       return null;
     }
     if (action === 'REQUEST_CLASS_CHANGE') {
-      if (!c.travelClass) return 'Kaunsi class chahiye? Jaise "2A kar do".';
+      if (!c.travelClass) return 'Nayi class nahi mili (jaise "2A kar do").';
       if (!VALID_TRAVEL_CLASSES.has(c.travelClass)) return `${c.travelClass} valid travel class nahi hai.`;
       if (c.travelClass === cur.travelClass) return `Booking already ${cur.travelClass} class mein hai.`;
       return null;
     }
     if (action === 'REQUEST_PASSENGER_CHANGE') {
       const p = c.passenger;
-      if (!p) return 'Kaunse passenger ka kya change karna hai? Jaise "passenger 2 ki age 29 kar do".';
+      if (!p) return 'Passenger change clear nahi hai (jaise "passenger 2 ki age 29 kar do").';
       if (p.op === 'ADD') return 'Booking mein naya passenger add karna provider contract mein supported nahi hai — uske liye nayi booking karni hogi.';
       if (!p.passengerNumber || !Number.isInteger(p.passengerNumber) || p.passengerNumber < 1 || p.passengerNumber > cur.passengers) {
-        return `Passenger number batayein (1${cur.passengers > 1 ? `–${cur.passengers}` : ''}) — jaise "passenger 2 ki age 29 kar do".`;
+        return `Passenger number clear nahi hai (1${cur.passengers > 1 ? `–${cur.passengers}` : ''}) — jaise "passenger 2 ki age 29 kar do".`;
       }
       if (p.op === 'REMOVE') return cur.passengers <= 1 ? 'Akele passenger ko hataya nahi ja sakta — poori booking cancel karni hogi.' : null;
       if (!p.field || !(PASSENGER_CHANGE_FIELDS as readonly string[]).includes(p.field)) return 'Sirf naam, age, gender ya berth preference change ho sakti hai.';

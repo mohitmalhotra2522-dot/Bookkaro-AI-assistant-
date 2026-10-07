@@ -30,6 +30,8 @@ function mk() {
 }
 let SEARCH: any, SELECTED: any, PAX: any, REVIEW: any;
 let REVIEW_REPLY = '';
+/** P42.1: a long (6-sentence) review text built only from the REAL session facts — exercises the voice-brief path. */
+const LONG_REVIEW = () => `${REVIEW_REPLY} Passenger 1: Mohit, 31, male. Passenger 2: Ravi, 28, male. Ticket abhi book nahi hua.`;
 const flush = () => new Promise(r => setTimeout(r, 0));
 const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
@@ -176,9 +178,12 @@ describe('P41 G2 — NaturalVoiceResponseComposer (Paths A / B / C)', () => {
     expect(r.voice!.purpose).toBe('CORRECTION');
   });
 
-  it('[11] review: deterministic review text (5 sentences) → voice brief that still carries train / class / fare / availability (P33 informed confirmation)', async () => {
+  it('[11] review: a long deterministic review text (6 sentences) → voice brief that still carries train / class / fare / availability (P33 informed confirmation)', async () => {
+    // P42.1: the review reply itself is now a short fact-only text (no appended question) — speech-suitable as is, all facts kept
+    expect(assessSpeechSuitability(REVIEW_REPLY)).toEqual({ suitable: true, reasons: [] });
+    for (const f of ['12014', 'CC', '₹1040', 'Available']) expect(REVIEW_REPLY).toContain(f);
     const { llm, calls } = scripted('Review ready hai: 12014 CC, total fare ₹1040, availability Available. Baaki details screen par hain. Confirm karna hai?');
-    const r = await naturalResponseComposer.compose(input(REVIEW, { llm, userText: '2 passengers. Mohit 31 male, Ravi 28 male.', backendReply: REVIEW_REPLY, deterministicSpeech: REVIEW_REPLY,
+    const r = await naturalResponseComposer.compose(input(REVIEW, { llm, userText: '2 passengers. Mohit 31 male, Ravi 28 male.', backendReply: LONG_REVIEW(), deterministicSpeech: LONG_REVIEW(),
       stateBefore: BookingState.BOOKING_PREPARE, allowWordingCall: false, pendingQuestionCode: 'ASK_REVIEW_APPROVAL', pendingQuestion: 'Confirm karna hai?' }));
     expect(calls.length).toBeGreaterThanOrEqual(1);
     expect(r.voice).toMatchObject({ purpose: 'REVIEW', path: 'C_COMPOSED', composerUsed: true });
@@ -188,7 +193,7 @@ describe('P41 G2 — NaturalVoiceResponseComposer (Paths A / B / C)', () => {
 
   it('[12] review: a brief that drops the fare falls back to the validated review speech (never confirm unheard facts)', async () => {
     const { llm } = scripted('Review ready hai, details screen par dekh lijiye. Sab sahi hai?');
-    const r = await naturalResponseComposer.compose(input(REVIEW, { llm, userText: 'ok', backendReply: REVIEW_REPLY, deterministicSpeech: REVIEW_REPLY,
+    const r = await naturalResponseComposer.compose(input(REVIEW, { llm, userText: 'ok', backendReply: LONG_REVIEW(), deterministicSpeech: LONG_REVIEW(),
       stateBefore: BookingState.BOOKING_PREPARE, allowWordingCall: false, pendingQuestionCode: 'ASK_REVIEW_APPROVAL', pendingQuestion: 'Confirm karna hai?' }));
     expect(r.voice).toMatchObject({ composerUsed: false, fallbackUsed: true, path: 'C_DETERMINISTIC' });
     expect(r.voice!.reasons).toContain('COMPOSER_REVIEW_FACTS_MISSING');

@@ -16,6 +16,9 @@
  * requestVersion). Writes from an obsolete request are rejected
  * (STALE_TOOL_RESULT) and the obsolete loop stops.
  */
+import { guardSameTrainRuleClaims } from '../response/same-train-claims';
+import { sameTrainCardData, sameTrainFallbackText } from '../../railway/same-train/same-train-view';
+import { isSameTrainResultStale } from '../../railway/same-train/same-train-service';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { ReconciliationConfig } from '../../booking/lifecycle/reconciliation-config';
 import type { BookingProviderRegistry } from '../../booking/provider/booking-provider-registry';
@@ -60,8 +63,11 @@ import type { ExecutionConfig } from '../../booking/execution/execution-config';
 import type { TurnLoopObserver } from '../runtime/llm-tool-runtime';
 import { ConversationContextBuilder, ToolResultContextStore } from '../turn-engine/conversation-context-builder';
 import { pendingQuestionCode } from '../turn-engine/pending-question';
-import { nextPassengerDetail } from '../../booking/passenger-options';
+import { nextPassengerDetail, markOptionalAsked } from '../../booking/passenger-options';
 import { detectBareDay, resolveMonthAnswer } from '../turn-engine/ambiguous-date-clarifier';
+import { passengerSnapshot, passengerFieldsChanged, guardPassengerUpdateClaims } from '../response/passenger-claims';
+import { humanizePreferenceCodes } from '../response/preference-labels';
+import { factOnly, asksAboutOptionalField } from '../response/backend-question-policy';
 import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { syncPreparationState, recordDependencyOutcome, bookingPreparationSummary } from '../../booking/preparation/booking-preparation';
 import { classifyAgentTurn } from '../decisions/state-actions';
@@ -261,6 +267,7 @@ export class ConversationAgentOrchestrator {
     this.turnStartNames.set(sessionId, (s0.passengers || []).map(p => p.name).filter((n): n is string => !!n));
     const stateBefore = s0.bookingState;
     // Prompt 21: primitives captured before the turn (the session object itself is live)
+    const passengersBefore = passengerSnapshot(s0);   // P42.1: evidence for passenger-update claims (no values logged)
     const voiceBefore = { reviewVersion: s0.review?.valid ? s0.review.reviewVersion : null, train: (s0.selectedTrain as any)?.number ?? null, cls: s0.selectedClass ?? null, count: s0.passengersCount ?? null };
     const pendingBefore = s0.pendingInteraction?.type || 'NONE';
     // Prompt 16: Input Normalizer — barge-in prefix ("Ruko, …") + explicit new-booking phrase
@@ -285,9 +292,11 @@ export class ConversationAgentOrchestrator {
     // ---- Stale UI reference (tap on a card from an older result list) ----
     if (typeof opts.searchResultsVersion === 'number' && opts.searchResultsVersion !== s0.searchResultsVersion) {
       const ts = currentResults(s0);
+      // P42.1: fact only (no "chuniye" request) — the current train numbers stay structured in details
       const err: OrchestratorError = { code: 'STALE_SEARCH_REFERENCE', message: ts.length
-        ? `Wo option purani list ka tha. Current results mein se chuniye: ${ts.map(t => t.trainNumber).join(', ')}.`
-        : 'Wo option purani search ka tha. Nayi search ke results ka intezaar karein.' };
+        ? 'Wo option purani list ka tha.'
+        : 'Wo option purani search ka tha. Nayi search ke results ka intezaar karein.',
+        details: { missingField: 'TRAIN', userActionRequired: true, currentTrainNumbers: ts.map(t => t.trainNumber) } } as any;
       return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
         message: err.message, error: err, rt: null, decision: null, changes: [] });
     }
@@ -303,8 +312,8 @@ export class ConversationAgentOrchestrator {
     // ---- Safety pre-filter (no LLM call) ----
     if (sensitiveInput) {
       // Nothing from this input is stored, logged or sent to the LLM. Continue with safe booking info.
-      const q = questionFor(s0.pendingInteraction, s0, mode);
-      const msg = q ? `${SENSITIVE_REPLY} ${q}` : SENSITIVE_REPLY;
+      // v0.42.1: refusal only — no fixed follow-up question (the next question is the LLM's decision)
+      const msg = SENSITIVE_REPLY;
       const err: OrchestratorError = { code: 'SENSITIVE_REQUEST_REJECTED', message: SENSITIVE_REPLY };
       return this.finish({ sessionId, turnId, requestId, startedAt, userText: safeInput, normalizedInput: safeInput, mode, stateBefore, pendingBefore, cards, events,
         message: msg, error: err, rejection: 'SENSITIVE_REQUEST_REJECTED', rt: null, decision: null, changes: [] });
@@ -314,6 +323,7 @@ export class ConversationAgentOrchestrator {
 
     // ---- Prompt 18 (Part 52): bare day number ("22") → ask which month; never assume ----
     let llmInput = normalizedInput;
+    let bareDayPending: PendingInteraction | undefined;   // P42.1: kept for the post-turn pending derivation below
     const pi0 = s0.pendingInteraction;
     if (pi0?.type === 'CLARIFICATION_REQUIRED' && pi0.data?.kind === 'DATE_MONTH') {
       const expr = resolveMonthAnswer(normalizedInput, pi0.data as any);
@@ -321,12 +331,14 @@ export class ConversationAgentOrchestrator {
     } else if (!utter.newBooking) {
       const amb = detectBareDay(normalizedInput, s0);
       if (amb) {
+        // P42.1: the ambiguity is STRUCTURED context (day + candidate months) — no backend question. The turn goes
+        // to the LLM, which decides how to ask; DateResolver still refuses to guess, and the month answer is mapped
+        // back deterministically next turn (resolveMonthAnswer above).
         const sA = this.state.getSession(sessionId);
-        sA.pendingInteraction = { type: 'CLARIFICATION_REQUIRED', hint: amb.message, setAtTurnId: turnId,
+        sA.pendingInteraction = { type: 'CLARIFICATION_REQUIRED', setAtTurnId: turnId,
           data: { kind: 'DATE_MONTH', day: amb.day, candidates: amb.candidates, labels: amb.labels } } as any;
         (sA as any).pendingQuestion = pendingQuestionCode(sA.pendingInteraction);
-        return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-          message: amb.message, error: { code: 'AMBIGUOUS_DATE', message: amb.message }, rt: null, decision: null, changes: [], extra });
+        bareDayPending = sA.pendingInteraction;
       }
     }
 
@@ -342,7 +354,7 @@ export class ConversationAgentOrchestrator {
         (sP as any).pendingQuestion = pendingQuestionCode(sP.pendingInteraction);
         events.push('PASSENGER_COUNT_REJECTED');
         return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-          message: pc.message, error: { code: 'INVALID_PASSENGER_COUNT', message: pc.message, details: { reason: pc.reason } }, rt: null, decision: null, changes: [], extra });
+          message: factOnly(pc.message), error: { code: 'INVALID_PASSENGER_COUNT', message: factOnly(pc.message), details: { reason: pc.reason, missingField: 'PASSENGER_COUNT', userActionRequired: true } }, rt: null, decision: null, changes: [], extra });
       }
     }
 
@@ -400,7 +412,7 @@ export class ConversationAgentOrchestrator {
                 pendingOverride = { type: 'ORIGIN_REQUIRED', data: { route: true }, setAtTurnId: turnId };
                 this.state.getSession(sessionId).pendingInteraction = pendingOverride;
                 return { notes: [], blockTools: true, applied: ['NEW_JOURNEY_STARTED'],
-                  directAnswer: `Theek hai, nayi booking shuru karte hain${prev ? ' — pichli booking history safe hai' : ''}. Kahan se kahan jaana hai?` };
+                  directAnswer: `Theek hai, nayi booking shuru karte hain${prev ? ' — pichli booking history safe hai' : ''}.` };
               }
               return { notes: [], blockTools: false, applied: ['NEW_JOURNEY_STARTED'], replan: true };
             }
@@ -436,9 +448,9 @@ export class ConversationAgentOrchestrator {
     // ---- Prompt 22: the conversational LLM failed before any verified result → the safe LLM_UNAVAILABLE reply only.
     //      No deterministic parser takes over, no tool runs, the session is unchanged.
     if (rt.stopReason === 'error' && rt.error?.code === 'LLM_UNAVAILABLE' && !rt.steps.length && !ctx.changes.length) {
-      const q = questionFor(s0.pendingInteraction, this.state.getSession(sessionId), mode);
+      // v0.42.1: the honest error only — no fixed question when no AI reply exists
       return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
-        message: q ? `${rt.error.message} ${q}` : rt.error.message, error: rt.error, rt, decision: null, changes: [], extra });
+        message: rt.error.message, error: rt.error, rt, decision: null, changes: [], extra });
     }
     // ---- Prompt 22: scope guard AFTER the LLM — an off-topic turn the LLM did not turn into railway work gets the
     //      fixed scope refusal (a real LLM must not answer weather / news / jokes from its own knowledge).
@@ -533,6 +545,9 @@ export class ConversationAgentOrchestrator {
         data: { kind: 'CONTEXT_CONFLICT', field: 'selectedTrain', proposedCode: d.proposed, current: d.current, tool: trainConflict.toolCall.name } } as any;
     }
     const sess = this.state.getSession(sessionId);
+    // P42.1: the bare-day month ambiguity stays the structured pending while the date is still unresolved (the next
+    // turn's month answer maps back deterministically) — unless this turn produced its own override
+    if (bareDayPending && !pendingOverride && !prep?.pendingOverride && !sess.date) pendingOverride = { ...bareDayPending, setAtTurnId: turnId };
     const override = pendingOverride ?? prep?.pendingOverride;
     // A pending override from a turn that then moved the flow elsewhere must not stick.
     const overrideValid = !override || !prep || prep.pendingOverride === override || sess.bookingState !== BookingState.AWAITING_CONFIRMATION || override.type === 'PASSENGER_DETAILS_REQUIRED' || override.type === 'CLARIFICATION_REQUIRED' || !!override.data?.correction;
@@ -541,7 +556,8 @@ export class ConversationAgentOrchestrator {
     extra.rejectedClaims = [];
     extra.entityRejections = [];
     try { opts.observer?.onStatus?.('GENERATING_RESPONSE'); } catch { /* observer only */ }
-    const composed = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims, extra.entityRejections);
+    const passengerFieldsUpdated = passengerFieldsChanged(passengersBefore, passengerSnapshot(sess));   // P42.1: real changes only
+    const composed = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims, extra.entityRejections, passengerFieldsUpdated);
     // ---- Prompt 29: final action-claim guard — "availability check kar raha hoon" / "fare check ho gaya" survive only
     //      when THIS turn's execution records (LLM tool calls + backend preparation refreshes) support them. Runs on the
     //      final backend reply, so the screen text, the composer's fallback and the TTS speech all derive from the same
@@ -551,7 +567,7 @@ export class ConversationAgentOrchestrator {
     extra.actionClaims = actionGuard.diagnostics;
     this.lastActions.set(sessionId, actionLedger.current);
     const turnSteps = [...rt.steps, ...(prep?.steps || [])];
-    const actionChecked = actionGuard.text || (actionGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || honestFailureFallback(turnSteps)]) : composed);
+    const actionChecked = actionGuard.text || (actionGuard.removed.length ? joinParts([honestFailureFallback(turnSteps)]) : composed);
     // ---- Prompt 30 (guard step 7): position / list-membership claims ("doosri wali 12497 hai", "12497 parso ki list
     //      mein nahi hai") must hold for the CURRENT result set; only the false sentence is removed (text = TTS)
     const refGuard = guardReferenceClaims(actionChecked, sess);
@@ -562,13 +578,13 @@ export class ConversationAgentOrchestrator {
       ...[...rt.steps, ...(prep?.steps || [])].filter(st => st.status !== 'stale' && (st.validatedArguments?.trainNumber || (st.toolCall.arguments as any)?.trainNumber))
         .map(st => recordToolArgReference(st.toolCall.name, String(st.validatedArguments?.trainNumber || (st.toolCall.arguments as any)?.trainNumber), sess, st.status === 'ok' && !!st.result?.success))
     ];
-    const refChecked = refGuard.text || (refGuard.removed.length ? joinParts([questionFor(sess.pendingInteraction, sess, mode) || UNVERIFIED_FALLBACK]) : actionChecked);
+    const refChecked = refGuard.text || (refGuard.removed.length ? joinParts([UNVERIFIED_FALLBACK]) : actionChecked);
     // ---- Prompt 32: honest outcomes — a zero-result claim survives only a real empty provider result (never a timeout /
     //      failure / malformed data), a "railway data ke according" claim only real provider data, and MOCK data is never
     //      "live". Only the false sentence is removed; an emptied reply states the real failure category instead.
     const outcomeGuard = guardOutcomeClaims(refChecked, { steps: turnSteps, session: sess });
     extra.outcomeClaims = outcomeGuard.diagnostics;
-    let message = outcomeGuard.text || (outcomeGuard.removed.length ? joinParts([honestFailureFallback(turnSteps), questionFor(sess.pendingInteraction, sess, mode)].filter(Boolean) as string[]) : refChecked);
+    let message = outcomeGuard.text || (outcomeGuard.removed.length ? joinParts([honestFailureFallback(turnSteps)]) : refChecked);
     extra.backendActions = [...(extra.backendActions || []), ...rt.applyOutcomes.flatMap(o => o.applied), ...(prep?.steps || []).map(st => `PREPARATION:${st.toolCall.name}`), ...(lcPlan ? [`LIFECYCLE:${(lcPlan as any).kind || 'PLAN'}`] : [])];
     const softError = rt.applyOutcomes.find(o => o.softError)?.softError;
     // Prompt 23: a native agent may have answered after a rejected proposal — the rejection stays the turn's error
@@ -605,15 +621,17 @@ export class ConversationAgentOrchestrator {
         extra.naturalSpeech = await naturalResponseComposer.compose({
           agentText: agentFresh ? rt.finalMessage : null, general: generalTurn, allowWordingCall: agentFresh || !!secondCallReason, actionLedger,
           llm: this.llm, session: sess, userText: normalizedInput, backendReply: message, mode,
-          deterministicSpeech: mode === 'VOICE' ? speechOf(message, 'VOICE', questionFor(sess.pendingInteraction, sess, 'VOICE')) : message,
+          deterministicSpeech: mode === 'VOICE' ? speechOf(message, 'VOICE') : message,
           stateBefore, reviewVersionBefore: voiceBefore.reviewVersion, selectedTrainBefore: voiceBefore.train,
           selectedClassBefore: voiceBefore.cls, passengersCountBefore: voiceBefore.count,
           steps: [...rt.steps, ...(prep?.steps || [])], appliedActions: extra.backendActions || [],
           changes: (extra.patches || []).map(p => ({ field: String(p.field), corrected: p.kind === 'CORRECTION' })),
+          passengerFieldsUpdated,
           error: turnError ? { code: turnError.code, message: turnError.message, ...((turnError as any).details?.blockers ? { details: { blockers: (turnError as any).details.blockers } } : {}) }
             : forbiddenAttempted(rt) ? { code: 'FORBIDDEN_ACTION', message: SAFE_ERROR_MESSAGE.FORBIDDEN_ACTION } : null,
           pendingQuestionCode: pendingQuestionCode(sess.pendingInteraction),
-          pendingQuestion: pendingQuestionCode(sess.pendingInteraction) ? questionFor(sess.pendingInteraction, sess, 'VOICE') || null : null,
+          // P42.1: no canned question text — the wording LLM gets the structured pendingQuestionCode only
+          pendingQuestion: null,
           history: (this.history.get(sessionId) || []).slice(-8) as any, records: this.postBooking.store.getBookingsForSession(sessionId) as any,
           sensitive: sensitiveInput, timeoutMs: this.naturalSpeechTimeoutMs, turnId,
           onSegment: mode === 'VOICE' ? opts.onSpeechSegment : undefined
@@ -623,6 +641,20 @@ export class ConversationAgentOrchestrator {
       const v = extra.naturalSpeech?.voice;
       if (v && mode === 'VOICE' && process.env.VOICE_RESPONSE_LOG !== '0') { try { console.log(JSON.stringify(voiceResponseLogRecord(sessionId, v, v.totalComposeMs ?? 0))); } catch { /* observer only */ } }
     }
+    // P42.1 hardening: an optional passenger detail (berth / meal) is asked ONCE. When this reply (LLM-written — the
+    // backend appends no questions) asked something while that optional detail was the next one, it is recorded as asked:
+    // from the next turn it is no longer pushed as nextToAsk (no repeated question), and `lastAsked` lets a short answer
+    // still map to it. Session-scoped keys only (train|class|passengerId|field) — no values, no text stored.
+    if (!sensitiveInput && turnError?.code !== 'LLM_UNAVAILABLE') {
+      const nx = nextPassengerDetail(sess);
+      const optional = !!nx && (nx.field === 'berthPreference' || nx.field === 'foodPreference');
+      // asked only when a sentence of the reply asks about THAT field (a generic / unrelated question is not "asked")
+      const asked = optional && (asksAboutOptionalField(message, nx!.field) || asksAboutOptionalField(String(extra.naturalSpeech?.text || ''), nx!.field));
+      if (nx && optional && asked) {
+        markOptionalAsked(sess, nx);
+        (sess as any).lastAskedOptional = { passenger: nx.passenger, field: nx.field, passengerId: (sess.passengers || [])[nx.passenger - 1]?.id };
+      } else delete (sess as any).lastAskedOptional;
+    }
     return this.finish({ sessionId, turnId, requestId, startedAt, userText, normalizedInput, mode, stateBefore, pendingBefore, cards, events,
       message, error: turnError, rt, decision: rt.finalDecision, changes: ctx.changes, prepSteps: prep?.steps,
       execution: prep?.execution || dupExecution, extra });
@@ -630,7 +662,7 @@ export class ConversationAgentOrchestrator {
 
   // ---------------------------------------------------------------- composition
 
-  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = [], entityRejections: Array<{ sentence: string; reason: string; binding: string }> = []): string {
+  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = [], entityRejections: Array<{ sentence: string; reason: string; binding: string }> = [], passengerFieldsUpdated?: string[]): string {
     // Prompt 16: LLM wording may phrase authoritative facts only (invented train / fare / PNR / availability removed)
     const factCheck = (text: string): string => {
       // Prompt 17: RailwayResponseGroundingValidator — every fact needs RAILWAY_PROVIDER / BOOKING_RECORD / BOOKING_SESSION
@@ -646,7 +678,6 @@ export class ConversationAgentOrchestrator {
       for (const x of r) { const m = /^UNVERIFIED_FARE:(.+)$/.exec(String(x.reason)); if (m && !rejectedClaims.includes(`FARE:${m[1]}`)) rejectedClaims.push(`FARE:${m[1]}`); }
     };
     const parts: string[] = [];
-    const q = questionFor(s.pendingInteraction, s, mode);
     // v0.39.6: step-by-step passenger details — the agent's reply already asks its next question (from
     // bookingPreparation.nextToAsk) → the backend's name / age / gender question is not appended as a second one when
     //   - the agent really stored a passenger detail this turn (nothing stored → the backend question still follows), or
@@ -656,12 +687,18 @@ export class ConversationAgentOrchestrator {
     const paxStored = rt.applyOutcomes.some(o => (o.applied || []).includes('PASSENGER_DETAILS_UPDATED'));
     const optionalNext = !!nx && (nx.field === 'berthPreference' || nx.field === 'foodPreference');
     let llmAsked = false;
+    // P42.1: every BACKEND-authored piece is fact-only (asking / requesting sentences dropped — whether and how to ask
+    // is Muse's decision from the structured context); grounded LLM wording is kept as written. Never a blank reply:
+    // the existing safe capability line (no question) is the last resort.
+    const museTexts = new Set<string>();
+    const SAFE_LINE = 'Main train search, selection, availability aur fare mein madad kar sakta hoon.';
+    const factOnlyParts = (xs: string[]): string[] => xs.map(p => museTexts.has(p) ? p : factOnly(p)).filter(Boolean);
     if (blockErr) {
       parts.push(...preNotes);
       parts.push(blockErr.message);
       parts.push(...postNotes.filter(n => n && !blockErr.message.includes(n)));
-      if (q && !/\?\s*$/.test(blockErr.message) && !blockErr.message.includes(q)) parts.push(q);
-      return joinParts(parts);
+      const kept = factOnlyParts(parts);
+      return joinParts(kept.length ? kept : [SAFE_LINE]);
     }
     for (const o of rt.applyOutcomes) parts.push(...o.notes);
     for (const o of rt.applyOutcomes) if (o.directAnswer) parts.push(o.directAnswer);
@@ -691,6 +728,8 @@ export class ConversationAgentOrchestrator {
     // never promoted into the backend reply (the search summary + cards stay the only authority for those facts)
     const mixedGeneral = searchOk && !searchEmpty && rt.stopReason === 'final' && rt.finalDecision.intent === 'GENERAL_RAILWAY_QUERY'
       && !!rt.finalDecision.finalMessage && !/\d/.test(String(rt.finalDecision.finalMessage));
+    let llmWordingUsed = false;
+    let honestFallbackUsed = false;
     const llmFinalUseful = !forbiddenAttempt && !lifecycleTurn && !!rt.finalMessage && (nonSearch.length > 0 || searchFailed || mixedGeneral || (rt.steps.length === 0 && !!rt.finalDecision.finalMessage));
     // Prompt 14: PNR / live status answers are ALWAYS deterministic phrasing of the provider result
     // (or its validated error) — LLM wording can never add or upgrade a status.
@@ -700,10 +739,31 @@ export class ConversationAgentOrchestrator {
       // Prompt 33: booking-state claims ("ticket book ho gayi", "handoff ready", "review ready") must match the session
       const stateGuard = guardBookingStateClaims(rt.finalMessage, s);
       entityRejections.push(...stateGuard.removed.map(r => ({ sentence: r.sentence, reason: `BOOKING_STATE_CLAIM:${r.reason}`, binding: 'NONE' })));
-      const guarded = stateGuard.text ? factCheck(lifecycleClaimGuard(factGuard(stateGuard.text, rt.steps, mode, s, recordRejections), prepChange)) : '';
-      if (guarded) { parts.push(guarded); llmAsked = /\?|\b(bataiye|batayein|bataen|batao|boliye|chuniye|likhiye)\b/i.test(guarded); }
-      // (a removed booking-state claim is not a failed fact — the backend's own state message follows)
-      else if (rejectedClaims.length || entityRejections.some(r => !String(r.reason).startsWith('BOOKING_STATE_CLAIM:'))) parts.push(honestFailureFallback(rt.steps));
+      // Prompt 42: "book X, board Y" only with a VERIFIED boarding / alighting rule (hard constraint on wording)
+      // P42.1: "Age 31 noted" only when that passenger detail really changed this turn (validated passenger action)
+      const paxGuard = guardPassengerUpdateClaims(stateGuard.text, passengerFieldsUpdated);
+      entityRejections.push(...paxGuard.removed.map(r => ({ sentence: r.sentence, reason: `PASSENGER_UPDATE_CLAIM:${r.reason}`, binding: 'NONE' })));
+      // P42.1 hardening: internal preference codes in Muse's wording are shown as natural labels (no sentence added)
+      const ruleGuard = guardSameTrainRuleClaims(humanizePreferenceCodes(paxGuard.text), rt.steps);
+      entityRejections.push(...ruleGuard.removed.map(r => ({ sentence: '', reason: `SAME_TRAIN_RULE_CLAIM:${r}`, binding: 'NONE' })));
+      const guarded = ruleGuard.text ? factCheck(lifecycleClaimGuard(factGuard(ruleGuard.text, rt.steps, mode, s, recordRejections), prepChange)) : '';
+      if (guarded) { parts.push(guarded); museTexts.add(guarded); llmWordingUsed = true; llmAsked = /\?|\b(bataiye|batayein|bataen|batao|boliye|chuniye|likhiye)\b/i.test(guarded); }
+      // (a removed booking-state claim is not a failed fact — the backend's own state message follows;
+      //  P42: neither is a removed unverified boarding claim — the Same Train Alternative fact line follows)
+      else if (rejectedClaims.length || entityRejections.some(r => !String(r.reason).startsWith('BOOKING_STATE_CLAIM:') && !String(r.reason).startsWith('SAME_TRAIN_RULE_CLAIM:') && !String(r.reason).startsWith('PASSENGER_UPDATE_CLAIM:'))) { parts.push(honestFailureFallback(rt.steps)); honestFallbackUsed = true; }
+    }
+    // Prompt 42: Same Train Alternative — one card with the latest result (+ Muse's presentation if it called
+    // PRESENT_SAME_TRAIN_ALTERNATIVES); a fact-only fallback line ONLY when no grounded Muse wording survived
+    const stSteps = nonSearch.filter(st => st.result.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES' || st.result.toolName === 'PRESENT_SAME_TRAIN_ALTERNATIVES');
+    if (stSteps.length) {
+      const stored: any = (s as any).sameTrainAlternatives;
+      const okSearch = [...stSteps].reverse().find(st => st.status === 'ok' && st.result.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES');
+      const okPresent = stSteps.some(st => st.status === 'ok' && st.result.toolName === 'PRESENT_SAME_TRAIN_ALTERNATIVES');
+      const result = okSearch ? (stored && stored.alternativeSearchId === okSearch.result.data?.alternativeSearchId ? stored : okSearch.result.data) : okPresent ? stored : null;
+      if (result) cards.push({ type: 'same_train_alternatives', data: sameTrainCardData(result, { stale: isSameTrainResultStale(s, result) }) });
+      const failed = [...stSteps].reverse().find(st => st.status !== 'ok' && st.result.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES');
+      if (okSearch && !llmWordingUsed) parts.push(sameTrainFallbackText(result));
+      else if (!okSearch && failed && !llmWordingUsed && !honestFallbackUsed) parts.push(sameTrainFallbackText(null, String(failed.result.error?.code || '')));
     }
     for (const st of nonSearch) {
       if (st.status !== 'ok') continue;
@@ -724,9 +784,14 @@ export class ConversationAgentOrchestrator {
       if (!llmLost && rt.error && !parts.join(' ').includes(rt.error.message)) parts.push(rt.error.message);
     }
     const joined = parts.join(' ');
-    if (q && !joined.includes(q) && !(nx && llmAsked && (paxStored || optionalNext))) parts.push(q);
-    if (!parts.length) parts.push((rt.finalDecision.clarification && factCheck((() => { const g = guardFareClaims(rt.finalDecision.clarification, s, rt.steps); recordRejections(g.rejected); return g.kept.join(' '); })())) || 'Main train search, selection, availability aur fare mein madad kar sakta hoon.');
-    return joinParts(parts);
+    // v0.42.1: the backend never appends a fixed question — what to ask next is the LLM's decision (Muse / fallback);
+    // the pending interaction still reaches the LLM in its authoritative context
+    const finalParts = factOnlyParts(parts);
+    if (!finalParts.length) {
+      const clar = rt.finalDecision.clarification ? factCheck((() => { const g = guardFareClaims(rt.finalDecision.clarification, s, rt.steps); recordRejections(g.rejected); return g.kept.join(' '); })()) : '';
+      finalParts.push(clar || SAFE_LINE);   // Muse's own clarification, else the existing safe line
+    }
+    return joinParts(finalParts);
   }
 
   // ---------------------------------------------------------------- turn record

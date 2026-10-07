@@ -62,8 +62,8 @@ export const SAFE_ERROR_MESSAGE: Record<ToolErrorCode, string> = {
   PROVIDER_DATA_CONFLICT: 'Railway providers ki jaankari mel nahi kha rahi — abhi verified result available nahi hai.',
   // Prompt 32: a provider "success" whose data has the wrong shape — never treated as empty or as a result
   PROVIDER_DATA_INVALID: 'Railway provider ka jawab sahi format mein nahi tha — jaankari verify nahi ho paayi.',
-  INVALID_ARGUMENT: 'Ek detail sahi format mein nahi thi — thoda clear karke bataiye.',
-  INVALID_REPEATED_CALL: 'Wahi galat detail dobara aayi — sahi value bataiye.',
+  INVALID_ARGUMENT: 'Ek detail sahi format mein nahi thi.',
+  INVALID_REPEATED_CALL: 'Wahi galat detail dobara aayi.',
   REPEATED_FAILED_CALL: 'Ye jaankari abhi provider se nahi mil paa rahi — thodi der baad dobara try karein.'
 };
 

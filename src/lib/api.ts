@@ -239,3 +239,21 @@ export async function postIrctcEvent(handoffId: string, bridgeToken: string, eve
   const b = await res.json().catch(() => ({}));
   return res.ok ? { ok: true } : { ok: false, code: b.code };
 }
+
+/** P42 — "Use this option": fresh server-side revalidation of a Same Train Alternative (nothing is booked or changed). */
+export interface SameTrainSelectResult {
+  ok: boolean; code?: string; message: string; handoffText?: string;
+  fresh?: Array<{ provider: string; status: string; category: string; fetchedAt: string }>;
+}
+export async function selectSameTrainAlternative(sessionId: string, body: { alternativeSearchId: string; alternativeId: string; acknowledgeUnverifiedRules?: boolean }): Promise<SameTrainSelectResult> {
+  try {
+    const r = await fetch(`/api/session/${encodeURIComponent(sessionId)}/same-train-alternative/select`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => null);
+    if (j && typeof j.message === 'string') return j as SameTrainSelectResult;
+    return { ok: false, code: 'NETWORK', message: 'Option verify nahi ho paaya — dobara try karein.' };
+  } catch {
+    return { ok: false, code: 'NETWORK', message: 'Option verify nahi ho paaya — dobara try karein.' };
+  }
+}

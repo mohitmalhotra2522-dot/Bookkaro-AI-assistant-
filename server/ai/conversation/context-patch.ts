@@ -207,8 +207,8 @@ export class ContextPatchValidator {
     return {
       ok: false, code: 'CONTEXT_CONFLICT', patches,
       rejected: [...rejected, { field, proposed, code: 'CONTEXT_CONFLICT', reason: `session has ${previous}; user did not state ${proposedCode}` }],
-      message: `Abhi ${lbl} ${cur} hai. Kya ${lbl} ${nxt} karna hai?`,
-      pending: { type: 'CLARIFICATION_REQUIRED', hint: `Kya ${lbl} ${nxt} karna hai? Haan ya nahi boliye.`, data: { kind: 'CONTEXT_CONFLICT', field, proposedCode, current: previous } }
+      message: `Abhi ${lbl} ${cur} hai; ${nxt} par badlav abhi apply nahi hua.`,
+      pending: { type: 'CLARIFICATION_REQUIRED', data: { kind: 'CONTEXT_CONFLICT', field, proposedCode, current: previous } }
     };
   }
 }

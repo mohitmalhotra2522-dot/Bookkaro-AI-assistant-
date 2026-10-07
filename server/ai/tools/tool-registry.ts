@@ -22,7 +22,10 @@ export type RegisteredToolName =
   | 'GET_FARE'
   | 'TRACK_TRAIN'
   | 'CHECK_PNR'
-  | 'WEB_RAILWAY_RESEARCH';
+  | 'WEB_RAILWAY_RESEARCH'
+  // Prompt 42: Same Train Alternative (composite, LLM-chosen, enabled via SAME_TRAIN_ALTERNATIVES_ENABLED)
+  | 'SEARCH_SAME_TRAIN_ALTERNATIVES'
+  | 'PRESENT_SAME_TRAIN_ALTERNATIVES';
 
 export interface ToolParam {
   type: 'string' | 'number' | 'boolean';
@@ -154,6 +157,48 @@ export const WEB_RAILWAY_RESEARCH_TOOL: ToolDefinition = {
   parameters: { query: { type: 'string', description: 'Short search query (no PNR, no personal details).', required: true } }
 };
 if (webResearchEnabledFromEnv()) REGISTERED_TOOLS.push(WEB_RAILWAY_RESEARCH_TOOL);
+
+/**
+ * Prompt 42 — Same Train Alternative. ONE bounded, high-level tool (no per-station tool loop): the backend fetches the
+ * train's route from a route-capable provider, builds ordered candidate ticket pairs on the SAME train (upstream ticket
+ * origins, downstream ticket destinations) and checks each with FRESH provider calls in parallel. Muse decides whether
+ * to use it, which providers, and how to rank / present the results; the backend never ranks and never books.
+ * Exposed only when SAME_TRAIN_ALTERNATIVES_ENABLED=1 (like WEB_RAILWAY_RESEARCH, opt-in per deployment).
+ */
+export function sameTrainAlternativesEnabledFromEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return /^(1|true|yes|on)$/i.test(String(env.SAME_TRAIN_ALTERNATIVES_ENABLED || '').trim());
+}
+export const SEARCH_SAME_TRAIN_ALTERNATIVES_TOOL: ToolDefinition = {
+  name: 'SEARCH_SAME_TRAIN_ALTERNATIVES',
+  description: 'OPTIONAL Same Train Alternative search — only when YOU judge it useful (e.g. the user asks for other options on the SAME train, or the requested pair shows waitlist / no seats and the user wants to try). Never a default after every search. Checks other TICKET station pairs on the SAME train number, same date / class / passengers: upstream ticket origins (train origin … requested origin) and downstream ticket destinations (5–7 stations after the requested destination, none if it is the terminal). Route comes from a provider timetable; every pair is a FRESH provider availability call (bounded, parallel). Returns per-pair availability with provider evidence, verificationStatus (VERIFIED / PARTIALLY_VERIFIED / UNVERIFIED / CONFLICTING), boardingRuleStatus / alightingRuleStatus (UNVERIFIED = do NOT tell the user they can board / deboard at the requested station). You rank and explain the results; optionally call PRESENT_SAME_TRAIN_ALTERNATIVES to mark your best match. Nothing is booked or changed.',
+  parameters: {
+    trainNumber: { type: 'string', description: 'The SAME train number (from the shown results, the selected train, or the user\'s words).', required: true },
+    travelClass: { type: 'string', description: 'Class code (default: the selected class).' },
+    date: { type: 'string', description: 'Journey date YYYY-MM-DD (default: the session journey date).' },
+    dateExpression: { type: 'string', description: 'Date exactly as the user said it ("kal") — resolved by the backend.' },
+    origin: { type: 'string', description: 'Requested boarding station CODE (default: session journey origin).' },
+    destination: { type: 'string', description: 'Requested destination station CODE (default: session journey destination).' },
+    passengersCount: { type: 'number', description: 'Passengers 1–6 (default: session count or 1).' },
+    originSweep: { type: 'boolean', description: 'Check upstream ticket origins (default true).' },
+    destinationSweep: { type: 'boolean', description: 'Check downstream ticket destinations (default true; ignored when the destination is the terminal).' },
+    destinationExtensionStations: { type: 'number', description: 'How many stations after the destination to try: 5–7 (default 6).' },
+    combinedPairs: { type: 'string', description: 'Upstream origin + downstream destination together: AUTO (only if no AVAILABLE / RAC pair found otherwise), ALWAYS, NEVER. Default AUTO.', enum: ['AUTO', 'ALWAYS', 'NEVER'] },
+    providers: { type: 'string', description: 'Comma-separated availability providers to use (e.g. "railcore,railradar"). Default: all configured railway APIs.' },
+    routeProvider: { type: 'string', description: 'Provider whose timetable gives the route (must support timetable). Default: first chosen provider with a timetable.' },
+    includeFare: { type: 'boolean', description: 'Also fetch provider fares for pairs with an availability answer (default false — more calls).' },
+    webEvidence: { type: 'boolean', description: 'Also collect public-web route evidence (robots-allowed sources only; UNVERIFIED_WEB, never availability). Default false.' }
+  }
+};
+export const PRESENT_SAME_TRAIN_ALTERNATIVES_TOOL: ToolDefinition = {
+  name: 'PRESENT_SAME_TRAIN_ALTERNATIVES',
+  description: 'Optional, after SEARCH_SAME_TRAIN_ALTERNATIVES: record YOUR ranking for the screen. bestMatch = the alternativeId you recommend (only a VERIFIED or PARTIALLY_VERIFIED one), order = your display order. No provider call; nothing is booked. Skip it when no option deserves a recommendation.',
+  parameters: {
+    alternativeSearchId: { type: 'string', description: 'alternativeSearchId of the latest Same Train Alternative result.', required: true },
+    bestMatch: { type: 'string', description: 'alternativeId you recommend (e.g. "A3"), or omit.' },
+    order: { type: 'string', description: 'Comma-separated alternativeIds in your preferred order (e.g. "A3,A1,A2").' }
+  }
+};
+if (sameTrainAlternativesEnabledFromEnv()) REGISTERED_TOOLS.push(SEARCH_SAME_TRAIN_ALTERNATIVES_TOOL, PRESENT_SAME_TRAIN_ALTERNATIVES_TOOL);
 
 export function getToolDefinition(name: RegisteredToolName): ToolDefinition | undefined {
   return REGISTERED_TOOLS.find(t => t.name === name);

@@ -1,3 +1,4 @@
+import { SameTrainCard } from '../components/trains/SameTrainAlternatives';
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { useChatStore } from '../state/chatStore';
 import { createSession, sendMessage, executeBooking, reconcileBooking, fetchTurnEvents, interruptTurn, resumeSession } from '../lib/api';
@@ -222,6 +223,12 @@ const App: React.FC = () => {
     send(`${trainNumber} ${classCode}`, 'TEXT', { searchResultsVersion: version });
   };
 
+  // P42: Same Train Alternative — an explicit user request to the agent (Muse decides how to search); never automatic
+  const handleSameTrain = (trainNumber: string, classCode?: string) => {
+    if (conv.snapshot.state === 'SPEAKING') conv.agent.interrupt('USER_STOP');
+    send(`Same Train Alternative: train ${trainNumber}${classCode ? `, class ${classCode}` : ''} — isi train mein dusre station pairs check karo`, 'TEXT');
+  };
+
   // ───────────────────────── presentation ─────────────────────────
   const snap = conv.snapshot;
   const visual = voiceVisual({ isRecording: snap.listening, agentState: snap.state, sttPhase: conv.sttPhase, micReady: conv.micReady });
@@ -338,7 +345,8 @@ const App: React.FC = () => {
             selectedTrainNumber={ctx?.selectedTrain?.number} selectedClass={ctx?.selectedClass}
             originLabel={placeLabel} disabled={isLoading}
             onSelectTrain={(n: string) => handleSelectTrain(n, d.searchResultsVersion)}
-            onSelectClass={(n: string, c: string) => handleSelectClass(n, c, d.searchResultsVersion)} />
+            onSelectClass={(n: string, c: string) => handleSelectClass(n, c, d.searchResultsVersion)}
+            onSameTrain={appStatus.sameTrainAlternatives ? (n: string) => handleSameTrain(n, ctx?.selectedTrain?.number === n ? ctx?.selectedClass : undefined) : undefined} />
         );
       }
       case 'passengers':
@@ -366,6 +374,11 @@ const App: React.FC = () => {
       case 'selected_train': return <Info.SelectedTrainNote key={key} d={d} />;
       case 'selected_class': return <Info.SelectedClassNote key={key} d={d} />;
       case 'availability': return <Info.AvailabilityNote key={key} d={d} />;
+      case 'same_train_alternatives': return (
+        <SameTrainCard key={key} d={d} sessionId={sessionId} disabled={isLoading}
+          onHandoff={(text: string) => { void send(text, 'TEXT'); }}
+          onCheckAgain={() => handleSameTrain(d.trainNumber, d.travelClass)} />
+      );
       case 'fare': return <Info.FareNote key={key} d={d} />;
       case 'train_info': return <Info.TrainInfoNote key={key} d={d} />;
       case 'timetable': return <Info.TimetableNote key={key} d={d} />;

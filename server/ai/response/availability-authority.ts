@@ -100,6 +100,17 @@ export function collectAvailabilityEvidence(session: BookingSession | any, steps
     const ok = typeof st?.ok === 'boolean' ? st.ok
       : st?.status !== 'error' && st?.status !== 'rejected' && (st?.status === 'ok' || st?.result?.success === true);
     const d = st?.data ?? st?.result?.data;
+    // Prompt 42: a Same Train Alternative result is provider availability evidence too — per checked ticket pair, only
+    // successful PROVIDER_API answers (never UNVERIFIED_WEB, never a failed / rejected / timed-out call)
+    if (name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' && ok && d && Array.isArray(d.alternatives)) {
+      for (const alt of d.alternatives) for (const e of (alt?.evidence || [])) {
+        if (e?.level !== 'PROVIDER_API' || e?.outcome !== 'SUCCESS' || !str(e?.availability?.status)) continue;
+        out.push({ trainNumber: str(e.trainNumber), date: str(e.date), travelClass: String(e.travelClass || '').toUpperCase(),
+          status: String(e.availability.status), available: e.availability.category === 'AVAILABLE',
+          sourceTool: AVAILABILITY_TOOL, sourceResultId: str(e.toolExecutionId) ?? null, origin: 'TOOL_STEP' });
+      }
+      continue;
+    }
     if (name !== AVAILABILITY_TOOL || !ok || !d || !str(d.status)) continue;
     out.push({
       trainNumber: str(d.trainNumber) ?? selected, date: str(d.date) ?? str(s.date), travelClass: String(d.travelClass || '').toUpperCase(),

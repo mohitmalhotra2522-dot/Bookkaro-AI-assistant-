@@ -64,7 +64,7 @@ export class BookingPreparationGuard {
     if (!g.ready) return { ready: false, code: 'BOOKING_PREPARATION_NOT_READY', missing: g.missing, passengerMissing: [], question: g.question };
     const n = s.passengersCount;
     const cv = typeof n === 'number' ? validatePassengerCount(n) : null;
-    if (!cv || !cv.ok) return { ready: false, code: 'INVALID_PASSENGER_COUNT', missing: [], passengerMissing: [], question: cv && !cv.ok ? cv.message : 'Kitne passengers hain?' };
+    if (!cv || !cv.ok) return { ready: false, code: 'INVALID_PASSENGER_COUNT', missing: [], passengerMissing: [], question: cv && !cv.ok ? cv.message : 'Passengers ki sankhya abhi set nahi hai.' };
     const v = passengerValidator.validateSet(s.passengers, n);
     if (!v.complete || !v.valid) {
       return { ready: false, code: 'PASSENGER_DETAILS_INCOMPLETE', missing: [], passengerMissing: [...v.missingFields, ...v.errors.map(e => ({ passengerIndex: e.passengerIndex, field: e.field }))] };
@@ -74,14 +74,14 @@ export class BookingPreparationGuard {
 
   private question(s: BookingSession, m: PreparationPrerequisite): string {
     switch (m) {
-      case 'ROUTE': return 'Kahan se kahan jaana hai?';
-      case 'DATE': return 'Kis date ko jaana hai?';
-      case 'TRAIN': return 'Kaunsi train chahiye?';
-      case 'TRAIN_NOT_IN_CURRENT_RESULTS': return 'Selected train current search results mein nahi hai. Kaunsi train chahiye?';
-      case 'CLASS': return 'Kaunsi class chahiye?';
+      case 'ROUTE': return 'Route (origin / destination) abhi set nahi hai.';
+      case 'DATE': return 'Journey date abhi set nahi hai.';
+      case 'TRAIN': return 'Train abhi select nahi hui.';
+      case 'TRAIN_NOT_IN_CURRENT_RESULTS': return 'Selected train current search results mein nahi hai.';
+      case 'CLASS': return 'Class abhi select nahi hui.';
       case 'CLASS_NOT_AVAILABLE': {
         const cls = actualClassesOf(s);
-        return `${s.selectedClass} is train mein available nahi hai.${cls.length ? ` Available classes: ${cls.join(', ')}.` : ''} Kaunsi chahiye?`;
+        return `${s.selectedClass} is train mein available nahi hai.${cls.length ? ` Available classes: ${cls.join(', ')}.` : ''}`;
       }
     }
   }

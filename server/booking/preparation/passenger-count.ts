@@ -37,10 +37,10 @@ function toNumber(tok: string): number {
 
 /** Part 3 — integer, positive, ≤ MAX_PASSENGERS (existing session rule). */
 export function validatePassengerCount(n: number): { ok: true; count: number } | { ok: false; code: 'INVALID_PASSENGER_COUNT'; reason: PassengerCountInvalidReason; message: string } {
-  if (!Number.isFinite(n) || !Number.isInteger(n)) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'NOT_INTEGER', message: `Passengers ki sankhya poora number honi chahiye (1 se ${MAX_PASSENGERS}). Kitne passengers hain?` };
-  if (n < 0) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'NEGATIVE', message: `Passengers ki sankhya negative nahi ho sakti. 1 se ${MAX_PASSENGERS} ke beech batayein — kitne passengers hain?` };
-  if (n === 0) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'ZERO', message: `Kam se kam 1 passenger hona zaroori hai. Kitne passengers hain?` };
-  if (n > MAX_PASSENGERS) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'TOO_MANY', message: `Ek booking mein maximum ${MAX_PASSENGERS} passengers ho sakte hain. Kitne passengers hain?` };
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'NOT_INTEGER', message: `Passengers ki sankhya poora number honi chahiye (1 se ${MAX_PASSENGERS}).` };
+  if (n < 0) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'NEGATIVE', message: `Passengers ki sankhya negative nahi ho sakti (1 se ${MAX_PASSENGERS} ke beech honi chahiye).` };
+  if (n === 0) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'ZERO', message: `Kam se kam 1 passenger hona zaroori hai.` };
+  if (n > MAX_PASSENGERS) return { ok: false, code: 'INVALID_PASSENGER_COUNT', reason: 'TOO_MANY', message: `Ek booking mein maximum ${MAX_PASSENGERS} passengers ho sakte hain.` };
   return { ok: true, count: n };
 }
 

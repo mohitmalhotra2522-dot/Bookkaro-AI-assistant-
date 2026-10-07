@@ -177,7 +177,7 @@ export function classifyLifecycleIntent(raw: string, opts: { awaiting?: 'DATE' |
     return {
       ...base, action: 'REQUEST_JOURNEY_CHANGE', family: 'MODIFY', referenceText,
       changes: d.date ? { journeyDate: d.date } : {},
-      ...(d.error ? { changeError: { code: 'INVALID_DATE' as const, message: 'Nayi journey date sahi nahi hai — jaise "25 October" batayein (beeti hui date nahi chalegi).' } } : {})
+      ...(d.error ? { changeError: { code: 'INVALID_DATE' as const, message: 'Nayi journey date sahi nahi hai (jaise "25 October"; beeti hui date nahi chalegi).' } } : {})
     };
   }
 

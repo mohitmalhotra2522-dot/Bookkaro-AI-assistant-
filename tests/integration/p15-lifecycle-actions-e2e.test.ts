@@ -22,6 +22,8 @@ import { BookingProviderRegistry } from '../../server/booking/provider/booking-p
 import type { BookingProviderConfig } from '../../server/booking/provider/booking-provider-config';
 import { MockBookingProvider, MOCK_TEST_ONLY_PNR, type MockBookingProviderOptions } from '../../server/booking/testing/mock-booking-provider';
 import type { NormalizedBookingResult } from '../../shared/booking-record';
+/** P42.1: the backend states that the explicit confirmation is REQUIRED (it verifies it itself); no backend question. */
+const CONFIRM_REQUIRED = /(bolne|karne) par hi request provider ko jayegi/;
 
 const enabledCfg = (provider: string): BookingProviderConfig => ({ provider, enabled: true, timeoutMs: 2000, configErrors: [] });
 const ACTION_EVENTS = ['BOOKING_ACTION_REQUESTED', 'BOOKING_ACTION_CONFIRMATION_REQUIRED', 'BOOKING_ACTION_CONFIRMED_BY_USER', 'BOOKING_ACTION_SUBMITTED', 'BOOKING_ACTION_RESULT', 'BOOKING_CANCELLATION_CONFIRMED'];
@@ -122,7 +124,7 @@ describe('G3 — cancellation flow end-to-end', () => {
     // [2][4] cancellation requested for the resolved booking → confirmation question, NO provider call
     const ask = await say(sid, '12497 wali');
     expect(ask.responseMessage).toContain('Main 12497 ki booking cancel karne ki request prepare kar raha hoon');
-    expect(ask.responseMessage).toContain('Kya aap cancellation confirm karte hain?');
+    expect(ask.responseMessage).toMatch(CONFIRM_REQUIRED); expect(ask.responseMessage).not.toMatch(/\?/);   // P42.1: confirmation-required fact; the LLM words the question
     expect(ask.cards.find((c: any) => c.type === 'booking_action')?.data).toMatchObject({ actionType: 'REQUEST_CANCELLATION', status: 'AWAITING_ACTION_CONFIRMATION', bookingId: original.bookingId });
     expect(p.cancelCalls).toBe(0);
     expect(rec(sid).bookingStatus).toBe('CONFIRMED');
@@ -259,7 +261,7 @@ describe('G3 — info tools preserved, LLM boundary, voice, privacy, isolation',
     llm.evil = false;
     for (const r of [r1, r2]) {
       expect(r.responseMessage).not.toMatch(/cancel ho gayi|refund mil gaya|change ho gayi|₹500/i);
-      expect(r.responseMessage).not.toMatch(/Kya aap cancellation confirm karte hain/);
+      expect(r.responseMessage).not.toMatch(CONFIRM_REQUIRED);
     }
     expect(p.cancelCalls + p.modifyCalls + p.refundCalls).toBe(0);
     expect(rec(sid)).toMatchObject({ bookingStatus: 'CONFIRMED', cancellationStatus: 'NOT_REQUESTED', modificationStatus: 'NOT_REQUESTED', refundStatus: 'NOT_AVAILABLE' });
@@ -286,7 +288,7 @@ describe('G3 — info tools preserved, LLM boundary, voice, privacy, isolation',
     expect(v.p.cancelCalls).toBe(1);
     expect(t.p.cancelCalls).toBe(1);
     expect({ b: v.rec.bookingStatus, c: v.rec.cancellationStatus }).toEqual({ b: t.rec.bookingStatus, c: t.rec.cancellationStatus });
-    expect(v.ask.responseMessage).toContain('Kya aap cancellation confirm karte hain?');
+    expect(v.ask.responseMessage).toMatch(CONFIRM_REQUIRED); expect(v.ask.responseMessage).not.toMatch(/\?/);   // P42.1: confirmation-required fact; the LLM words the question
     expect(v.ask.responseMessage.length).toBeLessThan(t.ask.responseMessage.length);
     expect(v.done.responseMessage).toContain('Booking provider ne cancellation confirm kar di hai.');
   });

@@ -12,7 +12,10 @@ import { isPureNegation } from '../../ai/context/pending-interaction';
 
 export type ConfirmationClass = 'EXPLICIT' | 'NEGATIVE' | 'AMBIGUOUS' | 'NONE';
 
+/** @deprecated P42.1 — no longer sent: the backend never asks; it states the fact + structured pendingConfirmation. */
 export const AMBIGUOUS_CONFIRMATION_PROMPT = 'Booking confirm karni hai?';
+/** P42.1 (Category B): fact only — the confirmation is still REQUIRED (backend-verified); the LLM words the request. */
+export const AMBIGUOUS_CONFIRMATION_FACT = 'Confirmation clear nahi hai — booking abhi confirm nahi hui.';
 
 const EXPLICIT = new Set(['haan', 'haa', 'han', 'ha', 'haanji', 'ji', 'yes', 'yeah', 'yep', 'confirm', 'confirmed', 'book', 'bilkul', 'continue', 'proceed', 'हाँ', 'हां', 'जी']);
 const AMBIGUOUS = new Set(['theek', 'thik', 'ok', 'okay', 'okk', 'achha', 'acha', 'accha', 'hmm', 'hmmm', 'hm', 'chalo', 'sahi', 'done', 'sure', 'fine', 'shayad', 'ठीक']);

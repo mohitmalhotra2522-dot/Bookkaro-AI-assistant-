@@ -22,7 +22,9 @@ export interface PassengerChangeProposal { passengerIndex: number; changes: Reco
 
 export type PassengerChangeValidation =
   | { ok: true; passengerIndex: number; passengerId: string; changes: Partial<Record<'name' | 'age' | 'gender' | 'berthPreference' | 'foodPreference', any>> }
-  | { ok: false; code: 'INVALID_PASSENGER_INDEX' | 'INVALID_PASSENGER_FIELD' | 'INVALID_PASSENGER_VALUE' | 'SENSITIVE_DATA_REJECTED'; passengerIndex: number; fields: string[]; message: string };
+  | { ok: false; code: 'INVALID_PASSENGER_INDEX' | 'INVALID_PASSENGER_FIELD' | 'INVALID_PASSENGER_VALUE' | 'SENSITIVE_DATA_REJECTED'; passengerIndex: number; fields: string[]; message: string;
+      /** P42.1 hardening: structured reason for the LLM (e.g. INVALID_PASSENGER_NAME_SCRIPT) — never the value */
+      reason?: string };
 
 export class PassengerChangeValidator {
   validate(s: BookingSession, p: PassengerChangeProposal): PassengerChangeValidation {
@@ -46,7 +48,9 @@ export class PassengerChangeValidator {
     }
     const v = passengerValidator.validatePartial(p.changes as Record<string, any>, `Passenger ${idx}`);
     if (v.errors.length) {
-      return { ok: false, code: 'INVALID_PASSENGER_VALUE', passengerIndex: idx, fields: v.errors.map(e => e.field), message: v.errors[0].message };
+      const script = v.errors.find(e => e.code === 'INVALID_PASSENGER_NAME_SCRIPT');
+      return { ok: false, code: 'INVALID_PASSENGER_VALUE', passengerIndex: idx, fields: v.errors.map(e => e.field), message: v.errors[0].message,
+        ...(script ? { reason: 'INVALID_PASSENGER_NAME_SCRIPT' } : {}) };
     }
     const dup = duplicateOfOther(s, at.passengerId, v.valid);
     if (dup) {

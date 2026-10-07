@@ -172,7 +172,9 @@ describe('G3 — stations, conflicts, pending questions', () => {
   it('[5] bare station → role question; each answer fills only what is missing', async () => {
     const sid = newSid();
     const r1 = await say(sid, 'Ludhiana');
-    expect(r1.responseMessage).toBe('Ludhiana ko origin rakhna hai ya destination?');
+    // P42.1: the ambiguity is a fact + structured pending (STATION_ROLE); the LLM words the question
+    expect(r1.responseMessage).toBe('Ludhiana ka role (origin ya destination) clear nahi hai.');
+    expect(r1.pendingInteraction).toMatchObject({ type: 'CLARIFICATION_REQUIRED', data: { kind: 'STATION_ROLE', code: 'LDH' } });
     expect(rail.searches.length).toBe(0);
     await say(sid, 'destination');
     expect(S(sid).destination).toBe('LDH');
@@ -205,7 +207,8 @@ describe('G3 — stations, conflicts, pending questions', () => {
     const r = await say(sid, 'subah wali train dikhao');
     llm.evil = null;
     expect(r.error?.code).toBe('CONTEXT_CONFLICT');
-    expect(r.responseMessage).toBe('Abhi destination Ludhiana hai. Kya destination New Delhi karna hai?');
+    expect(r.responseMessage).toBe('Abhi destination Ludhiana hai; New Delhi par badlav abhi apply nahi hua.');   // P42.1: fact; structured CONTEXT_CONFLICT pending
+    expect(r.pendingInteraction).toMatchObject({ type: 'CLARIFICATION_REQUIRED', data: { kind: 'CONTEXT_CONFLICT', field: 'destination', proposedCode: 'NDLS' } });
     expect(rail.searches.length).toBe(before);
     expect(S(sid).destination).toBe('LDH');
     expect(r.turnLog.rejectedProposals).toEqual([{ field: 'destination', code: 'CONTEXT_CONFLICT' }]);
@@ -237,7 +240,8 @@ describe('G3 — stations, conflicts, pending questions', () => {
     expect(r2.turnLog.toolCalls.map((c: any) => c.name)).toEqual(['GET_TRAIN_INFO']);
     expect(S(sid).date).toBeUndefined();
     expect(r2.conversationContext.pendingQuestion).toBe('ASK_DATE');
-    expect(r2.responseMessage).toContain('Kis date ko jaana hai?');
+    // P42.1: the pending date stays STRUCTURED (ASK_DATE above) — no backend-appended question; the LLM decides
+    expect(r2.responseMessage).not.toMatch(/\?/);
     await say(sid, 'kal');
     expect(S(sid).date).toBe(KAL);
     expect(rail.searches).toEqual([{ origin: 'ASR', destination: 'NDLS', date: KAL }]);

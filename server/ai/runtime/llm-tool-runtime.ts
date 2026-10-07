@@ -1,3 +1,4 @@
+import { groundPassengerProposals } from '../context/passenger-proposal-grounding';
 import { getWebResearchService } from '../../research/web-research-service';
 /**
  * LLMToolCallingRuntime — the real multi-step tool-calling loop.
@@ -20,6 +21,9 @@ import { getWebResearchService } from '../../research/web-research-service';
  * invents railway facts. All railway data comes from RailwayProvider via
  * normalized tool results.
  */
+import { factOnly, missingInfoOf } from '../response/backend-question-policy';
+import { searchSameTrainAlternatives, liveSameTrainDeps, resolveSameTrainProviders } from '../../railway/same-train/same-train-service';
+import { sameTrainLLMView } from '../../railway/same-train/same-train-view';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { LLMProvider } from '../providers/llm-provider';
 import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE, type AgentTranscriptStep, type SessionUpdateOutcomeView } from '../providers/llm-provider';
@@ -300,8 +304,13 @@ export class BoundToolRuntime {
     // Prompt 23: the agent's own steps this turn (replayed natively as assistant tool_calls + tool results)
     const transcript: AgentTranscriptStep[] = [];
     const outcomeView = (o: ApplyOutcome): SessionUpdateOutcomeView => ({
-      applied: [...(o.applied || [])], notes: [...(o.notes || []), ...(o.directAnswer ? [o.directAnswer] : [])].map(n => String(n).slice(0, 400)),
-      ...(o.error ? { error: { code: String(o.error.code), message: String(o.error.message || '').slice(0, 300) } } : {}),
+      // P42.1: Muse gets facts + STRUCTURED missing info (missingField / userActionRequired) — never a backend question
+      applied: [...(o.applied || [])], notes: [...(o.notes || []), ...(o.directAnswer ? [o.directAnswer] : [])].map(n => factOnly(String(n)).slice(0, 400)).filter(Boolean),
+      ...(o.error ? { error: { code: String(o.error.code), message: factOnly(String(o.error.message || '')).slice(0, 300),
+        ...missingInfoOf(String(o.error.code), o.pendingOverride as any, (o.error as any).details),
+        // P42.1 hardening: structured reason (e.g. INVALID_PASSENGER_NAME_SCRIPT, field=name) — never the value
+        ...((o.error as any).details?.reason ? { reason: String((o.error as any).details.reason), field: (o.error as any).details.field, passengerIndex: (o.error as any).details.passengerIndex } : {}) } } : {}),
+      ...(o.passengerProposalRejections?.length ? { rejectedPassengerFields: o.passengerProposalRejections.map(r => ({ ...r })) } : {}),
       ...(o.replan ? { replan: true } : {}), ...(o.blockTools ? { blocked: true } : {})
     });
     let lastDecision: AgentDecision | null = null;
@@ -465,7 +474,12 @@ export class BoundToolRuntime {
 
       // Deterministically apply this decision's entities/references BEFORE its tool calls.
       if (H.applyDecision) {
+        // P42.1 hardening: passenger proposals grounded in the user's words of THIS turn before anything is applied —
+        // a non-Latin / transliterated name and a preference the user never stated are not stored (structured reason)
+        const grounded = groundPassengerProposals(decision.entities as Record<string, any> | undefined, userText, this.getSession());
+        if (grounded.rejections.length) decision = { ...decision, entities: grounded.entities as any };
         const outcome = H.applyDecision(decision);
+        if (grounded.rejections.length) outcome.passengerProposalRejections = grounded.rejections;
         if (step.sessionUpdate) step.sessionUpdateOutcome = outcomeView(outcome);
         applyOutcomes.push(outcome);
         this.allowedTools = outcome.allowedTools;
@@ -635,7 +649,7 @@ export class BoundToolRuntime {
     }
     const sourceConflict = norm.success ? this.detectSourceConflict(vt, norm, x) : undefined;
     steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', dataSource: x.dataSource ?? null, validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
-    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? norm.data : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status,
+    turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? (vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? sameTrainLLMView(norm.data) : norm.data) : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status,
       outcome: toolOutcomeOf({ ok: norm.success, empty: x.empty, status: x.record.status, code: norm.error?.code, normalizedCode: x.error?.normalized }), dataSource: x.dataSource ?? null, attempts: x.record.attempt || 1,
       ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}),
       identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}) });
@@ -688,6 +702,49 @@ export class BoundToolRuntime {
     }
   }
 
+  /**
+   * Prompt 42 — Same Train Alternative search. Muse chose to call it; the engine only executes: route from the chosen
+   * route provider, candidate pairs, fresh provider calls in each connector's scope, validation, conflict detection.
+   * A result that belongs to a superseded journey / turn is never returned (STALE_ALTERNATIVE_RESULT).
+   */
+  private async runSameTrainSearch(vt: ValidatedToolCall, guard?: { canApply: () => boolean }): Promise<any> {
+    const a = vt.arguments;
+    const s: any = this.getSession();
+    const pr = resolveSameTrainProviders(a.providers, a.routeProvider);
+    if (!pr.ok) return { ok: false, error: { code: pr.code, message: pr.message } };
+    const row = ((s.searchResults?.trains || []) as any[]).find(t => String(t.trainNumber || t.number) === a.trainNumber);
+    const sel: any = s.selectedTrain;
+    const trainName = row?.trainName || row?.name || (sel && String(sel.number || sel.trainNumber) === a.trainNumber ? (sel.name || sel.trainName) : undefined);
+    const H = this.hooks;
+    const t0 = Date.now();
+    const out = await searchSameTrainAlternatives({
+      sessionId: s.sessionId, turnId: H.turnId ?? null, requestId: H.requestId ?? null, journeyVersion: s.journeyVersion ?? null,
+      trainNumber: a.trainNumber, trainName, date: a.date, travelClass: a.travelClass, passengersCount: a.passengersCount,
+      origin: a.origin, destination: a.destination, originName: s.origin === a.origin ? s.originName : undefined, destinationName: s.destination === a.destination ? s.destinationName : undefined,
+      originSweep: a.originSweep !== false, destinationSweep: a.destinationSweep !== false, destinationExtensionStations: a.destinationExtensionStations,
+      combinedPairs: a.combinedPairs, includeFare: !!a.includeFare, webEvidence: !!a.webEvidence,
+      providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders
+    }, liveSameTrainDeps(this.tools as any, {
+      isCurrent: () => (guard?.canApply ? guard.canApply() : true) && !H.isStale?.(),
+      log: (event, fields) => H.emit?.('SAME_TRAIN_SEARCH' as any, { event, ...fields })
+    }));
+    const t1 = new Date().toISOString();
+    const meta = { source: out.ok && out.result.isMock ? 'mock' : 'live', providerId: pr.providers.map(p => p.id).join('+'), requestTimestamp: new Date(t0).toISOString(), responseTimestamp: t1, latencyMs: Date.now() - t0, cache: 'disabled' };
+    if (!out.ok) return { ok: false, error: { code: out.code, message: out.message }, meta };
+    return { ok: true, data: out.result, meta };
+  }
+
+  /** Prompt 42 — Muse's ranking for the screen (validated ids only); no provider call, nothing booked. */
+  private async presentSameTrain(vt: ValidatedToolCall): Promise<any> {
+    const s: any = this.getSession();
+    const r = s.sameTrainAlternatives;
+    if (!r || r.alternativeSearchId !== vt.arguments.alternativeSearchId) return { ok: false, error: { code: 'ALTERNATIVE_NOT_FOUND', message: 'Current Same Train Alternative result nahi mila.' } };
+    const order = String(vt.arguments.order || '').split(',').filter(Boolean);
+    const rest = (r.alternatives || []).map((x: any) => x.alternativeId).filter((id: string) => !order.includes(id));
+    const presentation = { bestMatchId: vt.arguments.bestMatch || null, order: [...order, ...rest], decidedBy: 'MUSE', at: new Date().toISOString() };
+    return { ok: true, data: { kind: 'SAME_TRAIN_PRESENTATION', alternativeSearchId: r.alternativeSearchId, trainNumber: r.trainNumber, ...presentation }, meta: { source: 'none', cache: 'disabled' } };
+  }
+
   private async executeTool(vt: ValidatedToolCall, guard?: { canApply: () => boolean }): Promise<any> {
     const H = this.hooks;
     if (vt.name === 'SEARCH_TRAINS') H.emit?.('SEARCH_STARTED', { origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date });
@@ -729,6 +786,11 @@ export class BoundToolRuntime {
       // Prompt 35: LLM-chosen WEB_EXTERNAL research (never auto-launched by the backend; never authoritative)
       case 'WEB_RAILWAY_RESEARCH':
         return getWebResearchService().search(vt.arguments.query);
+      // Prompt 42: LLM-chosen Same Train Alternative search (bounded, fresh, parallel) + Muse's optional presentation
+      case 'SEARCH_SAME_TRAIN_ALTERNATIVES':
+        return this.runSameTrainSearch(vt, guard);
+      case 'PRESENT_SAME_TRAIN_ALTERNATIVES':
+        return this.presentSameTrain(vt);
       default:
         return { ok: false, error: { code: 'UNKNOWN_TOOL', message: `"${vt.name}" अज्ञात tool है।` } };
     }
@@ -779,6 +841,8 @@ export class BoundToolRuntime {
     if (r.success && r.toolName === 'CHECK_PNR') return { ok: true, data: { ...r.data, pnr: maskPnr(r.data?.pnr) }, toolName: r.toolName, ...meta, ...oc };
     const ref = r.resultRef ? { toolResultId: r.resultRef } : {};
     const entity = r.identity && r.identity.binding !== 'NO_ENTITY' ? { entity: { trainNumber: r.identity.trainNumber, date: r.identity.date, class: r.identity.travelClass } } : {};
+    // Prompt 42: compact Same Train Alternative view (alternatives keyed by id — never truncated away)
+    if (r.success && r.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES') return { ok: true, ...ref, ...entity, data: sameTrainLLMView(r.data), toolName: r.toolName, ...(llm ? { toolExecutionId: llm.toolExecutionId, status: llm.status, fresh: llm.fresh } : {}), ...oc };
     if (r.success) return { ok: true, ...ref, ...entity, data: r.data, toolName: r.toolName, ...meta, ...oc };
     return { ok: false, ...ref, error: { ...r.error, normalizedCode: r.normalizedErrorCode, ...structuredToolError(r.toolName, r.error, attempts) }, toolName: r.toolName, ...meta, ...oc };
   }
@@ -808,6 +872,16 @@ export class BoundToolRuntime {
     const H = this.hooks;
     // Prompt 14: live lookups never mutate BookingSession / BookingRecord facts — audit only
     if (vt.name === 'CHECK_PNR' || vt.name === 'TRACK_TRAIN') { H.onLiveTool?.('RESULT', vt.name, vt.arguments, { success: r.success, error: r.error }); return; }
+    // Prompt 42: the latest Same Train Alternative result (with its journey key) is kept for stale checks, Muse's
+    // presentation and an explicit "Use this option" revalidation. Booking fields are NEVER touched here.
+    if (vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES') { if (r.success) this.commitSession({ sameTrainAlternatives: r.data } as any); return; }
+    if (vt.name === 'PRESENT_SAME_TRAIN_ALTERNATIVES') {
+      const cur: any = (this.getSession() as any).sameTrainAlternatives;
+      if (r.success && cur && cur.alternativeSearchId === r.data?.alternativeSearchId) {
+        this.commitSession({ sameTrainAlternatives: { ...cur, presentation: { bestMatchId: r.data.bestMatchId, order: r.data.order, decidedBy: 'MUSE', at: r.data.at } } } as any);
+      }
+      return;
+    }
     if (!r.success) {
       // A failed search must not leave the session stuck in SEARCHING_TRAINS.
       if (vt.name === 'SEARCH_TRAINS' && this.getSession().bookingState === BookingState.SEARCHING_TRAINS) {

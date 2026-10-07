@@ -140,7 +140,7 @@ export class PassengerCollection {
       }
       case 'PRONOUN': {
         const i = s.lastPassengerRefId ? ps.findIndex(p => p.id === s.lastPassengerRefId) : -1;
-        return i === -1 ? { ok: false, code: 'INVALID_PASSENGER_INDEX', message: 'Kis passenger ki baat ho rahi hai? Passenger number batayein.' } : { ok: true, passenger: ps[i], index: i };
+        return i === -1 ? { ok: false, code: 'INVALID_PASSENGER_INDEX', message: 'Passenger identify nahi hua.' } : { ok: true, passenger: ps[i], index: i };
       }
       case 'NAME': {
         const q = String(ref.value || '').trim().toLowerCase();
@@ -152,7 +152,7 @@ export class PassengerCollection {
           return !!n && n.split(/\s+/)[0] === q.split(/\s+/)[0];
         });
         if (hits.length === 1) return { ok: true, passenger: hits[0].p, index: hits[0].i };
-        if (hits.length > 1) return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `"${ref.value}" naam ke ${hits.length} passengers hain — passenger number batayein (${hits.map(h => h.i + 1).join(' ya ')}).` };
+        if (hits.length > 1) return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `"${ref.value}" naam ke ${hits.length} passengers hain (passenger ${hits.map(h => h.i + 1).join(' / ')}).` };
         return { ok: false, code: 'INVALID_PASSENGER_INDEX', message: `"${ref.value}" naam ka koi passenger nahi mila.` };
       }
     }
@@ -202,7 +202,7 @@ export class PassengerCollection {
           const nm = this.nextMissing(s);
           if (nm) target = { passenger: nm.passenger, index: nm.index };
           else if (s.passengers.length === 1) target = { passenger: s.passengers[0], index: 0 };
-          else { out.refError = { code: 'INVALID_PASSENGER_INDEX', message: 'Kis passenger ki detail badalni hai? Passenger number batayein.' }; continue; }
+          else { out.refError = { code: 'INVALID_PASSENGER_INDEX', message: 'Passenger identify nahi hua.' }; continue; }
         }
       }
       const p = target.passenger;

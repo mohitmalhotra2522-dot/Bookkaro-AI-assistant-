@@ -111,7 +111,7 @@ export function validateForm(body: any, s: BookingSession, facilities: TrainFaci
     const idx = i + 1;
     const label = `Passenger ${idx}`;
     const name = typeof raw?.name === 'string' ? raw.name.trim().replace(/\s+/g, ' ') : '';
-    if (!LATIN_NAME.test(name)) fieldErrors.push({ passengerIndex: idx, field: 'name', message: `${label}: naam English letters mein likhiye (IRCTC), jaise "Rahul Sharma".` });
+    if (!LATIN_NAME.test(name)) fieldErrors.push({ passengerIndex: idx, field: 'name', message: `${label}: naam English letters mein hona chahiye (IRCTC), jaise "Rahul Sharma".` });
     const v = passengerValidator.validatePartial({ name: LATIN_NAME.test(name) ? name : undefined, age: raw?.age, gender: raw?.gender }, label);
     for (const e of v.errors) fieldErrors.push({ passengerIndex: idx, field: e.field, message: e.message });
     for (const f of ['age', 'gender'] as const) if (raw?.[f] === undefined || raw?.[f] === null || raw?.[f] === '') fieldErrors.push({ passengerIndex: idx, field: f, message: `${label}: ${f === 'age' ? 'umar' : 'gender'} zaroori hai.` });
@@ -124,9 +124,9 @@ export function validateForm(body: any, s: BookingSession, facilities: TrainFaci
     const food = raw?.foodPreference ? String(raw.foodPreference).toUpperCase() : '';
     if (food) {
       if (!foodOffered) fieldErrors.push({ passengerIndex: idx, field: 'foodPreference', message: `${label}: is train ke liye khane ka option provider data mein nahi hai.` });
-      else if (!(FOOD_PREFERENCES as readonly string[]).includes(food)) fieldErrors.push({ passengerIndex: idx, field: 'foodPreference', message: `${label}: khana Veg, Non-Veg ya No Food chuniye.` });
+      else if (!(FOOD_PREFERENCES as readonly string[]).includes(food)) fieldErrors.push({ passengerIndex: idx, field: 'foodPreference', message: `${label}: khana Veg, Non-Veg ya No Food mein se hona chahiye.` });
       else rec.foodPreference = food;
-    } else if (foodOffered) fieldErrors.push({ passengerIndex: idx, field: 'foodPreference', message: `${label}: khane ki choice chuniye (Veg / Non-Veg / No Food).` });
+    } else if (foodOffered) fieldErrors.push({ passengerIndex: idx, field: 'foodPreference', message: `${label}: khane ki choice abhi set nahi hai (Veg / Non-Veg / No Food).` });
     out.push(rec);
   });
   // v0.39.6: no duplicate passenger rows (same name + age + gender)

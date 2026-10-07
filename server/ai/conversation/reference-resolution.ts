@@ -45,8 +45,8 @@ export class ConversationReferenceResolver {
     if (target === 'BOOKING') {
       if (active) return { ok: true, kind: 'BOOKING', bookingId: active.bookingId };
       if (records.length === 1) return { ok: true, kind: 'BOOKING', bookingId: records[0].bookingId };
-      if (!records.length) return { ok: false, code: 'MISSING_CONTEXT', message: 'Is session mein abhi koi booking nahi hai. Kis booking ki baat kar rahe hain?' };
-      return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `Kaunsi booking? ${records.map(r => `${r.train.trainNumber} (${r.journeyDate})`).join(', ')}.` };
+      if (!records.length) return { ok: false, code: 'MISSING_CONTEXT', message: 'Is session mein abhi koi booking nahi hai.' };
+      return { ok: false, code: 'AMBIGUOUS_REFERENCE', message: `Ek se zyada booking hain: ${records.map(r => `${r.train.trainNumber} (${r.journeyDate})`).join(', ')}.` };
     }
     const sel = trainOf(s);
     if (sel) return { ok: true, kind: 'TRAIN', trainNumber: sel, source: 'SELECTED_TRAIN' };
@@ -55,6 +55,6 @@ export class ConversationReferenceResolver {
       const r = active || (records.length === 1 ? records[0] : undefined);
       if (r) return { ok: true, kind: 'TRAIN', trainNumber: r.train.trainNumber, source: 'BOOKING_RECORD' };
     }
-    return { ok: false, code: 'MISSING_CONTEXT', message: 'Kis train ki baat kar rahe hain? Train number ya list mein se option batayein.' };
+    return { ok: false, code: 'MISSING_CONTEXT', message: 'Train reference clear nahi hai.' };
   }
 }

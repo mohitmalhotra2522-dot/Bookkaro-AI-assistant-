@@ -175,12 +175,12 @@ describe('P25 G3 — facts survive when they are true (A–E)', () => {
 });
 
 describe('P25 G3 — language, tool validation, retries, LLM calls (F–J)', () => {
-  it('[F] English question → English reply; the backend\'s own question is English too; the agent sees replyLanguage', async () => {
+  it('[F] English question → English reply (no backend-appended question — P42.1); the agent sees replyLanguage', async () => {
     const h = mk({ 'Which of these trains reaches Delhi earliest?': [v => ({ content: v.context?.replyLanguage === 'ENGLISH' ? '12014 Amritsar Shatabdi reaches New Delhi first, at 10:50.' : '12014 sabse pehle 10:50 par pahunchti hai.' })] });
     await h.say(SEARCH_T);
     const r = await h.say('Which of these trains reaches Delhi earliest?');
     expect(r.turnLog.naturalSpeech).toMatchObject({ source: 'LLM', language: 'ENGLISH', rejected: [] });
-    expect(text(r)).toBe('12014 Amritsar Shatabdi reaches New Delhi first, at 10:50. Which train would you like?');
+    expect(text(r)).toBe('12014 Amritsar Shatabdi reaches New Delhi first, at 10:50.');
     expect(text(r)).not.toMatch(/\b(hai|hain|chahiye|kaunsi)\b/i);
   });
 

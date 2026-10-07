@@ -17,6 +17,7 @@ import { MockRailwayProvider } from '../../server/railway/providers/mock/mock-pr
 import { RailwayToolRuntime } from '../../server/ai/tool-runtime/railway-tool-runtime';
 import { createLLMProvider } from '../../server/ai/providers/llm-provider-factory';
 import { FakeOpenAI, type TurnView } from '../helpers/fake-openai-server';
+import { nextPassengerDetail } from '../../server/booking/passenger-options';
 
 railwayRegistry.register('p396-steps', () => new MockRailwayProvider());
 const istTomorrow = () => new Date(Date.now() + 5.5 * 3600_000 + 86400_000).toISOString().slice(0, 10);
@@ -47,7 +48,7 @@ describe('v0.39.6 — passenger details one at a time (native agent, real orches
       '12497 CC 1 log': [{ calls: [U('BOOK_TRAIN', 'SELECT_TRAIN', { trainRef: { kind: 'TRAIN_NUMBER', value: '12497' }, classRaw: 'CC', passengersCountRaw: '1', selectionPurpose: 'BOOKING' })] }, { content: 'Passenger 1 ka naam kya hai?' }],
       'Rahul Sharma': [{ calls: [PAX({ name: 'Rahul Sharma' })] }, { content: 'Noted. Rahul ji ki age bataiye.' }],      // a request without "?" counts as its question
       '31': [{ content: 'Age 31 noted. Ab gender bataiye?' }],                                     // claims, but never calls the tool
-      'umar 31 hai': [{ calls: [PAX({ age: 31 })] }, { content: 'Theek hai. Window seat chahiye ya koi preference nahi?' }],
+      'umar 31 hai': [{ calls: [PAX({ age: 31 })] }, { content: 'Age 31 noted. Window seat chahiye ya koi preference nahi?' }],   // the SAME claim, now with the real update
     });
     await h.say('search');
     const r1 = await h.say('12497 CC 1 log');
@@ -61,17 +62,30 @@ describe('v0.39.6 — passenger details one at a time (native agent, real orches
     expect(v2[v2.length - 1].context.context.bookingPreparation.nextToAsk).toMatchObject({ passenger: 1, field: 'age' });   // updated after the store
     expect(h.s().passengers[0].name).toBe('Rahul Sharma');
     expect(String(r2.responseMessage)).toContain('Rahul ji ki age bataiye.');
+    expect(String(r2.responseMessage)).toMatch(/^Noted\./);                                         // name REALLY stored → Muse's own ack allowed
     expect(String(r2.responseMessage)).not.toMatch(/umar kitni hai/);
 
     const r3 = await h.say('31');
     expect(h.s().passengers[0].age).toBeUndefined();                                               // nothing stored
-    expect(String(r3.responseMessage)).toMatch(/umar kitni hai\?/);                                // honest backend question kept
+    // P42.1: no backend question is appended any more — the next detail stays STRUCTURED (still P1 age; nothing advanced)
+    expect(nextPassengerDetail(h.s())).toEqual({ passenger: 1, field: 'age' });
+    expect(String(r3.responseMessage)).not.toMatch(/umar kitni hai/);
+    // P42.1 pre-release: the LLM claimed "Age 31 noted" WITHOUT a validated UPDATE_PASSENGER → that claim never reaches
+    // the user (screen or voice); no fixed backend acknowledgement replaces it
+    expect(String(r3.responseMessage)).not.toMatch(/noted|31/i);
+    expect(String(r3.voice?.assistantText ?? '')).not.toMatch(/noted/i);
+    // turnLog serialises the composer's rejections as reason strings — exactly ONE: the passenger-claim guard
+    expect(r3.turnLog.naturalSpeech.rejected).toEqual(['PASSENGER_UPDATE_CLAIM:FIELD_NOT_UPDATED:age']);
 
     const r4 = await h.say('umar 31 hai');
     expect(h.s().passengers[0].age).toBe(31);
     const v4 = h.views.filter(v => v.user === 'umar 31 hai');
     expect(v4[v4.length - 1].context.context.bookingPreparation.nextToAsk).toMatchObject({ passenger: 1, field: 'berthPreference' });
     expect(String(r4.responseMessage)).toContain('Window seat chahiye');
+    // P42.1 pre-release (B): the age REALLY stored by the validated UPDATE_PASSENGER → Muse's own acknowledgement stays (screen + voice)
+    expect(String(r4.responseMessage)).toMatch(/^Age 31 noted\./);
+    expect(String(r4.voice?.assistantText ?? '')).toMatch(/^Age 31 noted\./);
+    expect(r4.turnLog.naturalSpeech.rejected).toEqual([]);
     expect(String(r4.responseMessage)).not.toMatch(/gender — male, female ya other/);
   }, 30000);
 });

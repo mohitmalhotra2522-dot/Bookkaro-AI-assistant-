@@ -13,7 +13,9 @@
  * is ALSO built from BookingSession — an LLM-generated summary can never
  * replace BookingSession.
  */
-import { nextPassengerDetail, optionalToAsk, passengerOptionsView } from '../../booking/passenger-options';
+import { pendingInfoView, pendingConfirmationOf, missingInformationOf } from '../response/backend-question-policy';
+import { nextPassengerDetail, optionalToAsk, optionalUnanswered, optionalAlreadyAsked, passengerOptionsView, berthLabel, foodLabel } from '../../booking/passenger-options';
+import { isLatinName } from '../../booking/passenger-validator';
 import { referenceContextView } from './reference-context';
 import type { BookingSession } from '@shared/entities';
 import { currentResults } from './train-reference-resolver';
@@ -38,7 +40,13 @@ export interface LLMContext {
     passengerDetails: { required: number; completed: number; currentIndex: number };
     sessionVersion: number;
   };
+  /** P42.1: structured (type + data + missingField) — no canned hint / question text. */
   pendingInteraction: BookingSession['pendingInteraction'];
+  /** P42.1: what is still missing for the booking flow — present / missing per field (structured, never a question). */
+  missingInformation?: Record<string, 'present' | 'missing'>;
+  /** P42.1 (Category B): a protected step awaiting the user's explicit confirmation. The backend verifies the
+   *  confirmation itself before any protected mutation; the LLM only words the request. */
+  pendingConfirmation?: { action: string; confirmationRequired: true; confirmationStatus: 'PENDING' } | null;
   searchResults: { version: number; trains: Array<{ displayIndex: number; trainNumber: string; trainName: string; departure: string; arrival: string; duration: string; classes: string[] }> };
   /** Deterministic summary of compressed older turns (from BookingSession). */
   summary?: string;
@@ -85,19 +93,35 @@ export function bookingPreparationView(s: BookingSession) {
   const count = s.passengersCount || 0;
   const passengers = Array.from({ length: count }, (_, k) => {
     const p: any = (s.passengers || [])[k] || {};
-    const miss = (['name', 'age', 'gender'] as const).filter(f => p[f] === undefined || p[f] === null || p[f] === '');
-    return { passenger: k + 1, ...(p.name ? { name: p.name } : {}), ...(p.age ? { age: p.age } : {}), ...(p.gender ? { gender: p.gender } : {}),
-      ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}), ...(p.foodPreference ? { foodPreference: p.foodPreference } : {}), missing: miss };
+    // P42.1 hardening: a stored non-Latin name is not a valid IRCTC name → still missing, with a structured reason
+    const badName = !!p.name && !isLatinName(p.name);
+    const miss = (['name', 'age', 'gender'] as const).filter(f => p[f] === undefined || p[f] === null || p[f] === '' || (f === 'name' && badName));
+    return { passenger: k + 1, ...(p.name && !badName ? { name: p.name } : {}), ...(p.age ? { age: p.age } : {}), ...(p.gender ? { gender: p.gender } : {}),
+      ...(p.berthPreference ? { berthPreference: p.berthPreference } : {}), ...(p.foodPreference ? { foodPreference: p.foodPreference } : {}), missing: miss,
+      ...(badName ? { invalid: [{ field: 'name', reason: 'INVALID_PASSENGER_NAME_SCRIPT', userActionRequired: true }] } : {}) };
   });
   // P39.2: optional details this train + class actually offer and the user has not answered yet (ask once)
   const alsoAsk: string[] = [];
   for (let k = 0; k < count; k++) for (const f of optionalToAsk(s, (s.passengers || [])[k])) alsoAsk.push(`passenger${k + 1}.${f}`);
+  // P42.1 hardening: optional details already asked once and still unanswered (never asked again; may be volunteered)
+  const alreadyAsked: string[] = [];
+  for (let k = 0; k < count; k++) {
+    const p = (s.passengers || [])[k];
+    for (const f of optionalUnanswered(s, p)) if (optionalAlreadyAsked(s, p, f)) alreadyAsked.push(`passenger${k + 1}.${f}`);
+  }
+  // …and the one the previous reply asked (still unanswered): a short answer that fits it maps there
+  const la: any = (s as any).lastAskedOptional;
+  const laP: any = la ? (s.passengers || [])[la.passenger - 1] : null;
+  const lastAsked = la && laP && laP.id === la.passengerId && !laP[la.field] ? (() => {
+    const o = la.field === 'berthPreference' ? passengerOptionsView(s)?.berth : passengerOptionsView(s)?.food;
+    return { passenger: la.passenger, field: la.field, ...(o?.options?.length ? { options: [...o.options], optionLabels: o.options.map((v: string) => la.field === 'berthPreference' ? berthLabel(v) : foodLabel(v)) } : {}) };
+  })() : null;
   // v0.39.6: the next single passenger detail still open, in the order the user asked for (name → age → berth → gender →
   // meal; berth / meal only when this train + class offer them) — passenger 1 is finished before passenger 2. A fact
   // derived from the session; the LLM writes the question.
   const nx = nextPassengerDetail(s);
   const nxOpts = nx?.field === 'berthPreference' ? passengerOptionsView(s)?.berth.options : nx?.field === 'foodPreference' ? passengerOptionsView(s)?.food.options : undefined;
-  const nextToAsk = nx ? { ...nx, ...(nxOpts?.length ? { options: [...nxOpts] } : {}), askOnlyThis: true,
+  const nextToAsk = nx ? { ...nx, ...(nxOpts?.length ? { options: [...nxOpts], optionLabels: nxOpts.map(v => nx.field === 'berthPreference' ? berthLabel(v) : foodLabel(v)) } : {}), askOnlyThis: true,
     saveAnswerWith: `update_booking_session entities.passengerChanges [{ passengerIndex: ${nx.passenger}, changes: { ${nx.field}: <answer> } }] — before replying` } : null;
   const missing: string[] = [];
   if (!s.origin) missing.push('origin');
@@ -115,6 +139,8 @@ export function bookingPreparationView(s: BookingSession) {
     // P39.2: berth choices of the selected class + meal status from provider data (NOT_CHECKED → GET_TRAIN_INFO)
     ...((): { passengerOptions?: ReturnType<typeof passengerOptionsView> } => { const o = passengerOptionsView(s); return o ? { passengerOptions: o } : {}; })(),
     ...(alsoAsk.length ? { alsoAsk } : {}),
+    ...(alreadyAsked.length ? { optionalAlreadyAsked: alreadyAsked } : {}),
+    ...(lastAsked ? { lastAsked } : {}),
     ...(nextToAsk ? { nextToAsk } : {}),
     // matching provider result for the CURRENT train/class/date/route (not a value — never reuse an old fare/availability)
     availabilityCheck: DEP_VIEW[availabilityStatus(s).status], fareCheck: DEP_VIEW[fareStatus(s).status],
@@ -146,7 +172,9 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
       },
       sessionVersion: s.sessionVersion
     },
-    pendingInteraction: s.pendingInteraction,
+    pendingInteraction: (pendingInfoView(s.pendingInteraction) ?? s.pendingInteraction) as any,
+    missingInformation: missingInformationOf(s),
+    pendingConfirmation: pendingConfirmationOf(s, s.bookingState === BookingState.AWAITING_CONFIRMATION),
     searchResults: {
       version: s.searchResultsVersion,
       trains: currentResults(s).map(x => ({

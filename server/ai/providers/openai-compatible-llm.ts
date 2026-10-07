@@ -11,11 +11,13 @@
  *    NaturalResponseComposer before any of it is spoken.
  * The API key stays server-side, is never logged and is never sent to the browser. `fetch` is injectable (tests).
  */
+import { factOnly, missingInfoOf, pendingInfoView, pendingConfirmationOf, missingInformationOf } from '../response/backend-question-policy';
 import { webSourceLabel, toWebRailwayResult } from '../../railway/providers/web/web-providers';
 import { LLMProviderError, isLLMProviderError, type LLMProvider, type LLMTurnInput, type LLMTurnResult, type SpokenResponseInput, type SpokenResponseResult } from './llm-provider';
 import type { AgentDecision } from '../decisions/agent-decision';
 import { providerToolCatalog, providerStatusOf } from '../tools/provider-tools';
-import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, VOICE_BRIEF_PROMPT, NATIVE_AGENT_SYSTEM_PROMPT } from '../prompts/system-prompt';
+import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, VOICE_BRIEF_PROMPT, nativeAgentSystemPrompt } from '../prompts/system-prompt';
+import { sameTrainAlternativesEnabledFromEnv } from '../tools/tool-registry';
 import type { AgentTranscriptStep } from './llm-provider';
 import { v4 as uuid } from '../orchestrator/utils';
 import { detectLanguageStyle } from '@shared/voice/language-style';
@@ -53,6 +55,9 @@ const MAX_TOKENS_DECISION = 700;
 const MAX_TOKENS_AGENT = Math.min(8000, Math.max(800, Number(process.env.LLM_MAX_TOKENS_AGENT) || 3200));
 const MAX_TOKENS_SPEECH = 400;
 const MAX_TOOL_RESULT_CHARS = 3500;
+/** Prompt 42: the bounded composite Same Train Alternative result (≤ 40 pairs, compact view) gets its own larger budget so
+ *  Muse sees EVERY checked pair (a clipped JSON would hide options) — every other tool keeps MAX_TOOL_RESULT_CHARS */
+const MAX_SAME_TRAIN_RESULT_CHARS = 14000;
 
 export class OpenAICompatibleLLMProvider implements LLMProvider {
   readonly providerId = 'openai-compatible';
@@ -158,8 +163,13 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
 
   async generateSpokenResponse(input: SpokenResponseInput): Promise<SpokenResponseResult | null> {
     const facts = {
-      userText: input.userText, outputMode: input.inputMode, language: input.language, backendReply: input.backendReply, pendingQuestion: input.pendingQuestion,
-      state: input.session.bookingState, stateBefore: input.stateBefore, error: input.error,
+      userText: input.userText, outputMode: input.inputMode, language: input.language, backendReply: input.backendReply,
+      // P42.1: structured pending / missing information (no canned question text) — the LLM decides whether / how to ask
+      pendingQuestionCode: input.pendingQuestionCode ?? null, pendingInteraction: pendingInfoView(input.session.pendingInteraction),
+      missingInformation: missingInformationOf(input.session),
+      pendingConfirmation: pendingConfirmationOf(input.session, input.session.bookingState === 'AWAITING_CONFIRMATION'),
+      state: input.session.bookingState, stateBefore: input.stateBefore,
+      error: input.error ? { ...input.error, message: factOnly(String(input.error.message || '')), ...missingInfoOf(input.error.code, input.session.pendingInteraction as any, (input.error as any).details) } : input.error,
       session: {
         origin: input.session.originName || input.session.origin, destination: input.session.destinationName || input.session.destination,
         date: input.session.date, selectedTrain: (input.session.selectedTrain as any)?.number ?? null, selectedClass: input.session.selectedClass ?? null,
@@ -301,8 +311,10 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
         preferredTimeRaw: STR('e.g. subah / morning / raat'), preferredClassRaw: STR('e.g. AC / sleeper / CC'),
         trainRef, classRaw: STR('class as said, e.g. "CC", "AC", "sleeper"'),
         passengersCountRaw: STR('passenger count as said'), passengersDelta: { type: 'number' },
-        passengerChanges: { type: 'array', description: 'EVERY passenger detail the user gave this turn — incl. a bare answer ("31", "male", "lower") to context.bookingPreparation.nextToAsk, with that passengerIndex. Nothing is stored without this.', items: { type: 'object', properties: { passengerIndex: { type: 'number' }, changes: { type: 'object', properties: {
-          name: { type: 'string' }, age: { type: 'number' }, gender: { type: 'string' },
+        passengerChanges: { type: 'array', description: 'EVERY passenger detail the user gave this turn — incl. a bare answer ("31", "male", "lower") to context.bookingPreparation.nextToAsk, with that passengerIndex. Nothing is stored without this.', items: { type: 'object', properties: { passengerIndex: { type: 'number' },
+          userWords: { type: 'string', description: 'REQUIRED for berthPreference / foodPreference: the user\'s own words from THIS message that state or confirm that preference, copied exactly (e.g. "window", "haan", "koi preference nahi", "veg"). Without them the preference is not stored — never set a preference the user did not state.' },
+          changes: { type: 'object', properties: {
+          name: { type: 'string', description: 'English (Latin) letters only, exactly as the user spelled it — never transliterate a name written in another script yourself' }, age: { type: 'number' }, gender: { type: 'string' },
           berthPreference: { type: 'string', enum: ['NO_PREFERENCE', 'LOWER', 'MIDDLE', 'UPPER', 'SIDE_LOWER', 'SIDE_UPPER', 'SIDE_MIDDLE', 'WINDOW', 'CABIN', 'COUPE'], description: 'only a choice listed in context.bookingPreparation.passengerOptions.berth.options' },
           foodPreference: { type: 'string', enum: ['VEG', 'NON_VEG', 'NO_FOOD'], description: 'only when context.bookingPreparation.passengerOptions.food.status is OFFERED' } } } } } },
         correctionTarget: STR('origin|destination|date|passengers|train|class'), correctionValueRaw: STR('corrected value as said'),
@@ -335,7 +347,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
     ...(providerToolCatalog.enabled() ? { railwayProviders: providerToolCatalog.list().map(c => c.label) } : {})
   };
   const messages: any[] = [
-    { role: 'system', content: NATIVE_AGENT_SYSTEM_PROMPT },
+    // P42.1: the P42 Same Train Alternative guidance only when SAME_TRAIN_ALTERNATIVES_ENABLED is on (same flag as the tools)
+    { role: 'system', content: nativeAgentSystemPrompt(sameTrainAlternativesEnabledFromEnv()) },
     { role: 'system', content: `AUTHORITATIVE SESSION CONTEXT (backend; wins over the conversation):\n${clip(JSON.stringify(ctx), 9000)}` },
     ...conversationOf(input),
     { role: 'user', content: input.userText }
@@ -367,10 +380,12 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
             ...sourceLabelOf(c.name, r, (input.agentTranscript || []) as any),
             ...((r as any).sourceConflict ? { sourceConflict: (r as any).sourceConflict } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
-              : { error: { code: (r.error as any)?.code, message: clip(String((r.error as any)?.message || ''), 300), ...argumentDetails((r.error as any)?.details),
-                  ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)) } }) }
+              : { error: { code: (r.error as any)?.code, message: clip(factOnly(String((r.error as any)?.message || '')), 300), ...argumentDetails((r.error as any)?.details),
+                  ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)),
+                  // P42.1: structured missing info instead of a backend question (Muse phrases any follow-up)
+                  ...missingInfoOf((r.error as any)?.code, null, (r.error as any)?.details) } }) }
         : { tool: c.name, ok: false, outcome: 'STALE', error: { code: 'NOT_EXECUTED', message: 'Not executed (the session changed first) — decide again from the current context.', errorType: 'STALE', tool: c.name, reason: 'NOT_EXECUTED', retryable: false } };
-      messages.push({ role: 'tool', tool_call_id: c.callId, content: clip(JSON.stringify(content), MAX_TOOL_RESULT_CHARS) });
+      messages.push({ role: 'tool', tool_call_id: c.callId, content: clip(JSON.stringify(content), c.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? MAX_SAME_TRAIN_RESULT_CHARS : MAX_TOOL_RESULT_CHARS) });
     }
   }
   // Prompt 27: the backend stopped the chain — a structured stop reason; the next message must be the answer

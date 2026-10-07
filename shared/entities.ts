@@ -177,6 +177,8 @@ export interface BookingSession {
   /** P39.2: provider facilities fetched by the passenger form for `trainNumber` (no values beyond catering / pantry flags). */
   trainFacilities?: { trainNumber: string; catering: boolean | null; pantry: boolean | null; provider: string | null; dataSource: 'LIVE' | 'MOCK' | null };
   lastTimetable?: any;
+  /** Prompt 42: latest Same Train Alternative result (SameTrainAlternativesResult) — never a booking field. */
+  sameTrainAlternatives?: any;
 
   // ---- Multi-turn context hardening (Prompt 8) ----
   /** Structured pending interaction the backend is waiting for. Used to resolve

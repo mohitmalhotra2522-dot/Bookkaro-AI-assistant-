@@ -15,13 +15,15 @@ import {
   RailwayToolName, RAILWAY_TOOL_NAMES, FORBIDDEN_LLM_ACTIONS, type FreshnessPolicy
 } from '@shared/railway-tool-runtime';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
+import { SAME_TRAIN_TOOL_NAMES, type SameTrainToolName } from '@shared/same-train-alternatives';
 
-export type ToolCapability = 'SEARCH' | 'TRAIN_INFO' | 'TIMETABLE' | 'AVAILABILITY' | 'FARE' | 'LIVE_STATUS' | 'PNR_STATUS' | 'CANCELLED_TRAINS' | 'GENERAL_INFO' | 'WEB_RESEARCH';
+export type ToolCapability = 'SEARCH' | 'TRAIN_INFO' | 'TIMETABLE' | 'AVAILABILITY' | 'FARE' | 'LIVE_STATUS' | 'PNR_STATUS' | 'CANCELLED_TRAINS' | 'GENERAL_INFO' | 'WEB_RESEARCH'
+  | 'SAME_TRAIN_ALTERNATIVES' | 'SAME_TRAIN_PRESENTATION';
 /** Which existing backend component executes the tool (the LLM never picks a provider). */
-export type ProviderRoute = 'RailwaySearchOrchestrator' | 'RailwayToolService' | 'LiveTrainStatusService' | 'PnrStatusService' | 'WebResearchService' | 'NONE';
+export type ProviderRoute = 'RailwaySearchOrchestrator' | 'RailwayToolService' | 'LiveTrainStatusService' | 'PnrStatusService' | 'WebResearchService' | 'SameTrainAlternativeService' | 'NONE';
 
 export interface RailwayToolMetadata {
-  name: RailwayToolName;
+  name: RailwayToolName | SameTrainToolName;
   description: string;
   capability: ToolCapability;
   inputSchema: { fields: Record<string, ToolParam>; required: string[]; additionalProperties: false };
@@ -111,10 +113,33 @@ entries.push(Object.freeze({
   }) as RailwayToolMetadata);
 }
 
-export const RAILWAY_TOOL_REGISTRY: ReadonlyMap<RailwayToolName, RailwayToolMetadata> = new Map(entries.map(e => [e.name, e]));
+export const RAILWAY_TOOL_REGISTRY: ReadonlyMap<RailwayToolName, RailwayToolMetadata> = new Map(entries.map(e => [e.name as RailwayToolName, e]));
+
+/**
+ * Prompt 42 — composite tools (Same Train Alternative). A separate closed set next to the Prompt-17 enum (which stays
+ * unchanged): exact-name match only, enabled / LLM-callable only when the definition is registered
+ * (SAME_TRAIN_ALTERNATIVES_ENABLED). Allowed in every state except a locked booking execution.
+ */
+export const COMPOSITE_TOOL_REGISTRY: ReadonlyMap<SameTrainToolName, RailwayToolMetadata> = new Map(SAME_TRAIN_TOOL_NAMES.map(name => {
+  const d = def(name);
+  const meta: RailwayToolMetadata = Object.freeze({
+    name, description: d?.description || 'Same Train Alternative (disabled — not configured).',
+    capability: name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? 'SAME_TRAIN_ALTERNATIVES' as const : 'SAME_TRAIN_PRESENTATION' as const,
+    inputSchema: schemaOf(d), requiredFields: Object.freeze(schemaOf(d).required),
+    outputSchema: Object.freeze({ resultType: name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? 'SameTrainAlternativesResult' : 'SameTrainPresentation',
+      fields: Object.freeze(name === 'SEARCH_SAME_TRAIN_ALTERNATIVES'
+        ? ['alternativeSearchId', 'route{trainOrigin,trainTerminal,originSweep[],destinationExtension[]}', 'alternatives[]{alternativeId,ticketOrigin,ticketDestination,availability,verificationStatus,boardingRuleStatus,alightingRuleStatus,fare,evidence[]}', 'providers[]', 'status', 'errors[]']
+        : ['alternativeSearchId', 'bestMatchId', 'order[]']),
+      source: name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? 'RAILWAY_PROVIDER' as const : 'NONE' as const }),
+    freshnessPolicy: (name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? 'ALWAYS_FRESH' : 'NOT_APPLICABLE') as FreshnessPolicy,
+    allowedStates: QUOTE_STATES, providerRoute: name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? 'SameTrainAlternativeService' as const : 'NONE' as const,
+    enabled: !!d, llmCallable: !!d, implemented: !!d, dependsOnSelection: false
+  });
+  return [name, meta] as const;
+}));
 
 export type ToolNameResolution =
-  | { kind: 'TOOL'; name: RailwayToolName; meta: RailwayToolMetadata }
+  | { kind: 'TOOL'; name: RailwayToolName | SameTrainToolName; meta: RailwayToolMetadata }
   | { kind: 'FORBIDDEN'; name: string }
   | { kind: 'UNKNOWN'; name: string };
 
@@ -122,13 +147,15 @@ export type ToolNameResolution =
 export function resolveToolName(raw: unknown): ToolNameResolution {
   const name = typeof raw === 'string' ? raw : String(raw ?? '');
   if ((FORBIDDEN_LLM_ACTIONS as readonly string[]).includes(name.trim().toUpperCase())) return { kind: 'FORBIDDEN', name };
+  const composite = COMPOSITE_TOOL_REGISTRY.get(name as SameTrainToolName);
+  if (composite) return { kind: 'TOOL', name: name as SameTrainToolName, meta: composite };
   if (!(RAILWAY_TOOL_NAMES as readonly string[]).includes(name)) return { kind: 'UNKNOWN', name };
   const meta = RAILWAY_TOOL_REGISTRY.get(name as RailwayToolName)!;
   return { kind: 'TOOL', name: name as RailwayToolName, meta };
 }
 
 export function llmCallableTools(): RailwayToolMetadata[] {
-  return [...RAILWAY_TOOL_REGISTRY.values()].filter(m => m.enabled && m.llmCallable && m.implemented);
+  return [...RAILWAY_TOOL_REGISTRY.values(), ...COMPOSITE_TOOL_REGISTRY.values()].filter(m => m.enabled && m.llmCallable && m.implemented);
 }
 
 export function isStateAllowed(meta: RailwayToolMetadata, state: BookingState): boolean {

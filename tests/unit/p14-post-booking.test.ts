@@ -238,7 +238,7 @@ describe('G2 — BookingReferenceResolver: latest, train, station, pronoun, ambi
     expect(r.kind).toBe('AMBIGUOUS');
     if (r.kind === 'AMBIGUOUS') {
       expect(r.code).toBe('MULTIPLE_BOOKINGS_MATCHED');
-      expect(r.message).toBe('Do Delhi bookings mil rahi hain. Aap 14542 wali dekhna chahte ho ya 12014 wali?');
+      expect(r.message).toBe('Do Delhi bookings mil rahi hain. (14542 / 12014)');   // P42.1: the matching bookings (facts); the LLM asks
     }
     const followUp = R.resolve(recs, '12014 wali', { candidateIds: [id(a), id(b)] });
     expect(followUp.kind === 'RESOLVED' && followUp.record.bookingId).toBe(id(a));

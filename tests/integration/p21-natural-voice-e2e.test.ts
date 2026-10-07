@@ -20,6 +20,8 @@ import { createEngineVoiceAgent } from '../../server/voice/server-voice-agent';
 import { MockStreamingSTT } from '../../server/voice/stt/stt-provider';
 import { MockStreamingTTS } from '../../server/voice/tts/tts-provider';
 import { soundsRobotic, containsChainOfThought, splitSentences } from '../../shared/voice/voice-response-policy';
+import { nextPassengerDetail } from '../../server/booking/passenger-options';
+import { pendingConfirmationOf } from '../../server/ai/response/backend-question-policy';
 
 const meta = () => { const now = new Date().toISOString(); return { source: 'mock' as const, providerId: 'p21-spy', requestTimestamp: now, responseTimestamp: now, latencyMs: 1, cache: 'disabled' as const }; };
 
@@ -343,7 +345,7 @@ describe('P21 G3 — date policy, fresh data, re-validation (Parts 7, 37, 38)', 
     const f1 = await h.say('fare kitna hai');
     const f2 = await h.say('fare kitna hai');
     expect(rail.n.fare).toBe(2);
-    expect(f1.voice.speechText).toBe(`SL ka fare ₹${h.s().fare.perPassenger} per passenger hai. Kitne passengers hain?`);
+    expect(f1.voice.speechText).toBe(`SL ka fare ₹${h.s().fare.perPassenger} per passenger hai.`);   // P42.1: no backend-appended question
     expect(f2.voice.speechText).toBe(f1.voice.speechText);
   });
 });
@@ -379,7 +381,8 @@ describe('P21 G3 — passengers, review, confirmation (Parts 22–26)', () => {
     expect(r.voice.speechText).toMatch(/\bCC\b/);
     expect(r.voice.speechText).toMatch(/2 passengers/);
     expect(r.voice.speechText).toContain(`₹${total}`);
-    expect(r.voice.speechText).toMatch(/Confirm karna hai\?$/);
+    // P42.1 (Category B): the confirmation requirement is STRUCTURED and backend-verified; the wording is the LLM's
+    expect(pendingConfirmationOf(h.s(), false)).toEqual({ action: 'BOOKING_CONFIRMATION', confirmationRequired: true, confirmationStatus: 'PENDING' });
     expect(r.voice.speechText.length).toBeLessThan(r.responseMessage.length);
   });
 
@@ -409,11 +412,14 @@ describe('P21 G3 — parity, failures, fallback, recovery, security (Parts 21, 3
     expect(v.s().selectedTrain.number).toBe(t.s().selectedTrain.number);
     expect(Object.keys(rv).filter(k => k !== 'speech').sort()).toEqual(Object.keys(rt).filter(k => k !== 'speech').sort());
     // Prompt 22: assistantText = the grounded LLM wording in BOTH modes (responseMessage = authoritative backend reply)
-    expect(rt.voice).toMatchObject({ shouldSpeak: false, presentable: true, assistantText: 'Theek hai, 2 passengers. Pehle passenger ka naam?', state: rt.newState });
+    expect(rt.voice).toMatchObject({ shouldSpeak: false, presentable: true, state: rt.newState });
     expect(rv.voice).toMatchObject({ shouldSpeak: true, presentable: true, assistantText: rv.voice.speechText, state: rv.newState });
-    expect(rt.responseMessage).toBe('2 passengers ke details chahiye. Pehle passenger ka naam bataiye.');   // TEXT reply unchanged by P21
-    expect(rv.responseMessage).toBe('Pehle passenger ka naam?');                                           // existing P19 short voice reply
-    expect(rv.voice.speechText).toBe('Theek hai, 2 passengers. Pehle passenger ka naam?');                // natural wording → speech only
+    // P42.1: no backend-appended question in either mode — the next detail is STRUCTURED (same in TEXT and VOICE);
+    // whether / how to ask is the LLM's decision
+    expect(nextPassengerDetail(t.s())).toEqual({ passenger: 1, field: 'name' });
+    expect(nextPassengerDetail(v.s())).toEqual({ passenger: 1, field: 'name' });
+    for (const x of [rt.responseMessage, rv.responseMessage]) expect(String(x)).not.toMatch(/\?/);   // the backend reply never asks (the (mock) LLM wording may)
+    expect(rv.responseMessage).toBe(rt.responseMessage);                                                    // same backend reply
   });
 
   it('[20] provider failure: honest natural error + retry offer (read-only); retry is a fresh call with a grounded result', async () => {
@@ -467,7 +473,7 @@ describe('P21 G3 — parity, failures, fallback, recovery, security (Parts 21, 3
     const v2 = mkVoice(h);
     v2.agent.listen();
     const o = await v2.utter('CC');
-    expect(o!.speechText).toBe('CC theek hai. Kitne passengers hain?');
+    expect(o!.speechText).toBe('CC theek hai.');   // P42.1: the (mock) LLM wording, no backend question appended
     const t = await h.say('2 passengers', 'TEXT');
     expect(t.newState).toBe('COLLECTING_PASSENGER_DETAILS');
     expect(h.s().selectedTrain.number).toBe('12014');
