@@ -5,6 +5,10 @@ import { discoverSameTrainAlternative, selectSameTrainAlternative, type SameTrai
 import { evaluateSeatShortage, isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 
 /**
+ * P42.7 — ONE automatic same-train recovery section per train card ("Same train · pehle station se board karo"):
+ *   the backend searches all classes of the train over the bounded route matrix when the REQUESTED class (selected /
+ *   named; unknown → any class) shows a shortage; verified options are grouped by ticket pair with class chips
+ *   (AVL green, RAC amber; requested class first). Select = fresh recheck of that chip's own class, then apply.
  * P42.4 — AUTO "Same Train Alternative" under a waitlisted class chip (like an "alternate seat" hint).
  *   - asked only for a class whose OWN search status shows a shortage for this party; the backend re-checks that gate,
  *     enforces a per-list budget and picks the provider — the UI only asks when the card is on screen;
@@ -50,7 +54,7 @@ export function verifiedInRouteOrder(d: any): any[] {
 }
 
 export const SameTrainInline: React.FC<{
-  sessionId: string | null; trainNumber: string; travelClass: string; searchResultsVersion?: number; visible: boolean;
+  sessionId: string | null; trainNumber: string; travelClass?: string; searchResultsVersion?: number; visible: boolean;
   disabled?: boolean; onHandoff: (text: string) => void; onFallback?: () => void;
 }> = ({ sessionId, trainNumber, travelClass, searchResultsVersion, visible, disabled, onHandoff, onFallback }) => {
   const [state, setState] = useState<{ phase: 'idle' | 'loading' | 'done'; res?: SameTrainDiscoverResult }>({ phase: 'idle' });
@@ -58,21 +62,21 @@ export const SameTrainInline: React.FC<{
     if (!visible || !sessionId || typeof searchResultsVersion !== 'number' || state.phase !== 'idle') return;
     let live = true;
     setState({ phase: 'loading' });
-    discoverOnce(sessionId, trainNumber, travelClass, searchResultsVersion).then(res => { if (live) setState({ phase: 'done', res }); });
+    discoverOnce(sessionId, trainNumber, travelClass || '', searchResultsVersion).then(res => { if (live) setState({ phase: 'done', res }); });
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, sessionId, trainNumber, travelClass, searchResultsVersion]);
 
-  if (state.phase === 'loading') return <div className="bk-sti bk-sti--loading" role="status">{travelClass}: same train seats check ho rahe hain…</div>;
+  if (state.phase === 'loading') return <div className="bk-sti bk-sti--loading" role="status">Same train: pehle ke stations aur classes check ho rahe hain…</div>;
   if (state.phase !== 'done' || !state.res) return null;
   const res = state.res;
   if (!res.ok || !res.card) {
     return FALLBACK_CODES.has(res.code) && onFallback
       ? <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm bk-sti__fallback" onClick={onFallback} disabled={disabled}
-          aria-label={`Same train alternative for ${trainNumber} ${travelClass}`}>↗ {travelClass}: Same Train Alternative</button>
+          aria-label={`Same train alternative for ${trainNumber}${travelClass ? ` ${travelClass}` : ''}`}>↗ Same Train Alternative</button>
       : null;
   }
-  return <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={BFE_HEADING} classTag={travelClass} />;
+  return <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={BFE_HEADING} requestedClass={travelClass || res.card.travelClass} showTrain />;
 };
 
 /** P42.5 headings (Part 29): the earlier-boarding group is the BFE section; destination-only extensions are listed after it. */
@@ -127,57 +131,138 @@ export function groupSameTrainOptions(d: any): { earlier: any[]; further: any[] 
   return { earlier: both.filter(a => earlier.includes(a)), further: both.filter(a => further.includes(a)) };
 }
 
-/** Compact list of verified options (shared by the inline hint and the expanded chat card). Renders nothing if none. */
-export const SameTrainOptionList: React.FC<{ d: any; sessionId: string | null; disabled?: boolean; onHandoff: (text: string) => void; heading?: string; classTag?: string }> = ({ d, sessionId, disabled, onHandoff, heading, classTag }) => {
-  const { earlier, further } = groupSameTrainOptions(d);
-  if (!earlier.length && !further.length) return null;
+/** P42.7 — chip label from authoritative fields only: AVL n (exact provider count) / RAC n (position, never a seat). */
+export function recoveryChipLabel(a: any): string {
+  if (a?.availability === 'RAC') {
+    const m = String(a.availabilityStatusText || '').match(/RAC\s*0*(\d+)/i);
+    return m ? `RAC ${m[1]}` : 'RAC';
+  }
+  if (typeof a?.availableSeatCount === 'number') return `AVL ${a.availableSeatCount}`;
+  return a?.availabilityStatusText || 'AVL';
+}
+
+export interface RecoveryPairGroup {
+  key: string; earlier: boolean; ticketOrigin: string; ticketDestination: string; ticketOriginName?: string; ticketDestinationName?: string;
+  /** verified class options of this ticket pair — requested class first, then the backend's class order */
+  options: any[];
+}
+
+/**
+ * P42.7 Parts 18/20/34 — verified options of THIS train grouped by ticket pair with class chips. Earlier-boarding pairs
+ * (ticket origin ≠ requested origin) first, then destination-only extensions, in the backend's route order (no ranking).
+ * Dedup: earlier pairs by bookFrom, extension pairs by bookUpto (first pair kept — P42.5 rule); at most 15 class options.
+ */
+export function groupRecoveryByPair(d: any, requestedClass?: string | null): RecoveryPairGroup[] {
+  const train = String(d?.trainNumber || '');
+  const req = String(requestedClass || d?.travelClass || '').toUpperCase();
+  const opts = verifiedInRouteOrder(d).filter(a => canBookAvail(a) && (!train || a.trainNumber === undefined || String(a.trainNumber) === train));
+  const groups = new Map<string, RecoveryPairGroup>();
+  const pairOfStation = new Map<string, string>();
+  for (const a of opts) {
+    const earlier = a.ticketOrigin !== (a.requestedOrigin || d?.requestedOrigin);
+    const dedup = earlier ? `E|${a.ticketOrigin}` : `X|${a.ticketDestination}`;
+    const key = `${a.ticketOrigin}-${a.ticketDestination}`;
+    const owner = pairOfStation.get(dedup);
+    if (owner && owner !== key) continue;            // another pair already holds this bookFrom / bookUpto
+    pairOfStation.set(dedup, key);
+    let g = groups.get(key);
+    if (!g) { g = { key, earlier, ticketOrigin: a.ticketOrigin, ticketDestination: a.ticketDestination, ticketOriginName: a.ticketOriginName, ticketDestinationName: a.ticketDestinationName, options: [] }; groups.set(key, g); }
+    if (!g.options.some(o => String(o.travelClass) === String(a.travelClass))) g.options.push(a);
+  }
+  const all = [...groups.values()];
+  for (const g of all) g.options.sort((x, y) => Number(String(y.travelClass).toUpperCase() === req) - Number(String(x.travelClass).toUpperCase() === req));
+  const ordered = [...all.filter(g => g.earlier), ...all.filter(g => !g.earlier)];
+  let left = MAX_SAME_TRAIN_OPTIONS;
+  const out: RecoveryPairGroup[] = [];
+  for (const g of ordered) { if (left <= 0) break; const options = g.options.slice(0, left); left -= options.length; out.push({ ...g, options }); }
+  return out;
+}
+
+const shortDate = (iso?: string) => {
+  const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${Number(m[3])} ${months[Number(m[2]) - 1] || ''}`.trim();
+};
+
+/**
+ * Same-train recovery section (shared by the automatic section under a train card and the expanded chat card).
+ * Renders nothing when no verified option exists — never an empty section.
+ */
+export const SameTrainOptionList: React.FC<{ d: any; sessionId: string | null; disabled?: boolean; onHandoff: (text: string) => void; heading?: string; classTag?: string; requestedClass?: string | null; showTrain?: boolean }>
+  = ({ d, sessionId, disabled, onHandoff, heading, classTag, requestedClass, showTrain }) => {
+  const groups = groupRecoveryByPair(d, requestedClass || classTag || d?.travelClass);
+  if (!groups.length) return null;
+  const earlier = groups.filter(g => g.earlier);
+  const further = groups.filter(g => !g.earlier);
+  const pax = Number(d?.requestedPassengerCount ?? d?.passengersCount) || null;
   const head = (text: string) => (
-    <div className="bk-sti__head"><IconRoute size={13} /> {text}{classTag && <span className="bk-tag">{classTag}</span>}{d.isMock && <span className="bk-tag bk-tag--warn">Development data — not live</span>}</div>
+    <div className="bk-sti__head"><IconRoute size={13} /> {text}{d.isMock && <span className="bk-tag bk-tag--warn">Development data — not live</span>}</div>
   );
   return (
-    <div className="bk-sti" aria-label={heading || BFE_HEADING}>
-      {earlier.length > 0 && head(BFE_HEADING)}
-      {earlier.map(a => <InlineOption key={a.alternativeId} d={d} a={a} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
-      {further.length > 0 && head(EXTENSION_HEADING)}
-      {further.map(a => <InlineOption key={a.alternativeId} d={d} a={a} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
-    </div>
+    <section className="bk-sti" aria-label={heading || BFE_HEADING}>
+      {head(earlier.length > 0 ? BFE_HEADING : EXTENSION_HEADING)}
+      {showTrain !== false && (d.trainNumber || d.trainName) && (
+        <div className="bk-sti__train"><b>{d.trainNumber}</b>{d.trainName && <span> · {d.trainName}</span>}
+          {(d.date || pax) && <span className="bk-sti__meta">{[shortDate(d.date), pax ? `${pax} passenger${pax > 1 ? 's' : ''}` : ''].filter(Boolean).join(' · ')}</span>}</div>
+      )}
+      {earlier.map(g => <PairOption key={g.key} d={d} g={g} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
+      {earlier.length > 0 && further.length > 0 && head(EXTENSION_HEADING)}
+      {further.map(g => <PairOption key={g.key} d={d} g={g} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
+    </section>
   );
 };
 
-const InlineOption: React.FC<{ d: any; a: any; sessionId: string | null; disabled?: boolean; onHandoff: (t: string) => void }> = ({ d, a, sessionId, disabled, onHandoff }) => {
+const PairOption: React.FC<{ d: any; g: RecoveryPairGroup; sessionId: string | null; disabled?: boolean; onHandoff: (t: string) => void }> = ({ d, g, sessionId, disabled, onHandoff }) => {
+  const [active, setActive] = useState(0);
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const isRac = a.availability === 'RAC';
-  // RAC keeps its own tag (amber, "RAC n" — never called a seat); AVAILABLE is green with the provider's status text
-  const tag = a.availabilityStatusText || (isRac ? 'RAC' : 'Available');
+  const a = g.options[Math.min(active, g.options.length - 1)];
   const reqO = stn(d.requestedOrigin, d.requestedOriginName || nameOf(d, d.requestedOrigin));
   const reqD = stn(d.requestedDestination, d.requestedDestinationName || nameOf(d, d.requestedDestination));
+  const boardCode = a.boardingStation || a.ticketOrigin;
+  const boardStop = ((d?.route?.stations || []) as any[]).find(s => s.code === boardCode);
   const use = async (ack: boolean) => {
     if (!sessionId) return;
     setBusy(true); setMsg(null);
+    // the chosen chip's OWN class is what the backend rechecks and applies (alternativeId binds train / pair / class)
     const r = await selectSameTrainAlternative(sessionId, { alternativeSearchId: d.alternativeSearchId, alternativeId: a.alternativeId, acknowledgeUnverifiedRules: ack });
     setBusy(false); setConfirm(false);
     if (r.ok && r.handoffText) { setMsg({ ok: true, text: r.message }); onHandoff(r.handoffText); } else setMsg({ ok: false, text: r.message });
   };
+  const extras = extraClassChips(a).filter(c => !g.options.some(o => String(o.travelClass).toUpperCase() === c.code));
   return (
     <div className="bk-sti__opt">
       <div className="bk-sti__row">
-        <span className={`bk-tag bk-tag--${isRac ? 'warn' : 'good'}`}>{tag}</span>
-        <span className="bk-sti__pair"><b>BOOK</b> {stn(a.ticketOrigin, a.ticketOriginName)} → {stn(a.ticketDestination, a.ticketDestinationName)}</span>
+        <span className="bk-sti__pair"><b>BOOK</b> {stn(g.ticketOrigin, g.ticketOriginName)} → {stn(g.ticketDestination, g.ticketDestinationName)}</span>
         {a.fare?.status === 'PROVIDER' && (a.fare.total ?? a.fare.perPassenger) != null && <span className="bk-sti__fare">{inr(a.fare.total ?? a.fare.perPassenger)}</span>}
-        {extraClassChips(a).map(c => <span key={c.code} className="bk-tag">{c.code} · {c.status}</span>)}
+      </div>
+      <div className="bk-sti__board"><b>BOARD</b> {stn(boardCode, boardCode === g.ticketOrigin ? g.ticketOriginName : nameOf(d, boardCode))}
+        {boardStop?.departure && <span className="bk-sti__time">dep {boardStop.departure}</span>}</div>
+      <div className="bk-sti__chips" role="group" aria-label="Classes">
+        {g.options.map((o, i) => {
+          const rac = o.availability === 'RAC';
+          return (
+            <button key={o.alternativeId} type="button" className={`bk-sti__chip${i === active ? ' is-active' : ''}`} aria-pressed={i === active}
+              disabled={disabled || busy} onClick={() => { setActive(i); setConfirm(false); setMsg(null); }}
+              aria-label={`${o.travelClass} ${recoveryChipLabel(o)}`}>
+              <span className="bk-sti__cls">{o.travelClass}</span><span className={`bk-tag bk-tag--${rac ? 'warn' : 'good'}`}>{recoveryChipLabel(o)}</span>
+            </button>
+          );
+        })}
+        {extras.map(c => <span key={c.code} className="bk-tag">{c.code} · {c.status}</span>)}
         {!confirm && canBookAvail(a) && (
           <button type="button" className="bk-btn bk-btn--primary bk-btn--sm bk-sti__use" disabled={disabled || busy || !sessionId}
             onClick={() => (a.verificationStatus === 'PARTIALLY_VERIFIED' ? setConfirm(true) : use(false))}
-            aria-label={`Select ${a.ticketOrigin} to ${a.ticketDestination}`}>{busy ? 'Checking…' : 'Select'}</button>
+            aria-label={`Select ${a.travelClass} ${a.ticketOrigin} to ${a.ticketDestination}`}>{busy ? 'Checking…' : 'Select'}</button>
         )}
       </div>
       {!ruleOk(a.boardingRuleStatus) && <div className="bk-sti__note">{reqO} se boarding ka rule verify nahi hua</div>}
       {!ruleOk(a.alightingRuleStatus) && <div className="bk-sti__note">{reqD} par utarne ka rule verify nahi hua</div>}
       {confirm && (
         <div className="bk-sta-confirm" role="group" aria-label="Confirm unverified rule">
-          <p>Boarding / deboarding rule verify nahi hua. Ticket stations ({stn(a.ticketOrigin, a.ticketOriginName)} → {stn(a.ticketDestination, a.ticketDestinationName)}) se hi travel maan kar aage badhein?</p>
+          <p>Boarding / deboarding rule verify nahi hua. Ticket stations ({stn(a.ticketOrigin, a.ticketOriginName)} → {stn(a.ticketDestination, a.ticketDestinationName)}, {a.travelClass}) se hi travel maan kar aage badhein?</p>
           <div className="bk-train__actions">
             <button type="button" className="bk-btn bk-btn--primary bk-btn--sm" disabled={busy} onClick={() => use(true)}>{busy ? 'Checking…' : 'Haan, aage badhein'}</button>
             <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm" disabled={busy} onClick={() => setConfirm(false)}>Cancel</button>

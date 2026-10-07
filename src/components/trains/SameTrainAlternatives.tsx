@@ -70,7 +70,7 @@ export const SameTrainCard: React.FC<{ d: any; sessionId: string | null; disable
         </div>
       )}
       {/* P42.4: verified options are shown expanded (route order, or Muse's order when Muse presented) — Select on each */}
-      <SameTrainOptionList d={d} sessionId={sessionId} disabled={disabled || d.stale} onHandoff={onHandoff} />
+      <SameTrainOptionList d={d} sessionId={sessionId} disabled={disabled || d.stale} onHandoff={onHandoff} showTrain={false} />
       <div className="bk-train__actions">
         <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm" onClick={() => setOpen(true)}>Full details <IconArrowRight size={15} /></button>
         {d.fetchedAt || d.completedAt ? <span className="bk-meta">Fetched {formatClock(d.completedAt || d.fetchedAt)}</span> : null}

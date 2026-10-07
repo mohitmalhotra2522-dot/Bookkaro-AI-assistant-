@@ -202,6 +202,9 @@ export function isSameTrainResultStale(s: any, r: SameTrainAlternativesResult | 
   if (selTrain && selTrain !== r.trainNumber && selTrain !== (snap.selectedTrain || null)) return true;
   const selClass = s?.selectedClass ? String(s.selectedClass).toUpperCase() : null;
   if (selClass && selClass !== r.travelClass && selClass !== (snap.selectedClass || null)) return true;
+  // P42.7: the class the user named changed after the result (e.g. SL → 3A) → the recovery context is stale
+  const reqClass = s?.requestedClass ? String(s.requestedClass).toUpperCase() : null;
+  if (reqClass && snap.requestedClass && reqClass !== snap.requestedClass && reqClass !== r.travelClass) return true;
   return false;
 }
 

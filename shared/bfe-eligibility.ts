@@ -135,3 +135,26 @@ export function bfeEligibilityCurrent(e: BfeEligibility, now: BfeCurrentState): 
 export function bfeKey(turnId: unknown, trainNumber: unknown, classCode: unknown, date: unknown, journeyVersion: unknown): string {
   return [str(turnId), str(trainNumber), str(classCode).toUpperCase(), str(date), str(journeyVersion)].join('|');
 }
+
+/**
+ * P42.7 Part 12 — per-train recovery context for Muse (structured, facts only): eligibility is judged on the REQUESTED
+ * class of each train; another class being available never suppresses it. Muse decides whether to search / what to say.
+ */
+export interface RecoveryEligibilityView {
+  trainNumber: string;
+  requestedClass: string;
+  requestedOrigin: string | null;
+  requestedDestination: string | null;
+  passengers: number | null;
+  status: string | null;
+  confirmedSeats: number | null;
+  recoveryEligible: boolean;
+  reason: string | null;
+}
+export function recoveryEligibilityView(e: BfeEligibility): RecoveryEligibilityView {
+  return {
+    trainNumber: e.trainNumber, requestedClass: e.classCode, requestedOrigin: e.requestedOrigin ?? null, requestedDestination: e.requestedDestination ?? null,
+    passengers: e.passengers, status: e.status, confirmedSeats: e.confirmedSeats ?? null,
+    recoveryEligible: e.eligible, reason: e.eligible ? e.reason : (e.notEligibleReason ?? null)
+  };
+}

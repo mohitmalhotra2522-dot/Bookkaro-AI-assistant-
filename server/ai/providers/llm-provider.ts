@@ -19,6 +19,8 @@ export interface TurnToolResultView {
   seatCheck?: Record<string, unknown>;
   /** P42.5: structured BFE eligibility fact (CHECK_AVAILABILITY) — facts only, Muse decides */
   bfeEligibility?: Record<string, any>;
+  /** P42.7: per-train recovery eligibility on the requested class (SEARCH_TRAINS) — facts only, Muse decides */
+  recoveryEligibility?: Array<Record<string, any>>;
   data?: any;
   error?: { code: string; message: string; details?: any };
   /** Prompt 17: SUCCEEDED with zero items (e.g. no trains on the route) — NOT a failure. */

@@ -49,9 +49,10 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   const env = opts.env || process.env;
   if (!sameTrainAlternativesEnabledFromEnv(env)) return { ok: false, code: 'NOT_ENABLED' };
   const trainNumber = String(body.trainNumber ?? '').trim();
-  const travelClass = String(body.travelClass ?? '').trim().toUpperCase();
+  // P42.7: one discovery per TRAIN — travelClass is optional (legacy per-class callers still work)
+  const askedClass = String(body.travelClass ?? '').trim().toUpperCase();
   const version = Number(body.searchResultsVersion);
-  if (!/^\d{5}$/.test(trainNumber) || !/^[A-Z0-9]{1,4}$/.test(travelClass) || !Number.isFinite(version)) return { ok: false, code: 'INVALID_REQUEST' };
+  if (!/^\d{5}$/.test(trainNumber) || (askedClass && !/^[A-Z0-9]{1,4}$/.test(askedClass)) || !Number.isFinite(version)) return { ok: false, code: 'INVALID_REQUEST' };
   const s: any = state.getSession(sessionId);
   if (EXECUTION_LOCKED_STATES.has(s.bookingState)) return { ok: false, code: 'LOCKED' };
   // the request must belong to the list on screen AND that list must belong to the current journey
@@ -63,13 +64,28 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   }
   const row = ((sr.trains || []) as any[]).find(t => String(t?.trainNumber ?? t?.number) === trainNumber);
   if (!row) return { ok: false, code: 'TRAIN_NOT_DISPLAYED' };
-  const cls = ((row.classes || []) as any[]).find(c => String(c?.code ?? c).toUpperCase() === travelClass);
-  if (!cls) return { ok: false, code: 'CLASS_NOT_LISTED' };
+  const rowClasses = ((row.classes || []) as any[]).map(c => ({ code: String(c?.code ?? c).toUpperCase(), availability: c?.availability ?? null }))
+    .filter(c => /^[A-Z0-9]{1,4}$/.test(c.code));
   const pax = Number(s.passengersCount) > 0 ? Number(s.passengersCount) : 1;
   // only a MEANINGFUL shortage shown by the provider's own search status (RAC / UNKNOWN / sufficient → no search)
-  const shortage = evaluateSeatShortage({ status: cls?.availability ?? null, requestedPassengerCount: pax });
-  if (!shortage.shortage || !shortage.triggerReason) return { ok: false, code: 'NOT_NEEDED' };
-  if (shortage.triggerReason === 'TRAIN_CANCELLED') return { ok: false, code: 'NOT_NEEDED' };
+  const meaningful = (c: { availability: unknown }) => {
+    const a = evaluateSeatShortage({ status: c.availability ?? null, requestedPassengerCount: pax });
+    return a.shortage && a.triggerReason && a.triggerReason !== 'TRAIN_CANCELLED' ? a : null;
+  };
+  // P42.7 per-train eligibility on the REQUESTED class (selected class → the class the user named at search). Another class
+  // being available never suppresses it; requested-class seats sufficient → no automatic recovery. Requested class unknown
+  // → P42.4 behaviour: the train's first class (provider order) with a shortage seeds the all-class search.
+  const requested = String(s.selectedClass || s.requestedClass || '').toUpperCase() || null;
+  const seedCode = requested || askedClass || null;
+  let cls: { code: string; availability: unknown } | undefined;
+  if (seedCode) {
+    cls = rowClasses.find(c => c.code === seedCode);
+    if (!cls) return { ok: false, code: 'CLASS_NOT_LISTED' };
+  } else cls = rowClasses.find(c => meaningful(c));
+  const shortage = cls ? meaningful(cls) : null;
+  if (!cls || !shortage) return { ok: false, code: 'NOT_NEEDED' };
+  const travelClass = cls.code;
+  const classes = [travelClass, ...rowClasses.map(c => c.code).filter(c => c !== travelClass)];
 
   const key = `${sessionId}|${version}|${trainNumber}|${travelClass}|${pax}`;
   const running = inflight.get(key);
@@ -80,8 +96,9 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   // P42.5: Muse (or the BFE safety-net) already searched exactly this train / class / party for THIS list in the current
   // journey → show that same fresh result (no second provider fan-out for one list). Never an older list's result.
   const listAt = Date.parse(String(sr.retrievedAt || sr.searchMeta?.retrievedAt || ''));
+  // P42.7: only a result whose matrix covered every class of this train row (all-class) can stand in for the auto search
   const museResult = Number.isFinite(listAt) ? sameTrainResultsOf(s).find((r: any) => r && String(r.trainNumber) === trainNumber
-    && String(r.travelClass).toUpperCase() === travelClass && Number(r.requestedPassengerCount ?? r.passengersCount) === pax
+    && String(r.travelClass).toUpperCase() === travelClass && classes.every(c => (Array.isArray(r.classesChecked) ? r.classesChecked : [r.travelClass]).includes(c)) && Number(r.requestedPassengerCount ?? r.passengersCount) === pax
     && (!s.date || r.date === s.date) && (!s.origin || r.requestedOrigin === s.origin) && (!s.destination || r.requestedDestination === s.destination)
     && (r.contextSnapshot?.journeyVersion ?? null) === (s.journeyVersion ?? null) && Date.parse(String(r.completedAt || '')) >= listAt
     && !isSameTrainResultStale(s, r)) : undefined;
@@ -104,13 +121,14 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
     const sel: any = s.selectedTrain;
     const out = await runSameTrainSearch({
       sessionId, turnId: null, requestId: null, journeyVersion,
-      trainNumber, trainName: row.trainName || row.name, date: String(s.date || j.date), travelClass, passengersCount: pax,
+      trainNumber, trainName: row.trainName || row.name, date: String(s.date || j.date), travelClass, classes, passengersCount: pax,
       origin: String(s.origin || j.origin), destination: String(s.destination || j.destination), originName: s.originName, destinationName: s.destinationName,
       originSweep: true, destinationSweep: true, combinedPairs: 'NEVER', includeFare: false, webEvidence: false,
       // primary availability provider only (bounded cost); route from the resolved route provider — never a hidden failover
       providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [],
       triggerReason: shortage.triggerReason, triggerSource: 'AUTO_DISPLAY',
-      contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion }
+      contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion,
+        requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }
     } as any, opts.deps || liveSameTrainDeps(opts.tools as any, { isCurrent }));
     if (!isCurrent()) return { ok: false, code: 'RESULTS_STALE' };
     if (!out.ok) {
@@ -121,6 +139,8 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
     const cur: any = state.getSession(sessionId);
     cur.sameTrainAutoSets = [result, ...((cur.sameTrainAutoSets || []) as any[]).filter(x => x?.autoKey !== key)].slice(0, SAME_TRAIN_AUTO_SET_CAP);
     opts.log?.({ event: 'same_train_auto', ok: true, trainNumber, travelClass, pax, trigger: shortage.triggerReason, status: result.status,
+      requestedClassKnown: !!requested, recoveryEligible: true, recoveryReason: shortage.triggerReason, classesChecked: (result.classesChecked || []).join(','),
+      earlierStationsChecked: result.earlierStationsChecked ?? null, downstreamStationsChecked: result.downstreamStationsChecked ?? null,
       candidates: result.candidateCount ?? null, verified: (result.alternatives || []).filter((a: any) => !a.isRequestedPair && (a.availability === 'RAC' || a.availability === 'AVAILABLE') && (a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED')).length,
       budgetUsed: b.used + 1, budgetMax: max, latencyMs: Date.now() - t0 });
     return { ok: true, code: 'OK', result };

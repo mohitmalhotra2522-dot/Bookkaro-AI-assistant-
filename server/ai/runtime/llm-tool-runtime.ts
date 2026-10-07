@@ -25,7 +25,7 @@ import { factOnly, missingInfoOf } from '../response/backend-question-policy';
 import { searchSameTrainAlternatives, liveSameTrainDeps, resolveSameTrainProviders, findSameTrainResult } from '../../railway/same-train/same-train-service';
 import { seatCheckFromSearch, seatCheckFromAvailability, seatCheckView, SameTrainErrorClass, SAME_TRAIN_BUDGET_EXCEEDED } from '@shared/same-train-shortage';
 import { sameTrainSearchesPerTurn } from '@shared/same-train-alternatives';
-import { evaluateBfeEligibility, bfeEligibilityCurrent, bfeKey, type BfeEligibility, type BfeBinding } from '@shared/bfe-eligibility';
+import { evaluateBfeEligibility, bfeEligibilityCurrent, bfeKey, type BfeEligibility, type BfeBinding, recoveryEligibilityView } from '@shared/bfe-eligibility';
 import { MAX_TOOL_STEPS_PER_TURN as BFE_MAX_TOOL_STEPS } from '../tool-runtime/railway-tool-runtime';
 import { sameTrainLLMView } from '../../railway/same-train/same-train-view';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
@@ -245,7 +245,7 @@ const bfeLogEnabled = () => process.env.BFE_SAFETY_NET_LOG === '1' || (process.e
 
 export const BFE_SAFETY_NET_INSTRUCTION =
   'You answered without checking same-train earlier-boarding options although fresh availability of this turn shows a shortage for this party. '
-  + 'The backend ran the existing SEARCH_SAME_TRAIN_ALTERNATIVES tool for exactly that train / class / date (it chose, ranked, selected and applied nothing). '
+  + 'The backend ran the existing SEARCH_SAME_TRAIN_ALTERNATIVES tool once for exactly that train / date (requested class first, plus the other classes that train lists; it chose, ranked, selected and applied nothing). '
   + 'Now write your reply from ALL verified results of this turn. Mention same-train options only if verified ones exist (AVAILABLE for the whole party, or RAC — RAC stays RAC, never call it a confirmed seat); '
   + 'if none were verified or the search failed / was skipped, say so briefly and keep the original result. Never call an option best unless you rank it with PRESENT_SAME_TRAIN_ALTERNATIVES. '
   + 'In voice, do not read every option — summarise. Do not repeat this note to the user.';
@@ -791,12 +791,15 @@ export class BoundToolRuntime {
     const out = await searchSameTrainAlternatives({
       sessionId: s.sessionId, turnId: H.turnId ?? null, requestId: H.requestId ?? null, journeyVersion: s.journeyVersion ?? null,
       trainNumber: a.trainNumber, trainName, date: a.date, travelClass: a.travelClass, passengersCount: a.passengersCount,
+      // P42.7 all-class matrix (validated against the train's authoritative row) + explicit user override flag
+      classes: String(a.classes || a.travelClass || '').split(',').filter(Boolean), explicitUserRequest: a.explicitUserRequest === true,
       origin: a.origin, destination: a.destination, originName: s.origin === a.origin ? s.originName : undefined, destinationName: s.destination === a.destination ? s.destinationName : undefined,
       originSweep: a.originSweep !== false, destinationSweep: a.destinationSweep !== false, destinationExtensionStations: a.destinationExtensionStations,
       combinedPairs: a.combinedPairs, includeFare: !!a.includeFare, webEvidence: !!a.webEvidence,
       providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders,
       triggerReason: a.triggerReason ?? null, triggerSource: this.safetyNetCallIds.has(vt.callId) ? 'SAFETY_NET' : (a.triggerSource || 'NONE'),
-      contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion: s.journeyVersion ?? null }
+      contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion: s.journeyVersion ?? null,
+        requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }
     }, liveSameTrainDeps(this.tools as any, {
       isCurrent: () => (guard?.canApply ? guard.canApply() : true) && !H.isStale?.(),
       log: (event, fields) => H.emit?.('SAME_TRAIN_SEARCH' as any, { event, ...fields })
@@ -827,6 +830,8 @@ export class BoundToolRuntime {
       passengers: Number.isInteger(pax) && pax >= 1 ? pax : null,
       selectedTrain: sel ? (String(sel.number ?? sel.trainNumber ?? '') || null) : null,
       selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null,
+      // P42.7: the requested class — selected class, else the class the user named at search (no selection required)
+      requestedClass: (s.selectedClass ? String(s.selectedClass).toUpperCase() : s.requestedClass ? String(s.requestedClass).toUpperCase() : null) as string | null,
       origin: (s.origin ?? null) as string | null, destination: (s.destination ?? null) as string | null
     };
   }
@@ -845,7 +850,14 @@ export class BoundToolRuntime {
     if (vt.name === 'SEARCH_TRAINS') {
       const fact: BfeFact = { kind: 'SEARCH', binding, provider, data: d, date: d?.journey?.date ?? a.date ?? null, origin: a.origin ?? null, destination: a.destination ?? null };
       this.bfeFacts.push(fact);
-      return { view: {}, fact };
+      // P42.7 Part 12: per-train recovery context on the REQUESTED class (argument → selected → named earlier); unknown → none
+      const reqCls = String(a.requestedClass || now.requestedClass || '').toUpperCase();
+      if (!reqCls) return { view: {}, fact };
+      const rows = ((d?.trains || []) as any[]).slice(0, 25);
+      const recoveryEligibility = rows.map(t => String(t?.trainNumber ?? t?.number ?? '')).filter(Boolean)
+        .map(t => this.bfeEligibilityOf(fact, now.passengers, reqCls, t)).filter(e => e.status !== null || e.notEligibleReason !== 'PROVIDER_ERROR')
+        .map(recoveryEligibilityView);
+      return { view: recoveryEligibility.length ? { recoveryEligibility } as any : {}, fact };
     }
     const s: any = this.getSession();
     const trainNumber = String(d.trainNumber ?? a.trainNumber ?? '');
@@ -884,28 +896,51 @@ export class BoundToolRuntime {
     const t0 = Date.now();
     const now = this.bfeNow();
     // latest fact per train|class wins (a later re-check that shows seats cancels an earlier shortage)
-    const latest = new Map<string, { e: BfeEligibility; provider: string | null }>();
+    const latest = new Map<string, { e: BfeEligibility; provider: string | null; kind: BfeFact['kind'] }>();
     for (const f of this.bfeFacts) {
-      const es: BfeEligibility[] = f.kind === 'CHECK' ? [this.bfeEligibilityOf(f, now.passengers)]
-        // a search list: only the CURRENT train + class (the one the session now holds) — never every row
-        : now.selectedTrain && now.selectedClass ? [this.bfeEligibilityOf(f, now.passengers, now.selectedClass, now.selectedTrain)].filter(e => e.status) : [];
-      for (const e of es) latest.set(`${e.trainNumber}|${e.classCode}`, { e, provider: f.provider });
+      let es: BfeEligibility[] = [];
+      if (f.kind === 'CHECK') es = [this.bfeEligibilityOf(f, now.passengers)];
+      else if (now.requestedClass) {
+        // P42.7: a search list + the REQUESTED class — the selected train when there is one, else every listed row (per-train
+        // eligibility on the requested class only; another class being available never suppresses it)
+        const rows = ((f.data?.trains || []) as any[]).map(t => String(t?.trainNumber ?? t?.number ?? '')).filter(Boolean);
+        const trains = now.selectedTrain ? rows.filter(t => t === now.selectedTrain) : rows;
+        es = trains.map(t => this.bfeEligibilityOf(f, now.passengers, now.requestedClass!, t)).filter(e => e.status);
+      }
+      for (const e of es) latest.set(`${e.trainNumber}|${e.classCode}`, { e, provider: f.provider, kind: f.kind });
     }
-    const eligible = [...latest.values()].filter(({ e }) => e.eligible && bfeEligibilityCurrent(e, now).current);
-    if (!eligible.length) return {};
-    // Muse already asked for this train + class in this turn (executed, failed or rejected) → no duplicate call
-    const requested = new Set(steps.filter(st => st.toolCall?.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES')
-      .map(st => { const a: any = st.validatedArguments || st.toolCall?.arguments || {}; return `${String(a.trainNumber ?? '')}|${String(a.travelClass ?? now.selectedClass ?? '').toUpperCase()}`; }));
+    const eligibleAll = [...latest.values()].filter(({ e }) => e.eligible && bfeEligibilityCurrent(e, now).current);
+    if (!eligibleAll.length) return {};
+    // P42.7: one all-class recovery search covers every class of a train → one candidate per train (first fact kept)
+    const byTrain = new Map<string, { e: BfeEligibility; provider: string | null; kind: BfeFact['kind'] }>();
+    for (const c of eligibleAll) if (!byTrain.has(c.e.trainNumber)) byTrain.set(c.e.trainNumber, c);
+    const eligible = [...byTrain.values()];
+    // Muse already asked for this train (its matrix covered this class) in this turn — executed, failed or rejected → no duplicate
+    const requested = new Set<string>();
+    for (const st of steps.filter(x => x.toolCall?.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES')) {
+      const a: any = st.validatedArguments || st.toolCall?.arguments || {};
+      const t = String(a.trainNumber ?? '');
+      const cls = String(a.classes || a.travelClass || now.requestedClass || '').toUpperCase().split(',').filter(Boolean);
+      // a validated call covers the classes of its matrix; a rejected / unvalidated call still counts for its train (no retry loop)
+      for (const c of eligibleAll) if (c.e.trainNumber === t && (!st.validatedArguments || cls.length === 0 || cls.includes(c.e.classCode))) requested.add(t);
+    }
     const log = (e: BfeEligibility, f: Partial<BfeSafetyNetLog>) => this.logBfe({
       event: 'bfe_safety_net', sessionId: now.sessionId, turnId: now.turnId, journeyVersion: now.journeyVersion, trainNumber: e.trainNumber, classCode: e.classCode,
       date: e.date ?? now.date, passengerCount: now.passengers, bfeEligible: e.eligible, eligibilityReason: e.reason, museRequestedBfe: false, safetyNetTriggered: false,
       skippedReason: null, toolExecutionId: null, bfeResultsCount: 0, verifiedResultsCount: 0, staleResultCount: 0, latencyMs: Date.now() - t0, ...f });
-    const pending: Array<{ e: BfeEligibility; provider: string | null }> = [];
+    let pending: Array<{ e: BfeEligibility; provider: string | null; kind: BfeFact['kind'] }> = [];
     for (const c of eligible) {
-      if (requested.has(`${c.e.trainNumber}|${c.e.classCode}`)) log(c.e, { museRequestedBfe: true });
+      if (requested.has(c.e.trainNumber)) log(c.e, { museRequestedBfe: true });
       else pending.push(c);
     }
     if (!pending.length) return {};
+    // P42.7: the backend never chooses between trains — several eligible rows and no selected train → no safety-net call
+    // (the BookKaro list shows an automatic same-train recovery section under every eligible train card instead)
+    if (pending.length > 1 && !now.selectedTrain) {
+      const checked = pending.filter(c => c.kind === 'CHECK');      // trains Muse itself checked this turn
+      if (checked.length !== 1) { for (const c of pending) log(c.e, { skippedReason: 'MULTIPLE_ELIGIBLE_TRAINS' }); return {}; }
+      pending = checked;
+    }
     // Muse must present any safety-net result — without an LLM round left, nothing runs (Muse's answer stands)
     if (!llmRoundLeft) { for (const c of pending) log(c.e, { skippedReason: 'NO_LLM_ROUND' }); return {}; }
     const view = (e: BfeEligibility) => ({ trainNumber: e.trainNumber, ...(e.trainName ? { trainName: e.trainName } : {}), date: e.date, classCode: e.classCode,
@@ -913,7 +948,8 @@ export class BoundToolRuntime {
       ...(e.confirmedSeats !== undefined ? { confirmedSeats: e.confirmedSeats } : {}), status: e.status });
     const skipView = (e: BfeEligibility) => ({ ...view(e), status: 'BFE_SKIPPED_TOOL_BUDGET', availabilityStatus: e.status });
     const used = this.sameTrainBudget.turn === now.turnId ? this.sameTrainBudget.used : 0;
-    const room = Math.max(0, Math.min(sameTrainSearchesPerTurn() - used, BFE_MAX_TOOL_STEPS - this.turn.callsUsed));
+    // P42.7 Part 15: the safety-net invokes the tool ONCE per turn at most (still inside the normal budgets)
+    const room = Math.max(0, Math.min(1, sameTrainSearchesPerTurn() - used, BFE_MAX_TOOL_STEPS - this.turn.callsUsed));
     const run = pending.slice(0, room);
     const skipped = pending.slice(room);
     for (const c of skipped) log(c.e, { skippedReason: 'BFE_SKIPPED_TOOL_BUDGET' });
@@ -998,7 +1034,13 @@ export class BoundToolRuntime {
       alternativeTriggered: true, triggerReason: vt.arguments.triggerReason ?? null, triggerSource: this.safetyNetCallIds.has(vt.callId) ? 'SAFETY_NET' : (vt.arguments.triggerSource ?? 'NONE'),
       provider: String(vt.arguments.providers || ''), fresh: !!d?.fresh, latencyMs,
       resultCount: d ? (d.alternatives || []).length : 0, verifiedAlternativeCount: d?.verifiedAlternativeCount ?? 0,
-      outcome: d?.outcome ?? null, errorCode: r.success ? null : (r.error?.code ?? null)
+      outcome: d?.outcome ?? null, errorCode: r.success ? null : (r.error?.code ?? null),
+      // P42.7 metadata (no PII): recovery eligibility of the requested pair + matrix coverage
+      recoveryEligible: p0 ? !!p0.shortage : null, recoveryReason: p0?.triggerReason ?? null,
+      classesChecked: Array.isArray(d?.classesChecked) ? d.classesChecked.join(',') : null,
+      earlierStationsChecked: d?.earlierStationsChecked ?? null, downstreamStationsChecked: d?.downstreamStationsChecked ?? null,
+      safetyNetUsed: this.safetyNetCallIds.has(vt.callId), explicitUserRequest: vt.arguments.explicitUserRequest === true,
+      staleRejected: !r.success && /STALE/.test(String(r.error?.code || ''))
     });
   }
 
@@ -1201,6 +1243,7 @@ export class BoundToolRuntime {
         };
         if (typeof vt.arguments.passengersCount === 'number') patch.passengersCount = vt.arguments.passengersCount;
         if (vt.arguments.preferredClass) patch.preferredClass = vt.arguments.preferredClass;
+        if (vt.arguments.requestedClass) patch.requestedClass = vt.arguments.requestedClass;   // P42.7 (validated class code)
         if (vt.arguments.preferredTime) patch.preferredTime = vt.arguments.preferredTime;
         this.commitSession(patch);
         H.emit?.('SEARCH_COMPLETED', { origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date, count: trains.length, searchResultsVersion: version, resultId });

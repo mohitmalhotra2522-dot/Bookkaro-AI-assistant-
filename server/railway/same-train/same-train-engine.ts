@@ -18,7 +18,7 @@ import {
   type AvailabilityCategory, type CandidatePair, type CandidatePriority, type CombinedAvailability, type EvidenceLevel,
   type ProviderEvidence, type RouteStation, type RuleStatus, type SameTrainAlternative, type SameTrainAlternativesResult,
   type SameTrainErrorCode, type SameTrainLimits, type VerificationStatus, type WebRouteEvidence,
-  SameTrainErrorCode as E, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_DEFAULT_LIMITS, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX,
+  SameTrainErrorCode as E, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_DEFAULT_LIMITS, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX, MAX_EARLIER_STATIONS, MAX_AVAILABILITY_CHECKS,
   sameTrainJourneyKeyString
 } from '@shared/same-train-alternatives';
 import {
@@ -37,12 +37,13 @@ export function sameTrainLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Sa
   const D = SAME_TRAIN_DEFAULT_LIMITS;
   return {
     maxCandidatePairs: envNum(env, 'SAME_TRAIN_MAX_CANDIDATE_PAIRS', D.maxCandidatePairs, 1, 60),
-    maxOriginSweepStations: envNum(env, 'SAME_TRAIN_MAX_ORIGIN_SWEEP', D.maxOriginSweepStations, 0, 30),
+    maxOriginSweepStations: envNum(env, 'SAME_TRAIN_MAX_ORIGIN_SWEEP', D.maxOriginSweepStations, 0, MAX_EARLIER_STATIONS),
     maxDestinationSweep: envNum(env, 'SAME_TRAIN_MAX_DESTINATION_SWEEP', D.maxDestinationSweep, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX),
     maxParallel: envNum(env, 'SAME_TRAIN_MAX_PARALLEL', D.maxParallel, 1, 12),
     perCallTimeoutMs: envNum(env, 'SAME_TRAIN_CALL_TIMEOUT_MS', D.perCallTimeoutMs, 500, 30000),
     totalTimeoutMs: envNum(env, 'SAME_TRAIN_TOTAL_TIMEOUT_MS', D.totalTimeoutMs, 1000, 90000),
-    maxWebChecks: envNum(env, 'SAME_TRAIN_MAX_WEB_CHECKS', D.maxWebChecks, 0, 20)
+    maxWebChecks: envNum(env, 'SAME_TRAIN_MAX_WEB_CHECKS', D.maxWebChecks, 0, 20),
+    maxAvailabilityChecks: envNum(env, 'SAME_TRAIN_MAX_AVAILABILITY_CHECKS', D.maxAvailabilityChecks ?? 120, 1, MAX_AVAILABILITY_CHECKS)
   };
 }
 
@@ -122,7 +123,7 @@ export function planCandidates(stations: RouteStation[], duplicates: Set<string>
 
   // origin sweep: train origin … requested origin (inclusive of the requested origin = P0), bounded, never a duplicate station
   const originAlternatives = input.originSweep
-    ? stations.slice(Math.max(0, oi - limits.maxOriginSweepStations), oi).filter(s => !duplicates.has(s.code))
+    ? stations.slice(Math.max(0, oi - Math.min(MAX_EARLIER_STATIONS, Math.max(0, limits.maxOriginSweepStations))), oi).filter(s => !duplicates.has(s.code))
     : [];
   // destination: requested destination == terminal → no sweep; else extend downstream 5..7 (never past the terminal)
   let destinationSweep: CandidatePlan['destinationSweep'];
@@ -132,7 +133,7 @@ export function planCandidates(stations: RouteStation[], duplicates: Set<string>
   else {
     destinationSweep = 'EXTENSION';
     const raw = Number(input.destinationExtensionStations);
-    const n = Number.isFinite(raw) && raw > 0 ? Math.min(DESTINATION_EXTENSION_MAX, Math.max(DESTINATION_EXTENSION_MIN, Math.round(raw))) : limits.maxDestinationSweep;
+    const n = Number.isFinite(raw) && raw > 0 ? Math.min(DESTINATION_EXTENSION_MAX, Math.max(DESTINATION_EXTENSION_MIN, Math.round(raw))) : Math.min(DESTINATION_EXTENSION_MAX, limits.maxDestinationSweep);
     destinationExtension = stations.slice(di + 1, Math.min(terminal, di + n) + 1).filter(s => !duplicates.has(s.code));
   }
 
@@ -329,7 +330,21 @@ export interface SameTrainSearchRequest {
   /** P42.2 (optional, recorded only): why this search ran, the tool execution id and the session selection at call time */
   triggerReason?: ShortageTriggerReason | null; triggerSource?: 'SESSION_EVIDENCE' | 'MUSE' | 'AUTO_DISPLAY' | 'SAFETY_NET' | 'NONE';
   toolExecutionId?: string | null;
-  contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null };
+  contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null; requestedClass?: string | null };
+  /**
+   * P42.7 all-class matrix: every class to check, from the train's authoritative search row (never invented). The requested
+   * class (travelClass) is always checked first; absent → travelClass only (pre-P42.7 behaviour).
+   */
+  classes?: string[];
+  explicitUserRequest?: boolean;
+}
+
+/** P42.7: requested class first, then the other authoritative classes in provider order (deduped, codes only). */
+export function matrixClasses(travelClass: string, classes?: string[]): string[] {
+  const req = String(travelClass || '').toUpperCase();
+  const out = [req];
+  for (const c of classes || []) { const k = String(c || '').toUpperCase(); if (/^[A-Z0-9]{1,4}$/.test(k) && !out.includes(k)) out.push(k); }
+  return out;
 }
 
 export type SameTrainRunOutcome =
@@ -365,11 +380,31 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const routeFetchedAt = new Date(now()).toISOString();
 
   // 2) fresh provider calls per candidate × provider (bounded per provider)
+  // P42.7: evidence is keyed per (pair × class); the requested class is searched over the whole window first, then the other
+  // authoritative classes in route order — deterministic SEARCH order bounded by maxAvailabilityChecks (never a ranking)
+  const classes = matrixClasses(req.travelClass, req.classes);
+  const requestedClass = classes[0];
   const evidenceByPair = new Map<string, ProviderEvidence[]>();
+  const ek = (pairId: string, cls: string) => `${pairId}|${cls}`;
+  const checkCap = Math.max(1, L.maxAvailabilityChecks ?? Number.MAX_SAFE_INTEGER);
+  let checksUsed = 0;
+  let checksTruncated = false;
+  const checkedUnits: { pair: CandidatePair; cls: string }[] = [];
   let skippedStale = false;
   const runPhase = async (pairs: CandidatePair[]) => {
-    await Promise.all(req.providers.map(provider => mapLimit(pairs, L.maxParallel, async pair => {
-      const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: req.travelClass, date: req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
+    const units: { pair: CandidatePair; cls: string }[] = [];
+    for (const cls of classes) for (const pair of pairs) {
+      // the requested station pair is only meaningful for the requested class (other classes' direct status is the search row)
+      if (pair.priority === 'P0' && cls !== requestedClass) continue;
+      units.push({ pair, cls });
+    }
+    const room = Math.max(0, checkCap - checksUsed);
+    if (units.length > room) checksTruncated = true;
+    const run = units.slice(0, room);
+    checksUsed += run.length;
+    checkedUnits.push(...run);
+    await Promise.all(req.providers.map(provider => mapLimit(run, L.maxParallel, async ({ pair, cls }) => {
+      const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: cls, date: req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
       const base = { provider: provider.id, ...(provider.label ? { providerLabel: provider.label } : {}), level: provider.level,
         requestId: req.requestId || alternativeSearchId, toolExecutionId: `${alternativeSearchId}:${provider.id}:${pair.pairId}`,
         trainNumber: q.trainNumber, ticketOrigin: q.origin, ticketDestination: q.destination, travelClass: q.travelClass, date: q.date, passengersCount: q.passengersCount };
@@ -389,15 +424,16 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
           else ev.fareOutcome = fa.timeout ? 'TIMEOUT' : 'FAILED';
         }
       }
-      const list = evidenceByPair.get(pair.pairId) || [];
+      const list = evidenceByPair.get(ek(pair.pairId, cls)) || [];
       list.push(ev);
-      evidenceByPair.set(pair.pairId, list);
+      evidenceByPair.set(ek(pair.pairId, cls), list);
     })));
   };
   await runPhase(plan.phase1);
   const policy = req.combinedPairs || 'AUTO';
   // P42.2: an AVAILABLE pair with fewer seats than passengers is not "good" (combined pairs may still help the party)
-  const goodCategory = (pairs: CandidatePair[]) => pairs.some(p => (evidenceByPair.get(p.pairId) || []).some(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS'
+  // P42.7: judged on the REQUESTED class only (another class being available never decides the requested-class search)
+  const goodCategory = (pairs: CandidatePair[]) => pairs.some(p => (evidenceByPair.get(ek(p.pairId, requestedClass)) || []).some(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS'
     && (e.availability?.category === 'RAC' || (e.availability?.category === 'AVAILABLE' && evaluateSeatShortage({ status: e.availability.status, requestedPassengerCount: req.passengersCount }).sufficiency !== 'INSUFFICIENT'))));
   const runCombined = plan.phase2.length > 0 && (policy === 'ALWAYS' || (policy === 'AUTO' && !goodCategory(plan.phase1)));
   if (runCombined) await runPhase(plan.phase2);
@@ -430,28 +466,31 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   // 4) rules + merge (dedup by train + origin + destination + class + date)
   const names = new Map<string, string | undefined>(plan.route.map(s => [s.code, s.name]));
   const destIdx = plan.destinationIndex;
-  const ctx: MergeContext = { trainNumber: req.trainNumber, trainName: req.trainName, date: req.date, travelClass: req.travelClass, passengersCount: req.passengersCount,
+  const ctx: MergeContext = { trainNumber: req.trainNumber, trainName: req.trainName, date: req.date, travelClass: requestedClass, passengersCount: req.passengersCount,
     requestedOrigin: plan.route[plan.originIndex].code, requestedDestination: plan.route[destIdx].code, names, includeFare: req.includeFare };
-  const ruleOf = async (kind: 'BOARDING' | 'ALIGHTING', ticketStation: string, travelStation: string): Promise<RuleStatus> => {
+  const ruleOf = async (kind: 'BOARDING' | 'ALIGHTING', ticketStation: string, travelStation: string, travelClass: string): Promise<RuleStatus> => {
     if (ticketStation === travelStation) return 'NOT_REQUIRED';
     if (!deps.ruleEvidence) return 'UNVERIFIED';
-    try { return (await deps.ruleEvidence({ kind, trainNumber: req.trainNumber, ticketStation, travelStation, travelClass: req.travelClass })) === 'VERIFIED' ? 'VERIFIED' : 'UNVERIFIED'; }
+    try { return (await deps.ruleEvidence({ kind, trainNumber: req.trainNumber, ticketStation, travelStation, travelClass })) === 'VERIFIED' ? 'VERIFIED' : 'UNVERIFIED'; }
     catch { return 'UNVERIFIED'; }
   };
   const merged = new Map<string, Omit<SameTrainAlternative, 'alternativeId'>>();
   const fetchedAt = new Date(now()).toISOString();
-  for (const p of pairs) {
-    const key = [req.trainNumber, p.ticketOrigin, p.ticketDestination, req.travelClass, req.date].join('|');
+  // one alternative per (pair × class) that was actually checked — each carries its OWN travelClass (dedup: train + pair + class + date)
+  for (const { pair: p, cls } of checkedUnits) {
+    const key = [req.trainNumber, p.ticketOrigin, p.ticketDestination, cls, req.date].join('|');
     const prev = merged.get(key);
-    const ev = [...(prev?.evidence || []), ...(evidenceByPair.get(p.pairId) || [])];
-    const rules = { boarding: await ruleOf('BOARDING', p.ticketOrigin, ctx.requestedOrigin), alighting: await ruleOf('ALIGHTING', p.ticketDestination, ctx.requestedDestination) };
-    const m = mergeCandidate(p, ev, webByPair.get(p.pairId) || [], rules, ctx, fetchedAt);
+    const ev = [...(prev?.evidence || []), ...(evidenceByPair.get(ek(p.pairId, cls)) || [])];
+    const rules = { boarding: await ruleOf('BOARDING', p.ticketOrigin, ctx.requestedOrigin, cls), alighting: await ruleOf('ALIGHTING', p.ticketDestination, ctx.requestedDestination, cls) };
+    const m = mergeCandidate(p, ev, webByPair.get(p.pairId) || [], rules, { ...ctx, travelClass: cls }, fetchedAt);
     m.extensionStations = Math.max(0, p.destinationIndex - destIdx);
     merged.set(key, m);
   }
   const all = [...merged.values()];
+  const classPos = (c: string) => { const i = classes.indexOf(c); return i < 0 ? classes.length : i; };
+  // neutral order: requested pair, then candidate kind + route order, then the class order of the train row (requested first)
   const visible = all.filter(a => a.verificationStatus !== 'INVALID')
-    .sort((a, b) => Number(b.isRequestedPair) - Number(a.isRequestedPair) || a.priority.localeCompare(b.priority) || routePos(plan, a) - routePos(plan, b));
+    .sort((a, b) => Number(b.isRequestedPair) - Number(a.isRequestedPair) || a.priority.localeCompare(b.priority) || routePos(plan, a) - routePos(plan, b) || classPos(a.travelClass) - classPos(b.travelClass));
   const alternatives: SameTrainAlternative[] = visible.map((a, i) => ({ alternativeId: `A${i + 1}`, ...a }));
 
   // 5) provider coverage + overall status
@@ -466,6 +505,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const anySuccess = apiEv.some(e => e.outcome === 'SUCCESS');
   const completedAt = new Date(now()).toISOString();
   const latencyMs = now() - t0;
+  const earlierStationsChecked = plan.originAlternatives.length;
+  const downstreamStationsChecked = plan.destinationExtension.length;
   deps.log?.('same_train_search', { alternativeSearchId, providers: req.providers.map(p => p.id).join(','), candidateCount: pairs.length,
     resultCount: alternatives.length, succeeded: apiEv.filter(e => e.outcome === 'SUCCESS').length, timeouts: apiEv.filter(e => e.outcome === 'TIMEOUT').length, latencyMs });
   if (skippedStale || !current()) return { ok: false, code: E.STALE_RESULT, errorClass: SameTrainErrorClass.STALE, message: 'Journey badal gayi — yeh alternative result ab purana hai.' };
@@ -483,13 +524,13 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const verifiedAlternativeCount = alternatives.filter(isVerifiedSameTrainAlternative).length;
   const foundAlternative = verifiedAlternativeCount > 0;
   if (!foundAlternative) errors.push(E.NOT_FOUND);
-  const p0 = alternatives.find(a => a.isRequestedPair);
+  const p0 = alternatives.find(a => a.isRequestedPair && a.travelClass === requestedClass);
   const requestedPairAssessment = p0 ? evaluateSeatShortage({ status: p0.availability === 'CONFLICTING' ? undefined : p0.availabilityStatusText, requestedPassengerCount: req.passengersCount }) : null;
-  const journeyKey = sameTrainJourneyKeyString({ trainNumber: req.trainNumber, date: req.date, travelClass: req.travelClass, origin: ctx.requestedOrigin, destination: ctx.requestedDestination, passengersCount: req.passengersCount });
+  const journeyKey = sameTrainJourneyKeyString({ trainNumber: req.trainNumber, date: req.date, travelClass: requestedClass, origin: ctx.requestedOrigin, destination: ctx.requestedDestination, passengersCount: req.passengersCount });
   const result: SameTrainAlternativesResult = {
     kind: 'SAME_TRAIN_ALTERNATIVES', alternativeSearchId, resultSetId: `sts_${shortId()}`,
     sessionId: req.sessionId, turnId: req.turnId, requestId: req.requestId, journeyVersion: req.journeyVersion, journeyKey,
-    trainNumber: req.trainNumber, ...(req.trainName ? { trainName: req.trainName } : {}), date: req.date, travelClass: req.travelClass, passengersCount: req.passengersCount,
+    trainNumber: req.trainNumber, ...(req.trainName ? { trainName: req.trainName } : {}), date: req.date, travelClass: requestedClass, passengersCount: req.passengersCount,
     requestedOrigin: ctx.requestedOrigin, requestedOriginName: req.originName || names.get(ctx.requestedOrigin),
     requestedDestination: ctx.requestedDestination, requestedDestinationName: req.destinationName || names.get(ctx.requestedDestination),
     route: { provider: req.routeProvider.id, fetchedAt: routeFetchedAt, trainOrigin: plan.route[0].code, trainTerminal: plan.route[plan.route.length - 1].code,
@@ -507,7 +548,9 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     requestedPairAssessment,
     outcome: foundAlternative ? SameTrainOutcome.FOUND : SameTrainOutcome.NONE,
     verifiedAlternativeCount,
-    searchComplete: !plan.truncated && !anyFailure,
+    searchComplete: !plan.truncated && !anyFailure && !checksTruncated,
+    classesChecked: classes, earlierStationsChecked, downstreamStationsChecked, availabilityChecks: checksUsed, checksTruncated,
+    ...(req.explicitUserRequest ? { explicitUserRequest: true } : {}),
     toolExecutionId: req.toolExecutionId ?? null,
     ...(req.contextSnapshot ? { contextSnapshot: req.contextSnapshot } : {})
   };

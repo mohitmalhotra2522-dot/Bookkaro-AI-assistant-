@@ -17,6 +17,7 @@
  */
 
 import type { NormalizedAvailabilityState, SeatSufficiency, ShortageTriggerReason, SeatShortageAssessment, SameTrainOutcome } from './same-train-shortage';
+import { isVerifiedSameTrainAlternative } from './same-train-shortage';
 
 export const SAME_TRAIN_ALTERNATIVES_TOOL = 'SEARCH_SAME_TRAIN_ALTERNATIVES' as const;
 export const PRESENT_SAME_TRAIN_ALTERNATIVES_TOOL = 'PRESENT_SAME_TRAIN_ALTERNATIVES' as const;
@@ -226,7 +227,60 @@ export interface SameTrainAlternativesResult {
   searchComplete?: boolean;
   toolExecutionId?: string | null;
   /** session selection at creation: a result is stale only when train / class changed AFTER it was produced */
-  contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null };
+  contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null; requestedClass?: string | null };
+  /** P42.7 all-class route matrix coverage (metadata; route / provider order, never a ranking) */
+  classesChecked?: string[];
+  earlierStationsChecked?: number;
+  downstreamStationsChecked?: number;
+  availabilityChecks?: number;
+  checksTruncated?: boolean;
+  /** P42.7: the user explicitly asked for more options even though the requested class had enough seats */
+  explicitUserRequest?: boolean;
+}
+
+/**
+ * P42.7 Part 28 — SameTrainRecoveryResult: the flat, per-(ticket pair × class) view of one verified recovery option.
+ * A pure projection of the stored SAME_TRAIN_ALTERNATIVES result (no new fact, no ranking — route / class order kept).
+ */
+export interface SameTrainRecoveryResult {
+  resultId: string;               // `${alternativeSearchId}:${alternativeId}`
+  alternativeSearchId: string;
+  alternativeId: string;
+  trainNumber: string;
+  trainName?: string;
+  date: string;
+  requestedOrigin: string;
+  requestedDestination: string;
+  ticketOrigin: string;           // bookFrom
+  ticketDestination: string;      // bookUpto
+  boardAt: string;                // boarding station (ticket origin unless a VERIFIED rule allows otherwise)
+  boardingRuleStatus: RuleStatus;
+  classCode: string;
+  availability: 'AVAILABLE' | 'RAC';
+  confirmedSeats: number | null;  // exact provider AVAILABLE count; RAC → null (an RAC position is never a seat)
+  passengers: number;
+  status: string;                 // provider status text, e.g. "AVAILABLE-0003" / "RAC 4"
+  provider: string | null;
+  asOf: string;
+  stale: boolean;
+  sourceResultId: string;         // resultSetId of the result it came from
+  journeyVersion: number | null;
+}
+
+/** Verified, selectable recovery options (whole party AVAILABLE or RAC), excluding the requested pair itself. */
+export function toSameTrainRecoveryResults(r: SameTrainAlternativesResult | null | undefined, stale = false): SameTrainRecoveryResult[] {
+  if (!r || !Array.isArray(r.alternatives)) return [];
+  return r.alternatives.filter(a => !a.isRequestedPair && isVerifiedSameTrainAlternative(a)).map(a => ({
+    resultId: `${r.alternativeSearchId}:${a.alternativeId}`, alternativeSearchId: r.alternativeSearchId, alternativeId: a.alternativeId,
+    trainNumber: a.trainNumber, ...(a.trainName ? { trainName: a.trainName } : {}), date: a.date,
+    requestedOrigin: a.requestedOrigin, requestedDestination: a.requestedDestination,
+    ticketOrigin: a.ticketOrigin, ticketDestination: a.ticketDestination, boardAt: a.boardingStation, boardingRuleStatus: a.boardingRuleStatus,
+    classCode: a.travelClass, availability: a.availability === 'RAC' ? 'RAC' as const : 'AVAILABLE' as const,
+    confirmedSeats: a.availability === 'AVAILABLE' && typeof a.availableSeatCount === 'number' ? a.availableSeatCount : null,
+    passengers: a.passengersCount, status: a.availabilityStatusText || a.availability,
+    provider: (a.evidence || []).find(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS')?.provider ?? null,
+    asOf: a.fetchedAt, stale, sourceResultId: r.resultSetId, journeyVersion: r.journeyVersion ?? null
+  }));
 }
 
 /** Bounded search limits (spec "SEARCH LIMITS") — configurable via env, clamped to safe ranges. */
@@ -238,12 +292,20 @@ export interface SameTrainLimits {
   perCallTimeoutMs: number;
   totalTimeoutMs: number;
   maxWebChecks: number;
+  /** P42.7: total availability calls per provider across the (pair × class) matrix — bounded, never an unbounded crawl */
+  maxAvailabilityChecks?: number;
 }
+
+/** P42.7 hard caps of the recovery route matrix (env may lower, never raise). */
+export const MAX_EARLIER_STATIONS = 15;
+export const MAX_DOWNSTREAM_STATIONS = 7;
+export const MAX_AVAILABILITY_CHECKS = 160;
 
 export const SAME_TRAIN_DEFAULT_LIMITS: Readonly<SameTrainLimits> = Object.freeze({
   maxCandidatePairs: 40,
-  maxOriginSweepStations: 12,
-  maxDestinationSweep: 6,
+  maxOriginSweepStations: MAX_EARLIER_STATIONS,
+  maxDestinationSweep: 6,                    // default 6 of the allowed 5..MAX_DOWNSTREAM_STATIONS (7)
+  maxAvailabilityChecks: 120,
   maxParallel: 6,
   perCallTimeoutMs: 9000,
   totalTimeoutMs: 45000,

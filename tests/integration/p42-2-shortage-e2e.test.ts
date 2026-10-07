@@ -133,11 +133,14 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     const r = await h.say(U);
     expect(sc.shortages).toEqual(expect.arrayContaining([{ train: '12903', class: '1A', availabilityStatus: 'AVAILABLE', availableSeatCount: 1, triggerReason: 'INSUFFICIENT_SEATS' }]));
     expect(sc.requestedPassengerCount).toBe(3);
-    expect(res.data).toMatchObject({ outcome: 'VERIFIED_ALTERNATIVE_FOUND', triggerReason: 'INSUFFICIENT_SEATS', passengersCount: 3, verifiedAlternativeCount: 1 });
+    // P42.7: all supported classes are searched (requested class first) → JUC → UMB verified in 1A, 2A and 3A (3 seats each)
+    expect(res.data).toMatchObject({ outcome: 'VERIFIED_ALTERNATIVE_FOUND', triggerReason: 'INSUFFICIENT_SEATS', passengersCount: 3, verifiedAlternativeCount: 3 });
     expect(deep(res.data.alternatives, 'A1')).toMatchObject({ kind: 'REQUESTED', availableSeatCount: 1, seatSufficiency: 'INSUFFICIENT' });   // Muse sees the exact count
     const c = cards(r);
     expect(c).toHaveLength(1);
-    expect(c[0]).toMatchObject({ trainNumber: '12903', travelClass: '1A', passengersCount: 3, requestedPassengerCount: 3, triggerSource: 'SESSION_EVIDENCE', verifiedAlternativeCount: 1 });
+    expect(c[0]).toMatchObject({ trainNumber: '12903', travelClass: '1A', passengersCount: 3, requestedPassengerCount: 3, triggerSource: 'SESSION_EVIDENCE', verifiedAlternativeCount: 3 });
+    const verified = c[0].alternatives.filter((a: any) => a.verificationStatus !== 'UNVERIFIED' && a.seatSufficiency === 'SUFFICIENT');
+    expect(verified.map((a: any) => `${a.ticketOrigin}-${a.ticketDestination}:${a.travelClass}`)).toEqual(['JUC-UMB:1A', 'JUC-UMB:2A', 'JUC-UMB:3A']);
     expect(c[0].toolExecutionId).toBeTruthy();
     expect(c[0].alternatives.find((a: any) => a.isRequestedPair)).toMatchObject({ availableSeatCount: 1, seatSufficiency: 'INSUFFICIENT' });
     expect(c[0].alternatives.find((a: any) => a.ticketOrigin === 'JUC')).toMatchObject({ availableSeatCount: 3, seatSufficiency: 'SUFFICIENT', boardingRuleStatus: 'UNVERIFIED' });
@@ -151,10 +154,12 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     let resC: any, resD: any;
     const U1 = 'Ludhiana se Ambala kal 12903 1A, 2 passengers';
     const U2 = '12903 2A ka bhi same train option dekho';
+    const U3 = 'sirf 2A mein hi dekho';
     setStatus(q => (q.travelClass === '1A' && q.origin === 'BEAS' ? 'AVAILABLE 4' : q.travelClass === '2A' ? 'NOT AVAILABLE' : 'GNWL 9'));
     const h = harness({
       [U1]: flow(2, [() => ({ calls: [ALT()] }), v => { resC = altResults(v)[0]; return { content: 'Beas se 4 seats available hain, lekin Ludhiana se boarding ka rule verify karna zaroori hai.' }; }]),
-      [U2]: [{ calls: [ALT({ travelClass: '2A' })] }, { content: 'Koi verified option nahi mila.' }]
+      [U2]: [{ calls: [ALT({ travelClass: '2A' })] }, { content: '2A mein koi verified option nahi mila.' }],
+      [U3]: [{ calls: [ALT({ travelClass: '2A', classes: '2A' })] }, { content: 'Koi verified option nahi mila.' }]
     });
     const r1 = await h.say(U1);
     expect(resC.data).toMatchObject({ triggerReason: 'WAITLIST', outcome: 'VERIFIED_ALTERNATIVE_FOUND' });
@@ -162,10 +167,18 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     const r2 = await h.say(U2);
     const rec = recs(r2).find((x: any) => x.tool === 'SEARCH_SAME_TRAIN_ALTERNATIVES');
     expect(rec).toBeTruthy();
+    // P42.7: all supported classes — 2A stays NOT AVAILABLE everywhere; only the other class (1A from Beas) is verified
     const stored = findSameTrainResult(h.s(), h.s().sameTrainAlternatives.alternativeSearchId)!;
-    expect(stored).toMatchObject({ travelClass: '2A', triggerReason: 'NOT_AVAILABLE', outcome: 'NO_VERIFIED_SAME_TRAIN_ALTERNATIVE', verifiedAlternativeCount: 0 });
-    expect(cards(r2)).toHaveLength(0);                                                           // no empty / fake card
-    expect(shown(r2)).toContain('Koi verified option nahi mila');
+    expect(stored).toMatchObject({ travelClass: '2A', triggerReason: 'NOT_AVAILABLE', outcome: 'VERIFIED_ALTERNATIVE_FOUND', verifiedAlternativeCount: 1 });
+    const v2 = stored.alternatives.filter((a: any) => a.verificationStatus !== 'UNVERIFIED' && a.seatSufficiency === 'SUFFICIENT');
+    expect(v2.map((a: any) => `${a.ticketOrigin}:${a.travelClass}`)).toEqual(['BEAS:1A']);   // never an invented 2A option
+    expect(cards(r2)).toHaveLength(1);
+    // [D][H] scoped to 2A only with nothing better → NO_VERIFIED outcome to Muse, no fake card
+    const r3 = await h.say(U3);
+    const stored3 = findSameTrainResult(h.s(), h.s().sameTrainAlternatives.alternativeSearchId)!;
+    expect(stored3).toMatchObject({ travelClass: '2A', triggerReason: 'NOT_AVAILABLE', outcome: 'NO_VERIFIED_SAME_TRAIN_ALTERNATIVE', verifiedAlternativeCount: 0, classesChecked: ['2A'] });
+    expect(cards(r3)).toHaveLength(0);                                                           // no empty / fake card
+    expect(shown(r3)).toContain('Koi verified option nahi mila');
   });
 
   it('[E] mixed classes: shortages only for 1A (1 seat) + 3A (WL); 2A (10 seats) refused; invented EC refused; 1A + 3A searched in parallel → one card each', async () => {
@@ -180,7 +193,8 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(s).toMatch(/SAME_TRAIN_ALTERNATIVE_NOT_NEEDED/);
     expect(s).toMatch(/EC class nahi hai/);
     const classesCalled = new Set(availCalls(rc).map(x => x[1].travelClass));
-    expect([...classesCalled].sort()).toEqual(['1A', '3A']);                                     // never 2A, never EC
+    expect([...classesCalled].sort()).toEqual(['1A', '2A', '3A']);                               // P42.7: all supported classes; never EC
+    expect(recs(r).filter((x: any) => x.tool === 'SEARCH_SAME_TRAIN_ALTERNATIVES' && x.status === 'SUCCEEDED').length).toBe(2);   // 2A's own search refused
     expect(cards(r).map((c: any) => c.travelClass).sort()).toEqual(['1A', '3A']);
     expect(h.s().sameTrainAlternativeSets.length).toBe(2);
   });
@@ -198,7 +212,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     const c = cards(r);
     expect(c.map((x: any) => `${x.trainNumber}:${x.travelClass}`).sort()).toEqual(['12497:CC', '12903:1A']);
     for (const x of c) expect(x.alternatives.every((a: any) => a.trainNumber === x.trainNumber)).toBe(true);
-    expect(availCalls(rc).every(x => (x[1].trainNumber === '12903' && x[1].travelClass === '1A') || (x[1].trainNumber === '12497' && x[1].travelClass === 'CC'))).toBe(true);
+    // P42.7: each train is searched over its OWN supported classes (12903: 1A; 12497: CC + 2S) — never another train's class
+    expect(availCalls(rc).every(x => (x[1].trainNumber === '12903' && x[1].travelClass === '1A') || (x[1].trainNumber === '12497' && ['CC', '2S'].includes(x[1].travelClass)))).toBe(true);
+    expect(new Set(availCalls(rc).filter(x => x[1].trainNumber === '12497').map(x => x[1].travelClass))).toEqual(new Set(['CC', '2S']));
   });
 
   it('[budget + duplicate] identical call in the same turn is deduplicated (one fan-out); more than 4 searches per turn stop safely', async () => {
@@ -214,7 +230,11 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(availCalls(rc).filter(x => x[1].travelClass === '1A' && x[1].origin === 'LDH' && x[1].destination === 'UMB').length).toBe(1);
     expect(st[st.length - 1]).toMatchObject({ ok: false, error: { code: 'SAME_TRAIN_SEARCH_BUDGET_EXCEEDED' } });   // 5th distinct search refused; earlier results kept
     expect(st.slice(0, -1).every((x: any) => x.ok === true)).toBe(true);
-    expect(new Set(availCalls(rc).map(x => x[1].travelClass)).size).toBe(4);                     // 1A + three more; the 5th never ran
+    // P42.7: each search covers all 5 supported classes; the requested pair is checked only for each search's own class →
+    // LDH → UMB was queried for 1A + three more, never for 2S (the 5th search never ran)
+    expect(new Set(availCalls(rc).map(x => x[1].travelClass)).size).toBe(5);
+    const reqPairClasses = availCalls(rc).filter(x => x[1].origin === 'LDH' && x[1].destination === 'UMB').map(x => x[1].travelClass);
+    expect([...new Set(reqPairClasses)].sort()).toEqual(['1A', '2A', '3A', 'SL']);
   });
 
   it('[I] selection: fresh recheck against the result set; fewer seats now → refused; [J] date change → stale, no provider call', async () => {
@@ -272,12 +292,14 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
 
   it('[M][N] cross-train and cross-class seat claims are removed from the reply; the grounded sentence stays', async () => {
     const U = 'Ludhiana se Ambala kal 12903 1A, 3 passengers';
-    const final = 'Jalandhar se 3 seats available hain, lekin Ludhiana se boarding ka rule verify karna zaroori hai. 12497 mein bhi Jalandhar se 3 seats available hain. 12903 2A mein bhi Jalandhar se 3 seats available hain.';
+    const final = 'Jalandhar se 3 seats available hain, lekin Ludhiana se boarding ka rule verify karna zaroori hai. 12497 mein bhi Jalandhar se 3 seats available hain. 12903 2A mein bhi Jalandhar se 3 seats available hain. 12903 3A mein bhi Jalandhar se 3 seats available hain.';
+    setStatus(q => (q.origin === 'JUC' ? (q.travelClass === '2A' ? 'GNWL 4' : 'AVAILABLE-0003') : q.origin === 'LDH' && q.destination === 'UMB' ? 'AVAILABLE-0001' : 'GNWL 9'));
     const h = harness({ [U]: flow(3, [() => ({ calls: [ALT()] }), () => ({ content: final })]) });
     const r = await h.say(U);
     expect(shown(r)).toContain('Jalandhar se 3 seats available hain');
-    expect(shown(r)).not.toContain('12497 mein bhi');
-    expect(shown(r)).not.toContain('2A mein bhi');
+    expect(shown(r)).not.toContain('12497 mein bhi');                                            // cross-train: removed
+    expect(shown(r)).not.toContain('2A mein bhi');                                               // other class NOT verified: removed
+    expect(shown(r)).toContain('3A mein bhi Jalandhar se 3 seats');                              // P42.7: other class verified by the all-class search: kept
   });
 
   it('[O] voice = screen: same card, spoken words grounded in the same result, unverified claim never spoken', async () => {

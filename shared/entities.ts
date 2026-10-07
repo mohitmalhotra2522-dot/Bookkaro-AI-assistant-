@@ -151,6 +151,8 @@ export interface BookingSession {
   passengers: Passenger[];
   preferredTime?: 'MORNING' | 'AFTERNOON' | 'EVENING' | 'NIGHT' | 'ANY';
   preferredClass?: 'AC' | 'NON_AC' | 'ANY';
+  /** P42.7: the exact class code the user named (SEARCH_TRAINS.requestedClass); cleared with the journey */
+  requestedClass?: string;
   availableTrains: Train[];
   lastSearch?: any;
   searchResults?: any;

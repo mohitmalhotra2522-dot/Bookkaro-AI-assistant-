@@ -668,3 +668,14 @@ depended on the appended question); no state / booking / safety assertion broke.
 - `mock-natural-voice`: the class-change ack no longer needs a backend question. P20 scenario fixture expectations gained `pendingType` / `nextDetail`.
 - Tests: new `tests/integration/p42-1-no-backend-questions.test.ts` (12/12); affected expectations in 21 test files switched to structured assertions (no safety assertion weakened).
 - Known gap (pre-existing, flagged): an LLM sentence like "Age 31 noted" without the tool call is not rejected by the action-claim guard (nothing is stored; `nextToAsk` stays correct).
+
+## P42.2 → P42.7 status (2026-10-07)
+- P42.2 `0c50012` — shortage-triggered same-train search (`seatCheck` facts; Muse decides). Report `reports/p42-2/REPORT.md`.
+- P42.3 `5ce1b0c` — availability-claim guard (counts only from authoritative fields). Staging deployed.
+- P42.4 `5016d5d` — automatic inline display under the search list + Select → fresh recheck → apply ticket pair. Report `reports/p42-4/REPORT.md`.
+- P42.5 `3073f03` — BFE eligibility fact + once-per-turn backend safety-net (never selects / ranks / mutates). Staging live at `3073f03`. Report `reports/p42-5/REPORT.md`.
+- (No P42.6 exists.)
+- **P42.7 (UNCOMMITTED, on top of `3073f03`)** — intelligent same-train recovery: no train / class selection needed (SEARCH_TRAINS `requestedClass`), eligibility on the requested class (other-class AVL never suppresses), bounded all-class route matrix (≤15 earlier, ≤7 downstream, terminal stop, check cap 120/160), `recoveryEligibility` facts to Muse, safety-net one candidate per train (several eligible → skip, UI covers), automatic per-train BookKaro section ("Same train · pehle station se board karo") with verified class chips + Select. Tests: `p42-7-recovery-matrix` 16, `p42-7-recovery-e2e` 19, `p42-7-recovery-ui` 13 — all pass. Report `reports/p42-7/REPORT.md`.
+- User authorized (2026-10-07): the 6 legacy P42.2 assertions updated to the all-class contract (11/11); P42.7 + tests committed on the staging branch, staging branch pushed, staging (`srv-db2s5ah42hec73fn8h60`) redeployed. Production untouched.
+- Pending user idea: seat / fare via web scraping when APIs fail — NOT built. All checked sources (IRCTC, eRail availability, RailYatri, ConfirmTkt) are robots-blocked or private APIs; only robots-allowed public endpoints may be added after a per-site robots / ToS audit.
+- Production stays `4d9939d`. No P43.

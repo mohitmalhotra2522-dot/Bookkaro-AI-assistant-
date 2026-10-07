@@ -22,6 +22,9 @@ import { SameTrainErrorCode } from '@shared/same-train-alternatives';
 import { resolveSameTrainProviders, isSameTrainResultStale, findSameTrainResult } from '../../railway/same-train/same-train-service';
 import { sessionShortageEvidence, museTriggerReason } from '../../railway/same-train/shortage-trigger';
 import { SAME_TRAIN_NOT_NEEDED } from '@shared/same-train-shortage';
+
+/** P42.7: IRCTC class codes a user may name (SEARCH_TRAINS.requestedClass). */
+export const REQUESTED_CLASS_CODES = new Set(['1A', '2A', '3A', '3E', 'SL', 'CC', 'EC', '2S', 'FC', 'EA', 'EV']);
 import { REGISTERED_TOOLS, getToolDefinition, type ToolCall, type ToolDefinition, type RegisteredToolName, type ToolParam } from './tool-registry';
 import type { OrchestratorError } from '../decisions/agent-decision';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
@@ -138,7 +141,8 @@ export class ToolCallValidator {
     ]);
     const typed = !!g && [...String(g.userText || '').matchAll(/(?<!\d)(\d{5})(?!\d)/g)].some(m => m[1] === train);
     if (!known.has(train) && !typed) return E('AUTHORITATIVE_DATA_REQUIRED', 'Same train alternative ke liye train identify nahi hui.', { missingField: 'TRAIN' });
-    const travelClass = String(args.travelClass || s.selectedClass || '').toUpperCase();
+    // P42.7: requested class = argument → selected class → the class the user named at search (no selection required)
+    const travelClass = String(args.travelClass || s.selectedClass || s.requestedClass || '').toUpperCase();
     if (!travelClass) return E(SameTrainErrorCode.NOT_READY, 'Kaunsi class ke liye check karna hai? (jaise CC, 3A, SL)', { missing: 'travelClass' });
     const row = ((s.searchResults?.trains || []) as any[]).find(t => String(t.trainNumber || t.number) === train);
     // P42.2: classes come from the authoritative train data (result row, else the selected train) — never invented
@@ -146,6 +150,18 @@ export class ToolCallValidator {
     const src = row || selRow;
     const rowClasses: string[] = src ? [...(src.classes || []).map((c: any) => String(c.code || c).toUpperCase()), ...(src.availableClasses || []).map((c: any) => String(c).toUpperCase())] : [];
     if (rowClasses.length && !rowClasses.includes(travelClass)) return E('INVALID_TOOL_CALL', `${train} mein ${travelClass} class nahi hai (${rowClasses.join(', ')}).`);
+    // P42.7 all-class matrix: only classes the train's authoritative row lists (unsupported → rejected, never invented)
+    const clsArg = String(args.classes ?? 'ALL').trim().toUpperCase() || 'ALL';
+    let matrix: string[];
+    if (clsArg === 'ALL') matrix = [...new Set(rowClasses)];
+    else if (clsArg === 'REQUESTED') matrix = [travelClass];
+    else {
+      matrix = [...new Set(clsArg.split(',').map(x => x.trim()).filter(Boolean))];
+      const bad = matrix.filter(c => !/^[A-Z0-9]{1,4}$/.test(c) || (rowClasses.length ? !rowClasses.includes(c) : c !== travelClass));
+      if (bad.length) return E('INVALID_TOOL_CALL', `${train} mein ${bad.join(', ')} class nahi hai${rowClasses.length ? ` (${[...new Set(rowClasses)].join(', ')})` : ''}.`);
+    }
+    const classes = [travelClass, ...matrix.filter(c => c !== travelClass)];
+    const explicitUserRequest = args.explicitUserRequest === true;
     const date = this.resolveDateStr(args.date || s.date);
     if (!date) return E(SameTrainErrorCode.NOT_READY, 'Journey date abhi set nahi hai.', { missing: 'date', missingField: 'DATE' });
     const o = this.resolveStation(String(args.origin || s.origin || '').trim());
@@ -163,7 +179,8 @@ export class ToolCallValidator {
     // P42.2 — passenger-count safety: current authoritative data for exactly this train / class / date / pair already
     // covers the whole party → no same-train search (no provider traffic). Missing / UNKNOWN data never blocks.
     const ev = sessionShortageEvidence(s, { trainNumber: train, travelClass, date, origin: o.code, destination: d.code, passengersCount: pax });
-    if (ev && ev.assessment.sufficiency === 'SUFFICIENT') {
+    // P42.7 Part 42: the user's explicit "aur options dikhao" (Muse sets explicitUserRequest) may search anyway
+    if (ev && ev.assessment.sufficiency === 'SUFFICIENT' && !explicitUserRequest) {
       return E(SAME_TRAIN_NOT_NEEDED, `${train} ${travelClass}: ${ev.status} — ${pax} passenger(s) ke liye seats kaafi hain.`,
         { argument: 'trainNumber', expected: 'a shortage (WAITLIST / NOT_AVAILABLE / REGRET / TRAIN_CANCELLED / fewer seats than passengers)',
           received: `${ev.status} for ${pax} passenger(s) (${ev.source})`, availabilityStatus: ev.assessment.availabilityStatus,
@@ -173,7 +190,8 @@ export class ToolCallValidator {
     const triggerReason = ev?.assessment.shortage ? ev.assessment.triggerReason : museReason;
     const triggerSource = ev?.assessment.shortage ? 'SESSION_EVIDENCE' : museReason ? 'MUSE' : 'NONE';
     const canonical: Record<string, any> = {
-      trainNumber: train, travelClass, date, origin: o.code, destination: d.code, passengersCount: pax,
+      trainNumber: train, travelClass, classes: classes.join(','), ...(explicitUserRequest ? { explicitUserRequest: true } : {}),
+      date, origin: o.code, destination: d.code, passengersCount: pax,
       originSweep: args.originSweep !== false, destinationSweep: args.destinationSweep !== false,
       ...(args.destinationExtensionStations !== undefined ? { destinationExtensionStations: Number(args.destinationExtensionStations) } : {}),
       combinedPairs: args.combinedPairs || 'AUTO',
@@ -299,6 +317,12 @@ export class ToolCallValidator {
     if (canonical.preferredClass && !['AC','NON_AC','ANY'].includes(canonical.preferredClass)) {
       return { ok:false as const, error:{ code:'INVALID_TOOL_CALL' as const, message:'preferredClass AC | NON_AC | ANY होना चाहिए।' } };
     }
+    // P42.7: the class the user named (Muse fills it semantically) — a known class CODE only, never a guess
+    if (canonical.requestedClass !== undefined && canonical.requestedClass !== null && canonical.requestedClass !== '') {
+      const rc = String(canonical.requestedClass).trim().toUpperCase();
+      if (!REQUESTED_CLASS_CODES.has(rc)) return { ok:false as const, error:{ code:'INVALID_TOOL_CALL' as const, message:`requestedClass ek class code hona chahiye (${[...REQUESTED_CLASS_CODES].join(', ')}).` } };
+      canonical.requestedClass = rc;
+    } else delete canonical.requestedClass;
     return { ok:true as const, v: { name: def.name, callId, arguments: canonical, tool: def } };
   }
 

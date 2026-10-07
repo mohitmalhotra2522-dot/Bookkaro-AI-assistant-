@@ -38,6 +38,8 @@ export interface LLMContext {
     date?: string; passengersCount?: number; preferredClass?: string; preferredTime?: string;
     selectedTrain?: { number: string; name: string; availableClasses: string[] } | null;
     selectedClass?: string | null;
+    /** P42.7: the class code the user named at search (may differ from / precede a selection) */
+    requestedClass?: string | null;
     focusTrainNumber?: string; previousTrainNumber?: string;
     fareVerified: boolean; availabilityVerified: boolean;
     passengerDetails: { required: number; completed: number; currentIndex: number };
@@ -83,7 +85,7 @@ export interface LLMContext {
   memory?: ReturnType<typeof memoryContextView>;
 }
 
-export const LLM_CONTEXT_VERSION = 'p42.4-memory-1';
+export const LLM_CONTEXT_VERSION = 'p42.7-memory-2';
 
 /**
  * P42.4 — Part 2.1 memory block: versions the LLM needs to tell current facts from stale ones, plus the same-train
@@ -107,6 +109,9 @@ export function memoryContextView(s: BookingSession) {
     sessionVersion: s.sessionVersion,
     journeyVersion: syncJourneyVersion(s),
     reviewVersion: s.review?.reviewVersion ?? null,
+    // P42.7 Part 44: review status + the class the user asked for (selected → named at search; null = unknown)
+    reviewStatus: s.review ? reviewStatusOf(s) : null,
+    requestedClass: (s.selectedClass || x.requestedClass) ? String(s.selectedClass || x.requestedClass).toUpperCase() : null,
     resultSetId: (s.searchResults as any)?.resultId ?? null,
     ...(selCurrent ? { sameTrainSelection: {
       trainNumber: sel.trainNumber, travelClass: sel.travelClass, date: sel.date,
@@ -118,7 +123,11 @@ export function memoryContextView(s: BookingSession) {
     } } : {}),
     ...(current.length ? { sameTrainShown: current.slice(0, 8).map(r => ({
       trainNumber: r.trainNumber, travelClass: r.travelClass, source: r.triggerSource === 'AUTO_DISPLAY' ? 'AUTO_DISPLAY' : 'TOOL',
-      verifiedOptions: (r.alternatives || []).filter((a: any) => isVerifiedSameTrainAlternative(a)).length, completedAt: r.completedAt ?? null
+      verifiedOptions: (r.alternatives || []).filter((a: any) => isVerifiedSameTrainAlternative(a)).length, completedAt: r.completedAt ?? null,
+      // P42.7: matrix coverage + which classes have a verified option (codes only; Muse presents, the backend never ranks)
+      ...(Array.isArray(r.classesChecked) ? { classesChecked: r.classesChecked.join(',') } : {}),
+      verifiedClasses: [...new Set((r.alternatives || []).filter((a: any) => isVerifiedSameTrainAlternative(a)).map((a: any) => String(a.travelClass)))].join(',') || null,
+      resultSetId: r.resultSetId ?? null
     })) } : {}),
     staleRejected
   };
@@ -237,6 +246,7 @@ export function buildLLMContext(s: BookingSession, history: HistoryMsg[], maxRec
       date: s.date, passengersCount: s.passengersCount, preferredClass: s.preferredClass, preferredTime: s.preferredTime,
       selectedTrain: t ? { number: t.number || t.trainNumber, name: t.name || t.trainName, availableClasses: t.availableClasses || (t.classes || []).map((c: any) => c.code) } : null,
       selectedClass: s.selectedClass ?? null,
+      requestedClass: (s as any).requestedClass ?? null,
       focusTrainNumber: s.focusTrainNumber, previousTrainNumber: s.previousTrainNumber,
       fareVerified: !!s.fare, availabilityVerified: !!s.availability,
       passengerDetails: {

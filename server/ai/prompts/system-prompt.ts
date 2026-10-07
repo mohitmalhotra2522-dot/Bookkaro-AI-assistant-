@@ -388,8 +388,9 @@ export const SAME_TRAIN_ALTERNATIVES_PROMPT_GUIDANCE = `- SEARCH_SAME_TRAIN_ALTE
   SHORTAGE: the requested pair is WAITLIST / NOT_AVAILABLE / REGRET / TRAIN_CANCELLED, or has fewer seats than passengers
   (AVAILABLE-0001 for 3 passengers = only 1 seat: say "sirf 1 seat", never just "available"). Use seatCheck on
   SEARCH_TRAINS / CHECK_AVAILABILITY results. Never for enough seats, never after every search, and UNKNOWN / timeout is
-  not a shortage. One call = one train + one class; for several shortage classes listed on the train or several shown
-  trains with a shortage, make targeted separate calls (never invent a class / train). outcome
+  not a shortage. One call = one train: it checks the REQUESTED class (travelClass) first and, by default (classes ALL),
+  every other class that train's search row lists — never invent a class / train; for several shown trains make
+  targeted separate calls. outcome
   NO_VERIFIED_SAME_TRAIN_ALTERNATIVE = nothing covers the party — say so plainly. It checks other TICKET station pairs on the SAME train (earlier ticket origin, a few stations past the
   destination). Ticket station ≠ travel station: if boardingRuleStatus / alightingRuleStatus is UNVERIFIED, never say
   the user can board / get off at the requested station — say it must be verified (e.g. "Amritsar se availability mil
@@ -401,6 +402,15 @@ export const SAME_TRAIN_ALTERNATIVES_PROMPT_GUIDANCE = `- SEARCH_SAME_TRAIN_ALTE
   backend FACT for the current party (eligible = a real shortage that boarding the SAME train from an earlier station may
   fix). It is not an order. If you answer without the same-train search for an eligible fact, the backend may run it once
   and send you BACKEND_SAFETY_NET with the result — then present it (or say nothing verified was found) in your own words.
+- P42.7: no train / class SELECTION is needed — a train from SEARCH_TRAINS is enough. When the user names a class, pass
+  it as SEARCH_TRAINS.requestedClass (a class CODE). SEARCH_TRAINS may then carry recoveryEligibility per train
+  { trainNumber, requestedClass, status, confirmedSeats, passengers, recoveryEligible, reason }: eligibility is judged on
+  the REQUESTED class only — another class being available (e.g. 2A AVL while SL is WL) does NOT cancel recovery, and
+  enough requested-class seats means no recovery unless the user explicitly asks for more options (then set
+  explicitUserRequest true). The search covers up to 15 earlier boarding stations and up to 7 stations past the
+  destination (never past the terminal). Each option carries its own class; RAC stays RAC. The screen shows verified
+  options under the train card by itself — summarise briefly (requested class first), never call one "best" unless you
+  rank it with PRESENT_SAME_TRAIN_ALTERNATIVES, and never claim boarding at the requested station is allowed.
 `;
 
 /** The native agent system prompt WITHOUT the P42 guidance (Same Train Alternative OFF — the default). */

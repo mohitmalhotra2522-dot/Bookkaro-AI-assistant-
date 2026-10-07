@@ -126,7 +126,7 @@ export class ConversationStateManager {
       if (s.bookingExecutionHistory.length > 20) s.bookingExecutionHistory.splice(0, s.bookingExecutionHistory.length - 20);
       clear('bookingExecution');
     }
-    for (const k of ['origin', 'originName', 'destination', 'destinationName', 'date', 'passengersCount', 'preferredClass', 'preferredTime',
+    for (const k of ['origin', 'originName', 'destination', 'destinationName', 'date', 'passengersCount', 'preferredClass', 'preferredTime', 'requestedClass',
       'searchResults', 'lastSearch', 'searchMeta', 'selectedTrain', 'selectedClass', 'selectedJourney', 'fare', 'availability',
       'lastTrainInfo', 'lastTimetable', 'focusTrainNumber', 'previousTrainNumber', 'focusTurnId', 'staleReference', 'review', 'readiness', 'confirmation',
       'confirmedReviewVersion', 'carryOverSelection', 'lastPassengerRefId', 'activeBookingId', 'postBookingClarification',

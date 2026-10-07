@@ -19,7 +19,19 @@ interface Props {
   autoSameTrain?: AutoSameTrain;
 }
 
-export interface AutoSameTrain { sessionId: string | null; searchResultsVersion?: number; passengers: number; onHandoff: (text: string) => void }
+export interface AutoSameTrain {
+  sessionId: string | null; searchResultsVersion?: number; passengers: number; onHandoff: (text: string) => void;
+  /** P42.7: the class the user asked for (selected / named) — eligibility is judged on it; unknown → any class shortage */
+  requestedClass?: string | null;
+}
+
+/** P42.7 per-train recovery eligibility (mirrors the backend gate; the backend decides). */
+export function trainNeedsRecovery(classes: Array<{ code: string; availability?: unknown }> | undefined, requestedClass: string | null | undefined, passengers: number): boolean {
+  const list = classes || [];
+  const req = String(requestedClass || '').toUpperCase();
+  if (req) { const c = list.find(x => String(x.code).toUpperCase() === req); return !!c && needsSameTrainDiscovery(c.availability, passengers); }
+  return list.some(c => needsSameTrainDiscovery(c.availability, passengers));
+}
 
 /**
  * TrainCard — one train, time-first. Renders ONLY normalized fields the backend returned:
@@ -29,8 +41,10 @@ export interface AutoSameTrain { sessionId: string | null; searchResultsVersion?
 export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, onSelectClass, highlightedClass, originLabel, destinationLabel, disabled, onSameTrain, autoSameTrain }) => {
   const [open, setOpen] = useState(false);
   const detailsId = `td-${train.trainNumber}`;
-  const shortClasses = autoSameTrain ? (train.classes || []).filter(c => needsSameTrainDiscovery(c.availability, autoSameTrain.passengers)) : [];
-  const visible = useOnScreen(shortClasses.length > 0);
+  // P42.7: one recovery section per train (all classes searched by the backend) — no tap needed, nothing when not eligible
+  const recovery = !!autoSameTrain && trainNeedsRecovery(train.classes, autoSameTrain.requestedClass, autoSameTrain.passengers);
+  const reqListed = !!autoSameTrain?.requestedClass && (train.classes || []).some(c => String(c.code).toUpperCase() === String(autoSameTrain.requestedClass).toUpperCase());
+  const visible = useOnScreen(recovery);
   return (
     <article ref={visible.ref} className={`bk-card bk-train${isSelected ? ' is-selected' : ''}`} aria-label={`Train ${train.trainNumber} ${train.trainName}`}>
       <div className="bk-train__top">
@@ -65,11 +79,6 @@ export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, o
         </div>
       )}
 
-      {autoSameTrain && shortClasses.map(c => (
-        <SameTrainInline key={`sti-${c.code}`} sessionId={autoSameTrain.sessionId} trainNumber={train.trainNumber} travelClass={c.code}
-          searchResultsVersion={autoSameTrain.searchResultsVersion} visible={visible.seen} disabled={disabled}
-          onHandoff={autoSameTrain.onHandoff} onFallback={onSameTrain ? () => onSameTrain(train.trainNumber, c.code) : undefined} />
-      ))}
 
       <div className="bk-train__actions">
         <button type="button" className="bk-btn bk-btn--primary" onClick={() => onSelectTrain(train.trainNumber)} disabled={disabled}>
@@ -93,6 +102,12 @@ export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, o
           <KV k="Route" v={`${train.origin} → ${train.destination}`} />
           {train.retrievedAt && <KV k="Fetched" v={formatClock(train.retrievedAt)} />}
         </div>
+      )}
+      {recovery && autoSameTrain && (
+        <SameTrainInline key="sti" sessionId={autoSameTrain.sessionId} trainNumber={train.trainNumber}
+          travelClass={reqListed ? String(autoSameTrain.requestedClass).toUpperCase() : undefined}
+          searchResultsVersion={autoSameTrain.searchResultsVersion} visible={visible.seen} disabled={disabled}
+          onHandoff={autoSameTrain.onHandoff} onFallback={onSameTrain ? () => onSameTrain(train.trainNumber, reqListed ? String(autoSameTrain.requestedClass).toUpperCase() : undefined) : undefined} />
       )}
     </article>
   );

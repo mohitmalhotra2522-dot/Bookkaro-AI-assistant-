@@ -356,9 +356,10 @@ const App: React.FC = () => {
             onSelectTrain={(n: string) => handleSelectTrain(n, d.searchResultsVersion)}
             onSelectClass={(n: string, c: string) => handleSelectClass(n, c, d.searchResultsVersion)}
             onSameTrain={appStatus.sameTrainAlternatives ? (n: string, c?: string) => handleSameTrain(n, c || (ctx?.selectedTrain?.number === n ? ctx?.selectedClass : undefined)) : undefined}
-            // P42.4: verified same-train options appear by themselves under waitlisted classes of the CURRENT list only
+            // P42.7: one automatic same-train recovery section per eligible train of the CURRENT list (requested class decides)
             autoSameTrain={appStatus.sameTrainAlternatives && sessionId && typeof d.searchResultsVersion === 'number' && d.searchResultsVersion === ctx?.searchResultsVersion
-              ? { sessionId, searchResultsVersion: d.searchResultsVersion, passengers: Number(ctx?.passengersCount) || 1, onHandoff: handoffSameTrain }
+              ? { sessionId, searchResultsVersion: d.searchResultsVersion, passengers: Number(ctx?.passengersCount) || 1, onHandoff: handoffSameTrain,
+                  requestedClass: ctx?.selectedClass || ctx?.requestedClass || null }
               : undefined} />
         );
       }

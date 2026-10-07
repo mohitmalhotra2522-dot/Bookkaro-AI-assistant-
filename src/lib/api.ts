@@ -265,7 +265,7 @@ export async function selectSameTrainAlternative(sessionId: string, body: { alte
  * dedupe and provider choice are server-side). Returns the card payload or a code; never throws.
  */
 export interface SameTrainDiscoverResult { ok: boolean; code: string; card?: any; budget?: { used: number; max: number } }
-export async function discoverSameTrainAlternative(sessionId: string, body: { trainNumber: string; travelClass: string; searchResultsVersion: number }): Promise<SameTrainDiscoverResult> {
+export async function discoverSameTrainAlternative(sessionId: string, body: { trainNumber: string; travelClass?: string; searchResultsVersion: number }): Promise<SameTrainDiscoverResult> {
   try {
     const r = await fetch(`/api/session/${encodeURIComponent(sessionId)}/same-train-alternative/discover`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)

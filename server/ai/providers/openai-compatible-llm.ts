@@ -392,6 +392,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
             ...(r.ok && r.seatCheck ? { seatCheck: r.seatCheck } : {}),
             // P42.5: BFE eligibility fact (same train, board from an earlier station) — a fact, never an instruction
             ...(r.ok && (r as any).bfeEligibility ? { bfeEligibility: bfeEligibilityLLMView((r as any).bfeEligibility) } : {}),
+            // P42.7: per-train recovery context on the REQUESTED class (SEARCH_TRAINS) — facts only, Muse decides
+            ...(r.ok && Array.isArray((r as any).recoveryEligibility) ? { recoveryEligibility: (r as any).recoveryEligibility } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
               : { error: { code: (r.error as any)?.code, message: clip(factOnly(String((r.error as any)?.message || '')), 300), ...argumentDetails((r.error as any)?.details),
                   ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)),

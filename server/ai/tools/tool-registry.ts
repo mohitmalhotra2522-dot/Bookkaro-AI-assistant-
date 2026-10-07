@@ -78,6 +78,7 @@ export const REGISTERED_TOOLS: ToolDefinition[] = [
       preferredClass: { type: 'string', description: 'AC | NON_AC | ANY', enum: ['AC','NON_AC','ANY'] },
       preferredTime: { type: 'string', description: 'MORNING | AFTERNOON | EVENING | NIGHT | ANY', enum: ['MORNING','AFTERNOON','EVENING','NIGHT','ANY'] },
       passengersCount: { type: 'number', description: 'Number of passengers 1-6' },
+      requestedClass: { type: 'string', description: 'P42.7: the exact class CODE the user asked for, only when the user named one (1A, 2A, 3A, 3E, SL, CC, EC, 2S, FC, EA, EV). Omit when the user did not name a class.' },
       dateExpression: { type: 'string', description: 'Raw date words as the user said them (kal / parso / 5 March) — the backend DateResolver resolves it (optional)' }
     },
     requiresState: ['origin','destination','date']
@@ -173,7 +174,9 @@ export const SEARCH_SAME_TRAIN_ALTERNATIVES_TOOL: ToolDefinition = {
   description: 'OPTIONAL Same Train Alternative recovery search — only when YOU judge it useful AND the requested train/class shows a SHORTAGE for this party: WAITLIST, NOT_AVAILABLE, REGRET, TRAIN_CANCELLED, or fewer seats than passengers (e.g. AVAILABLE-0001 for 3 passengers = INSUFFICIENT_SEATS). Never for sufficient availability (e.g. AVAILABLE-0005 for 2 passengers) — the backend refuses that (SAME_TRAIN_ALTERNATIVE_NOT_NEEDED). UNKNOWN / timeout / provider error is NOT a shortage. SEARCH_TRAINS / CHECK_AVAILABILITY results carry seatCheck (requestedPassengerCount, shortages with availableSeatCount + triggerReason) to help you decide. One call = one train + one class: for several shortage classes listed on the train, or several displayed trains with a shortage, make targeted separate calls (they run in parallel; a per-turn budget applies) — never invent a class or train. Checks other TICKET station pairs on the SAME train number, same date / class / passengers: upstream ticket origins (train origin … requested origin) and downstream ticket destinations (5–7 stations after the requested destination, none if it is the terminal). Route comes from a provider timetable; every pair is a FRESH provider availability call (bounded, parallel). Returns per-pair availability with availabilityStatus, availableSeatCount, requestedPassengerCount, seatSufficiency (SUFFICIENT only when count ≥ passengers), provider evidence, verificationStatus (VERIFIED / PARTIALLY_VERIFIED / UNVERIFIED / CONFLICTING), boardingRuleStatus / alightingRuleStatus (UNVERIFIED = do NOT tell the user they can board / deboard at the requested station), and outcome (NO_VERIFIED_SAME_TRAIN_ALTERNATIVE when nothing covers the party — you phrase it). You decide relevance, order and wording; optionally call PRESENT_SAME_TRAIN_ALTERNATIVES to mark your best match. Nothing is booked or changed.',
   parameters: {
     trainNumber: { type: 'string', description: 'The SAME train number (from the shown results, the selected train, or the user\'s words).', required: true },
-    travelClass: { type: 'string', description: 'Class code (default: the selected class).' },
+    travelClass: { type: 'string', description: 'The REQUESTED class code (default: the selected class, else the class the user named at search). No train / class selection is needed — a train from the shown results is enough.' },
+    classes: { type: 'string', description: 'P42.7 all-class route matrix: ALL (default — every class the train\'s search result lists; requested class first), REQUESTED (only travelClass), or comma-separated codes from that train\'s listed classes.' },
+    explicitUserRequest: { type: 'boolean', description: 'true ONLY when the user explicitly asked for more / other same-train options although the requested class already has enough seats.' },
     date: { type: 'string', description: 'Journey date YYYY-MM-DD (default: the session journey date).' },
     dateExpression: { type: 'string', description: 'Date exactly as the user said it ("kal") — resolved by the backend.' },
     origin: { type: 'string', description: 'Requested boarding station CODE (default: session journey origin).' },
@@ -181,7 +184,7 @@ export const SEARCH_SAME_TRAIN_ALTERNATIVES_TOOL: ToolDefinition = {
     passengersCount: { type: 'number', description: 'Passengers 1–6 (default: session count or 1).' },
     originSweep: { type: 'boolean', description: 'Check upstream ticket origins (default true).' },
     destinationSweep: { type: 'boolean', description: 'Check downstream ticket destinations (default true; ignored when the destination is the terminal).' },
-    destinationExtensionStations: { type: 'number', description: 'How many stations after the destination to try: 5–7 (default 6).' },
+    destinationExtensionStations: { type: 'number', description: 'How many stations after the destination to try: 5–7 (default 7; never past the terminal). Up to 15 earlier boarding stations are checked.' },
     combinedPairs: { type: 'string', description: 'Upstream origin + downstream destination together: AUTO (only if no AVAILABLE / RAC pair found otherwise), ALWAYS, NEVER. Default AUTO.', enum: ['AUTO', 'ALWAYS', 'NEVER'] },
     providers: { type: 'string', description: 'Comma-separated availability providers to use (e.g. "railcore,railradar"). Default: all configured railway APIs.' },
     routeProvider: { type: 'string', description: 'Provider whose timetable gives the route (must support timetable). Default: first chosen provider with a timetable.' },

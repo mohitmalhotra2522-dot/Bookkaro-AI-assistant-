@@ -8,7 +8,7 @@
  *   - sameTrainFallbackText: deterministic one-liner used ONLY when no grounded Muse wording survives.
  */
 import type { SameTrainAlternative, SameTrainAlternativesResult } from '@shared/same-train-alternatives';
-import { SAME_TRAIN_ALL_FAILED_MESSAGE } from '@shared/same-train-alternatives';
+import { SAME_TRAIN_ALL_FAILED_MESSAGE, toSameTrainRecoveryResults } from '@shared/same-train-alternatives';
 import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 
 const evidenceLine = (a: SameTrainAlternative) => a.evidence
@@ -19,11 +19,15 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
   // compact per-option entries (the transcript has a size budget): station names once at the top, rule status only
   // when a rule matters, travel stations only when they differ from the ticket (VERIFIED rule)
   const alternatives: Record<string, unknown> = {};
+  // P42.7 all-class matrix: requested-class entries in full; another class only when VERIFIED for the party (AVL / RAC) —
+  // the rest of the other-class matrix is a count (transcript budget). Each entry names its own class when it differs.
+  let otherClassNotVerified = 0;
   for (const a of r.alternatives) {
+    if (a.travelClass !== r.travelClass && !isVerifiedSameTrainAlternative(a)) { otherClassNotVerified++; continue; }
     const travel = `${a.boardingStation}→${a.alightingStation}`;
     const ticket = `${a.ticketOrigin}→${a.ticketDestination}`;
     alternatives[a.alternativeId] = {
-      kind: a.kind, ticket,
+      kind: a.kind, ticket, ...(a.travelClass !== r.travelClass ? { class: a.travelClass } : {}),
       availability: a.availability, ...(a.availabilityStatusText ? { status: a.availabilityStatusText } : {}),
       // P42.2: REGRET / TRAIN_CANCELLED stay distinct; exact seat count + sufficiency for THIS party
       ...(a.availabilityStatus && a.availabilityStatus !== a.availability && a.availabilityStatus !== 'UNKNOWN' ? { availabilityStatus: a.availabilityStatus } : {}),
@@ -53,6 +57,8 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
     searchComplete: r.searchComplete ?? (!r.candidatesTruncated && r.status !== 'PARTIAL'),
     trainNumber: r.trainNumber, ...(r.trainName ? { trainName: r.trainName } : {}), date: r.date, travelClass: r.travelClass, passengersCount: r.passengersCount,
     requested: `${r.requestedOrigin}→${r.requestedDestination}`,
+    ...(r.classesChecked && r.classesChecked.length > 1 ? { classesChecked: r.classesChecked.join(',') } : {}),
+    ...(otherClassNotVerified ? { otherClassOptionsNotVerified: otherClassNotVerified } : {}),
     route: { provider: r.route.provider, trainOrigin: r.route.trainOrigin, trainTerminal: r.route.trainTerminal,
       originSweep: r.route.originSweep.join(','), destinationExtension: r.route.destinationExtension.join(','), destinationSweep: r.route.destinationSweep },
     providerCoverage: r.providers.map(p => `${p.provider}: ${p.succeeded}/${p.requested} ok${p.timeouts ? `, ${p.timeouts} timeout` : ''}${p.failed ? `, ${p.failed} failed` : ''}`).join(' · '),
@@ -75,6 +81,8 @@ export function sameTrainCardData(r: SameTrainAlternativesResult, opts: { stale?
     })),
     route: { ...r.route },
     verifiedAlternativeCount: r.verifiedAlternativeCount ?? r.alternatives.filter(isVerifiedSameTrainAlternative).length,
+    // P42.7 Part 28: flat SameTrainRecoveryResult view of the verified options (projection only, route / class order)
+    recovery: toSameTrainRecoveryResults(r, !!opts.stale),
     stale: !!opts.stale
   };
 }
@@ -91,5 +99,5 @@ export function sameTrainFallbackText(r: SameTrainAlternativesResult | null, err
   const first = good[0];
   const rule = first.boardingRuleStatus === 'UNVERIFIED' ? ` ${r.requestedOriginName || r.requestedOrigin} se boarding ka rule verify karna zaroori hai.`
     : first.alightingRuleStatus === 'UNVERIFIED' ? ` ${r.requestedDestinationName || r.requestedDestination} par utarne ka rule verify karna zaroori hai.` : '';
-  return `${checked} ${good.length} option${good.length > 1 ? 's' : ''} mein availability mili, jaise ${label(first)}: ${first.availabilityStatusText || first.availability}.${rule} Details screen par hain.`;
+  return `${checked} ${good.length} option${good.length > 1 ? 's' : ''} mein availability mili, jaise ${label(first)}${first.travelClass !== r.travelClass ? ` (${first.travelClass})` : ''}: ${first.availabilityStatusText || first.availability}.${rule} Details screen par hain.`;
 }
