@@ -158,8 +158,22 @@ const STATUS_NUM_RE = new RegExp(STATUS_NUM_SRC, 'i');
 const COUNT_SEAT_RE = /\b(\d{1,3}|ek|do|teen|char|chaar|paanch|das|one|two|three|four|five|ten)\s+(seats?|berths?)\b(?=[^.?!]*\b(available|khaali|khali|bachi|bache|baaki|left|remaining)\b)/i;
 /** P42.2: "3 seats hain", "sirf 1 seat hai", "3 seats mil rahi hain" — a count stated as the current state (the verb
  *  follows the count directly, so "2 seats chahiye" / "2 seats book karni hain" are not seat claims) */
-const COUNT_SEAT_STATE_RE = /\b(\d{1,3}|ek|do|teen|char|chaar|paanch|das|one|two|three|four|five|ten)\s+(seats?|berths?)\s+(?:hi\s+|bhi\s+)?(hain|hai|h|he|mil\s+rahi|mil\s+rahe|mil\s+jayengi|mil\s+jayegi|milengi|milegi|milenge)\b/i;
-const COUNT_WORDS: Record<string, number> = { ek: 1, one: 1, do: 2, two: 2, teen: 3, three: 3, char: 4, chaar: 4, four: 4, paanch: 5, five: 5, das: 10, ten: 10 };
+const COUNT_SEAT_STATE_RE = /\b(\d{1,3}|ek|do|teen|char|chaar|paanch|das|one|two|three|four|five|ten|zero)\s+(?:confirmed\s+|confirm\s+|cnf\s+|khaali\s+|khali\s+|available\s+)?(seats?|berths?)\s+(?:hi\s+|bhi\s+)?(hain|hai|h|he|mil\s+rahi|mil\s+rahe|mil\s+jayengi|mil\s+jayegi|milengi|milegi|milenge)\b/i;
+/** P42.3: a concrete available-seat COUNT tied to an availability word in the same clause: "1 seat available hai",
+ *  "one seat is available", "2 berths abhi khaali hain", "0 confirmed seats available". At most 3 words between the
+ *  count phrase and the availability word, never across a comma / clause break — so in "1 seat available hai, baki 2
+ *  seats waitlist mein" only "1 seat available" is a count claim. A trailing "nahi" / "not" makes it a negative claim. */
+const COUNT_AVAIL_SRC = String.raw`\b(\d{1,3}|ek|do|teen|char|chaar|paanch|das|one|two|three|four|five|ten|zero)\s+(?:confirmed\s+|confirm\s+|cnf\s+)?(?:seats?|berths?)\s+(?:[^\s,.;:!?–—-]+\s+){0,3}?(?:is\s+|are\s+)?(available|avl|avbl|khaali|khali|bachi|bache|baaki|left|remaining|free)\b(\s+(?:nahi|nahin|nhi|not)\b)?`;
+const COUNT_AVAIL_RE = new RegExp(COUNT_AVAIL_SRC, 'i');
+/** P42.3: a plain present-tense affirmation that seats ARE available (no count) — used only to keep a conditional /
+ *  modal sentence from hiding a concrete claim and to catch "WL 1 hai, seats available hain" style contradictions */
+const STRICT_AFFIRM_RE = /\b((seats?|berths?|tickets?)\s+(available|khaali|khali)\b(?!\s+(nahi|nahin|nhi|not)\b)|available\s+(hai|hain|h|he)\b|(is|are)\s+(currently\s+|still\s+|now\s+)?available\b|confirmed\s+seats?\s+(hai|hain|available))/i;
+/** P42.3: the leading condition of a conditional sentence ("Agar aap seat chahte hain," / "If you want," / "Jab chahein
+ *  to") — a concrete claim in the CONSEQUENT is still a railway fact and is checked */
+const CONDITION_CLAUSE_RE = /^\s*(?:agar|if|jab|when|in\s+case)\b[^,;]*?(?:,|\bto\b|\bthen\b)/i;
+const consequentOf = (t: string) => t.replace(CONDITION_CLAUSE_RE, ' ');
+const hasCountClaim = (t: string) => COUNT_AVAIL_RE.test(t) || COUNT_SEAT_STATE_RE.test(t);
+const COUNT_WORDS: Record<string, number> = { zero: 0, ek: 1, one: 1, do: 2, two: 2, teen: 3, three: 3, char: 4, chaar: 4, four: 4, paanch: 5, five: 5, das: 10, ten: 10 };
 const countOf = (w: string) => { const n = Number(w); return Number.isFinite(n) ? n : COUNT_WORDS[w.toLowerCase()]; };
 /** present / definite affirmation of seats ("available hai", "seats khaali", "seat mil jayegi", "confirmed seat milegi") */
 const PRESENT_AFFIRM_RE = /\b(available\s+(hai|hain|h|he|ho|tha|thi)\b|(is|are)\s+(currently\s+|still\s+|now\s+)?available|available\s+(now|abhi)\b|seats?\s+(available|khaali|khali|bachi|bache|baaki|left)|berths?\s+(available|khaali|khali|bachi|left)|availability\s+(hai|hain|achhi|good|open)\b|(seats?|tickets?|berths?)\s+(mil\s+(jaayegi|jayegi|jaegi|jayega|jaega|jaayega)|milegi|milega|mil\s+rahi|mil\s+rahe)|seats?\s+confirm(ed)?\s+(hai|milegi|milega|ho\s+(jayegi|jaayegi|jaegi))|confirmed\s+seats?\s+(hai|hain|milegi|milega|available)|cnf\s+(hai|milega|milegi)|seats?\s+pakki|pakki\s+seats?)/i;
@@ -213,9 +227,15 @@ export function classifyAvailabilityClaim(t: string, origin: 'USER' | 'ASSISTANT
   if (strong && USER_ATTRIB_RE.test(text) && !VERIFY_CLAIM_RE.test(text)) return 'USER_PROVIDED_FACT';
   // Prompt 28: a status code inside an unanchored explanation / hypothetical ("agar RAC 1 wala cancel kare to berth mil
   // jaati hai") is general knowledge; a definite promise to the user ("WL 8 milega") stays a live claim
-  if (code || count) return !anchored && (MODAL_GK_RE.test(text) || HYPOTHETICAL_RE.test(text)) && !DEFINITE_PROMISE_RE.test(text)
+  // P42.3: conditional / modal wording ("Agar aap seat chahte hain, to 1 seat available hai", "If you want, one seat is
+  // available", "you can …") is NOT a reason to skip fact-checking — a concrete seat count or a present "available hai"
+  // assertion outside the condition clause is a live claim. Explanations ("WL1 ka matlab waitlist hai", "agar RAC 1 wala
+  // cancel kare to berth mil jaati hai") carry no such assertion and stay general knowledge.
+  const rest = consequentOf(text);
+  const concrete = !EXPLAIN_ONLY_RE.test(text) && (hasCountClaim(rest) || STRICT_AFFIRM_RE.test(rest)) && !/\b(sakti|sakta|sakte|sakein|ho\s+jaati|ho\s+jati|jaati\s+hain?|jati\s+hain?|hoti\s+hain?|hote\s+hain|milti\s+hain?|milte\s+hain|usually|generally|normally|typically)\b/i.test(rest);
+  if (code || count) return !anchored && !concrete && (MODAL_GK_RE.test(text) || HYPOTHETICAL_RE.test(text)) && !DEFINITE_PROMISE_RE.test(text)
     ? 'GENERAL_KNOWLEDGE_CLAIM' : 'LIVE_AVAILABILITY_CLAIM';
-  if (strong) return !anchored && MODAL_GK_RE.test(text) ? 'GENERAL_KNOWLEDGE_CLAIM' : 'LIVE_AVAILABILITY_CLAIM';
+  if (strong) return !anchored && !concrete && MODAL_GK_RE.test(text) ? 'GENERAL_KNOWLEDGE_CLAIM' : 'LIVE_AVAILABILITY_CLAIM';
   if (META_RE.test(text)) return 'NONE';
   // a specific train + seat vocabulary ("12014 mein waiting chal rahi hai") is about that train's live status
   if (trainAnchor && !EXPLAIN_ONLY_RE.test(text)) return 'LIVE_AVAILABILITY_CLAIM';
@@ -228,30 +248,60 @@ export const normAvailabilityStatus = (x: string) => String(x || '').toUpperCase
   .replace(/WAIT\s*LIST(ED)?|WAITING(\s+LIST)?|GNWL|PQWL|RLWL|RSWL|TQWL/g, 'WL').replace(/\bCURR_AVBL\b|\bAVBL\b|\bAVL\b/g, 'AVAILABLE')
   .replace(/[-/#:]+/g, ' ').replace(/\b0+(\d)/g, '$1').replace(/\s+/g, ' ').trim();
 
+/** A stated seat count as a claim: 0 = "no confirmed seats" (a negative claim), otherwise AVAILABLE n. */
+const countClaim = (w: string, negated = false): ClaimedStatus => {
+  const n = countOf(w);
+  return negated || n === 0 ? { kind: 'NOT_AVAILABLE' } : { kind: 'AVAILABLE', ...(n !== undefined ? { n } : {}) };
+};
+
 function claimedStatuses(t: string): ClaimedStatus[] {
   const out: ClaimedStatus[] = [];
   for (const m of t.matchAll(new RegExp(STATUS_NUM_SRC, 'gi'))) {
     const w = m[1].toUpperCase();
     out.push({ kind: w === 'RAC' ? 'RAC' : /^(AVL|AVBL|AVAILABLE)$/.test(w) ? 'AVAILABLE' : 'WL', n: Number(m[2]) });
   }
+  // P42.3: concrete seat counts are claims IN ADDITION to any status code / waitlist word in the same sentence —
+  // "WL 1 hai, 1 seat available hai" claims WL 1 AND AVAILABLE 1, and each must match the authoritative result
+  for (const m of t.matchAll(new RegExp(COUNT_AVAIL_SRC, 'gi'))) out.push(countClaim(m[1], !!m[3]));
+  if (!out.some(c => c.kind === 'AVAILABLE' || c.kind === 'NOT_AVAILABLE')) {
+    const st = t.match(COUNT_SEAT_STATE_RE);
+    if (st) out.push(countClaim(st[1]));
+  }
+  // …and a plain "seats available hain" next to a waitlist / RAC code is an AVAILABLE claim too (cross-status check)
+  if (out.length && out.some(c => c.kind === 'WL' || c.kind === 'RAC') && !out.some(c => c.kind === 'AVAILABLE' || c.kind === 'NOT_AVAILABLE')
+    && !NEG_STATE_RE.test(t) && STRICT_AFFIRM_RE.test(t)) out.push({ kind: 'AVAILABLE' });
   if (out.length) return out;
   if (NEG_STATE_RE.test(t)) return [{ kind: 'NOT_AVAILABLE' }];
-  if (/\bRAC\b/i.test(t)) return [{ kind: 'RAC' }];
-  if (/\b(WL|waitlist(ed)?|waiting)\b/i.test(t)) return [{ kind: 'WL' }];
+  if (/\bRAC\b/i.test(t) || /\b(WL|waitlist(ed)?|waiting)\b/i.test(t)) {
+    const kinds: ClaimedStatus[] = [];
+    if (/\bRAC\b/i.test(t)) kinds.push({ kind: 'RAC' });
+    if (/\b(WL|waitlist(ed)?|waiting)\b/i.test(t)) kinds.push({ kind: 'WL' });
+    if (STRICT_AFFIRM_RE.test(t)) kinds.push({ kind: 'AVAILABLE' });
+    return kinds;
+  }
   const c = t.match(COUNT_SEAT_RE) || t.match(COUNT_SEAT_STATE_RE);
   if (c) { const n = countOf(c[1]); return [{ kind: 'AVAILABLE', ...(n !== undefined ? { n } : {}) }]; }
   if (PRESENT_AFFIRM_RE.test(t) || TREND_RE.test(t)) return [{ kind: 'AVAILABLE' }];
   return [{ kind: 'ANY' }];
 }
 
+/** P42.3: a status that says nothing about seats (unknown / timeout / provider error / empty) supports NO claim —
+ *  neither "seats available" nor "no seats". */
+const UNKNOWN_STATUS_RE = /^(UNKNOWN|TIMEOUT|TIMED OUT|TOOL TIMEOUT|ERROR|PROVIDER ERROR|PROVIDER_ERROR|PROVIDER UNAVAILABLE|FAILED|NULL|UNDEFINED|N A|NA|-|)$/;
+
 function statusMatches(c: ClaimedStatus, e: AvailabilityEvidence): boolean {
   const st = normAvailabilityStatus(e.status);
-  const num = Number((st.match(/\d+/) || [])[0]);
+  // the count is ONLY the number belonging to the status itself ("AVAILABLE 10", "WL 1", "RAC 4") — never a request id,
+  // timestamp, PNR, train number or any other provider metadata
+  const num = Number((st.match(/^(?:AVAILABLE|WL|RAC)\s?(\d+)/) || [])[1]);
+  if (c.kind !== 'ANY' && (UNKNOWN_STATUS_RE.test(st) || /\bUNKNOWN\b|\bTIMEOUT\b/.test(st))) return false;
+  const availZero = /^AVAILABLE\s?0+$/.test(st);
   switch (c.kind) {
     case 'ANY': return true;
-    case 'NOT_AVAILABLE': return e.available === false || (!/^AVAILABLE/.test(st) && e.available !== true);
+    case 'NOT_AVAILABLE': return availZero || e.available === false || (!/^AVAILABLE/.test(st) && e.available !== true);
     case 'AVAILABLE': {
-      const isAvail = /^AVAILABLE/.test(st) || (e.available === true && !/^(RAC|WL)/.test(st));
+      // "WL1" / "RLWL1" is a waitlist POSITION, never a confirmed or available seat; "AVAILABLE 0" is no seat
+      const isAvail = !availZero && (/^AVAILABLE/.test(st) || (e.available === true && !/^(RAC|WL)/.test(st) && !/\bWL\d*\b/.test(st)));
       return isAvail && (c.n === undefined || num === c.n);
     }
     case 'RAC': return /^RAC/.test(st) && (c.n === undefined || num === c.n);
