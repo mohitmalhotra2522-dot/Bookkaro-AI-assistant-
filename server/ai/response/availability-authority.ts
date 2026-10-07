@@ -45,7 +45,8 @@ export type AvailabilityOutcome =
   | Exclude<AvailabilityClassification, 'LIVE_AVAILABILITY_CLAIM'>
   | 'VERIFIED_AVAILABILITY' | 'UNVERIFIED_AVAILABILITY' | 'AVAILABILITY_MISMATCH' | 'CLASS_NOT_LISTED';
 
-export type ClaimedStatus = { kind: 'AVAILABLE' | 'RAC' | 'WL' | 'NOT_AVAILABLE' | 'ANY'; n?: number };
+/** F2: 'WL_SEATS' = a waitlist POSITION stated as a seat count ("62 seats wait-list mein") — never true for any result. */
+export type ClaimedStatus = { kind: 'AVAILABLE' | 'RAC' | 'WL' | 'NOT_AVAILABLE' | 'ANY' | 'WL_SEATS'; n?: number };
 
 /** Internal provenance of an availability sentence — never shown to the user. */
 export interface AvailabilityProvenance {
@@ -149,6 +150,21 @@ const mentionsPair = (t: string, pair: NonNullable<AvailabilityEvidence['alterna
 // ------------------------------------------------------------------ classification (linguistic only)
 
 const CLASS_CODE_RE = /\b(1A|2A|3A|3E|CC|EC|SL|2S|FC|EA)\b/g;
+/** F2 (post-P42.10): "wait-list" / "wait‑list" (U+2010–U+2015 hyphens / dashes) / "wait list" is the waitlist word —
+ *  the LLM's typographic hyphen must not hide a waitlist claim from the rules below (normalised before classification). */
+const normWaitlistWords = (t: string) => String(t || '').replace(/\bwait[\s\-\u2010-\u2015]+list(ed)?\b/gi, 'waitlist$1');
+/** F2: a WL / RAC position stated as a SEAT COUNT in the same clause — "62 seats wait-list mein", "62 seats are on the
+ *  waitlist", "waitlist mein 62 seats hain". At most 3 words between, never across a clause break; a NEED ("2 seats ke
+ *  liye waitlist 12") or an availability word ("5 seats available, baaki waitlist") in between is not this claim. */
+const WL_SEATS_FWD_SRC = String.raw`\b(\d{1,4})\s+(?:seats?|berths?)\s+((?:[^\s,.;:!?–—-]+\s+){0,3}?)(?:waitlist(?:ed)?|waiting(?:\s+list)?|WL|GNWL|RLWL|PQWL|TQWL|RAC)\b`;
+const WL_SEATS_REV_SRC = String.raw`\b(?:waitlist(?:ed)?|waiting(?:\s+list)?|WL|GNWL|RLWL|PQWL|TQWL|RAC)\s+((?:[^\s,.;:!?–—-]+\s+){0,2}?)(\d{1,4})\s+(?:seats?|berths?)\b`;
+const WL_SEATS_GAP_EXCLUDE_RE = /\b(ke|liye|for|chahiye|chahiyein|need|needed|book|available|avl|avbl|khaali|khali|bachi|bache|baaki|left|remaining|confirm(ed)?|cnf)\b/i;
+function wlAsSeats(t: string): number[] {
+  const out: number[] = [];
+  for (const m of t.matchAll(new RegExp(WL_SEATS_FWD_SRC, 'gi'))) if (!WL_SEATS_GAP_EXCLUDE_RE.test(m[2] || '')) out.push(Number(m[1]));
+  for (const m of t.matchAll(new RegExp(WL_SEATS_REV_SRC, 'gi'))) if (!WL_SEATS_GAP_EXCLUDE_RE.test(m[1] || '')) out.push(Number(m[2]));
+  return out;
+}
 /** a sentence that mentions seats / berths / availability vocabulary at all */
 const AVAIL_WORD_RE = /\b(available|availability|unavailable|avl|avbl|khaali|khali|seats?|berths?|cnf|waiting|waitlist(?:ed)?|wl|gnwl|rlwl|pqwl|tqwl|rac|sold\s?out|regret)\b/i;
 /** a status code with a position: "RAC 5", "WL 4", "Waitlist 12", "AVL 0012" */
@@ -198,7 +214,7 @@ const DEFINITE_PROMISE_RE = /\b(milega|milegi|milenge|you\s*'?ll\s+get|you\s+wil
 
 const codesIn = (t: string) => [...new Set((t.match(CLASS_CODE_RE) || []).map(c => c.toUpperCase()))];
 const trainNumsIn = (t: string) => [...new Set(t.match(TRAIN_NUM_RE) || [])];
-export const hasAvailabilityCode = (t: string) => STATUS_NUM_RE.test(t);
+export const hasAvailabilityCode = (t: string) => STATUS_NUM_RE.test(normWaitlistWords(t));
 
 /** Prompt 25/26: "CC aur 2S available" — an ENUMERATION of ≥2 listed classes with no seat / status vocabulary. */
 export function isClassEnumeration(t: string): boolean {
@@ -211,11 +227,11 @@ export function classifyAvailabilityClaim(t: string, origin: 'USER' | 'ASSISTANT
   // P39.2: asking for / noting a passenger's BERTH PREFERENCE ("12926 3A mein berth preference batayein", "Lower berth
   // note kiya") is not seat-availability vocabulary. Only these phrases are neutralised — "available", "khaali", seat /
   // status words and codes in the same sentence are still classified exactly as before.
-  const text = String(t || '').replace(BERTH_PREF_RE, 'preference');
+  const text = normWaitlistWords(String(t || '')).replace(BERTH_PREF_RE, 'preference');
   const neg = NEG_STATE_RE.test(text);
   if (!AVAIL_WORD_RE.test(text) && !neg) return 'NONE';
   const code = STATUS_NUM_RE.test(text);
-  const count = COUNT_SEAT_RE.test(text) || COUNT_SEAT_STATE_RE.test(text);
+  const count = COUNT_SEAT_RE.test(text) || COUNT_SEAT_STATE_RE.test(text) || wlAsSeats(text).length > 0;
   const pos = PRESENT_AFFIRM_RE.test(text) || TREND_RE.test(text);
   const trainAnchor = trainNumsIn(text).length > 0 || THIS_TRAIN_RE.test(text);
   const anchored = trainAnchor || DAY_RE.test(text) || codesIn(text).length > 0;
@@ -254,7 +270,15 @@ const countClaim = (w: string, negated = false): ClaimedStatus => {
   return negated || n === 0 ? { kind: 'NOT_AVAILABLE' } : { kind: 'AVAILABLE', ...(n !== undefined ? { n } : {}) };
 };
 
+/** F2: "62 seats wait-list mein" states a waitlist position as seats — a claim no result can support. It is checked
+ *  AFTER the sentence's existing claims, so their (more specific) mismatch reasons keep priority. */
 function claimedStatuses(t: string): ClaimedStatus[] {
+  const base = baseClaimedStatuses(t);
+  const wl = wlAsSeats(t);
+  return wl.length ? [...base.filter(c => c.kind !== 'ANY'), ...wl.map(n => ({ kind: 'WL_SEATS' as const, n }))] : base;
+}
+
+function baseClaimedStatuses(t: string): ClaimedStatus[] {
   const out: ClaimedStatus[] = [];
   for (const m of t.matchAll(new RegExp(STATUS_NUM_SRC, 'gi'))) {
     const w = m[1].toUpperCase();
@@ -306,6 +330,7 @@ function statusMatches(c: ClaimedStatus, e: AvailabilityEvidence): boolean {
     }
     case 'RAC': return /^RAC/.test(st) && (c.n === undefined || num === c.n);
     case 'WL': return /^WL/.test(st) && (c.n === undefined || num === c.n);
+    case 'WL_SEATS': return false;   // F2: a WL / RAC position is never a seat count
   }
 }
 
@@ -316,7 +341,7 @@ function claimDate(t: string, s: any): string | undefined {
   return explicitDates(t)[0] ?? str(s?.date);
 }
 
-const mismatchReason = (c: ClaimedStatus) =>
+const mismatchReason = (c: ClaimedStatus) => c.kind === 'WL_SEATS' ? 'AVAILABILITY_MISMATCH:WL_POSITION_AS_SEATS' :
   c.n !== undefined && c.kind !== 'ANY' && c.kind !== 'NOT_AVAILABLE' ? `AVAILABILITY_MISMATCH:${c.kind} ${c.n}` : 'AVAILABILITY_MISMATCH';
 
 /** Evidence in scope of the sentence (train / date / class). Another train's or another date's result never applies. */
@@ -352,7 +377,7 @@ export function hasScopedAvailability(t: string, ctx: AvailabilityContext): bool
 
 /** THE availability rule. Classification first, then structured matching against CHECK_AVAILABILITY evidence only. */
 export function judgeAvailabilityClaim(t: string, ctx: AvailabilityContext): AvailabilityVerdict {
-  const text = String(t || '');
+  const text = normWaitlistWords(String(t || ''));
   let cls = classifyAvailabilityClaim(text, ctx.origin || 'ASSISTANT');
   // an enumeration is a class list — unless an availability result exists for it, then it IS a seat claim
   if (cls === 'CLASS_LIST' && hasScopedAvailability(text, ctx)) cls = 'LIVE_AVAILABILITY_CLAIM';
