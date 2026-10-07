@@ -77,7 +77,10 @@ export function sameTrainCardData(r: SameTrainAlternativesResult, opts: { stale?
       ...a,
       evidence: a.evidence.map(e => ({ provider: e.provider, providerLabel: e.providerLabel, level: e.level, outcome: e.outcome, fetchedAt: e.fetchedAt,
         ...(e.availability ? { status: e.availability.status, category: e.availability.category } : {}), ...(e.errorCode ? { errorCode: e.errorCode } : {}),
-        ...(e.fare ? { fare: e.fare } : {}) }))
+        ...(e.fare ? { fare: e.fare } : {}),
+        // P42.9: a backend fallback is never hidden — the served provider AND why the primary was not used stay visible
+        ...(e.fallbackUsed ? { fallbackUsed: true, fallbackReason: e.fallbackReason, primaryProvider: e.primaryProvider } : {}),
+        ...(e.rateLimited ? { rateLimited: true } : {}) }))
     })),
     route: { ...r.route },
     verifiedAlternativeCount: r.verifiedAlternativeCount ?? r.alternatives.filter(isVerifiedSameTrainAlternative).length,

@@ -12,6 +12,7 @@ import { RailCoreProvider } from '../../server/railway/providers/live/railcore-p
 import { classifyHttpStatus } from '../../server/railway/providers/live/live-http';
 import { fallbackProviderFor, isFallbackEligible, runWithProviderFallback, providerFallbackEnabled, FALLBACK_ELIGIBLE_CODES } from '../../server/railway/providers/provider-fallback';
 import { providerToolCatalog } from '../../server/ai/tools/provider-tools';
+import { sameTrainCardData } from '../../server/railway/same-train/same-train-view';
 import { runSameTrainSearch, SAME_TRAIN_FALLBACK_ELIGIBLE, sameTrainLimitsFromEnv, type SameTrainDeps, type SameTrainSearchRequest, type ProviderRef, type AvailabilityQuery } from '../../server/railway/same-train/same-train-engine';
 import { SAME_TRAIN_DEFAULT_LIMITS, type SameTrainAlternativesResult } from '../../shared/same-train-alternatives';
 
@@ -204,6 +205,19 @@ describe('P42.9 G2 — same-train matrix (D1)', () => {
     // no duplicate calls within one execution
     expect(new Set(calls.railcore.map(key)).size).toBe(calls.railcore.length);
     expect(r.callStats!.deduped).toBe(0);
+  });
+
+  it('[10b] the screen payload keeps the fallback visible per evidence (provider + fallbackUsed + reason + primary); no raw bodies', async () => {
+    const { deps } = quotaDeps({ railcore: 20, railradar: 10 });
+    const r = await ok(REQ(), deps);
+    const card: any = sameTrainCardData(r);
+    const ev = card.alternatives.flatMap((a: any) => a.evidence);
+    const fb = ev.filter((e: any) => e.provider === 'railradar');
+    expect(fb.length).toBe(100);
+    expect(fb.every((e: any) => e.fallbackUsed === true && e.fallbackReason === 'RATE_LIMITED' && e.primaryProvider === 'railcore')).toBe(true);
+    expect(ev.filter((e: any) => e.provider === 'railcore').every((e: any) => e.fallbackUsed === undefined)).toBe(true);
+    const allowed = ['provider', 'providerLabel', 'level', 'outcome', 'fetchedAt', 'status', 'category', 'errorCode', 'fare', 'fallbackUsed', 'fallbackReason', 'primaryProvider', 'rateLimited'];
+    expect(ev.every((e: any) => Object.keys(e).every(k => allowed.includes(k)))).toBe(true);
   });
 
   it('[11] INVALID / identity-mismatch answers never fall back; both providers failing → PROVIDER_UNAVAILABLE (never NOT_AVAILABLE)', async () => {
