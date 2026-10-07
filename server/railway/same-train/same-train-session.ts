@@ -19,7 +19,7 @@ import type { SameTrainAlternativesResult } from '@shared/same-train-alternative
 import { sameTrainAlternativesEnabledFromEnv } from '../../ai/tools/tool-registry';
 import type { RailwayToolService } from '../tools/railway-tool-service';
 import { type SameTrainDeps, runSameTrainSearch } from './same-train-engine';
-import { liveSameTrainDeps, resolveSameTrainProviders, findSameTrainResult, type RevalidationOutcome } from './same-train-service';
+import { liveSameTrainDeps, resolveSameTrainProviders, findSameTrainResult, sameTrainResultsOf, isSameTrainResultStale, type RevalidationOutcome } from './same-train-service';
 
 // ------------------------------------------------------------------ 1) auto display discovery
 
@@ -77,6 +77,15 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   // already discovered for THIS list → return it (same result set; not a cache across lists — a new search = new version)
   const prior = ((s.sameTrainAutoSets || []) as any[]).find(r => r?.autoKey === key);
   if (prior) return { ok: true, code: 'OK', result: prior };
+  // P42.5: Muse (or the BFE safety-net) already searched exactly this train / class / party for THIS list in the current
+  // journey → show that same fresh result (no second provider fan-out for one list). Never an older list's result.
+  const listAt = Date.parse(String(sr.retrievedAt || sr.searchMeta?.retrievedAt || ''));
+  const museResult = Number.isFinite(listAt) ? sameTrainResultsOf(s).find((r: any) => r && String(r.trainNumber) === trainNumber
+    && String(r.travelClass).toUpperCase() === travelClass && Number(r.requestedPassengerCount ?? r.passengersCount) === pax
+    && (!s.date || r.date === s.date) && (!s.origin || r.requestedOrigin === s.origin) && (!s.destination || r.requestedDestination === s.destination)
+    && (r.contextSnapshot?.journeyVersion ?? null) === (s.journeyVersion ?? null) && Date.parse(String(r.completedAt || '')) >= listAt
+    && !isSameTrainResultStale(s, r)) : undefined;
+  if (museResult) return { ok: true, code: 'OK', result: museResult };
 
   const max = sameTrainAutoBudgetFromEnv(env);
   const b = s.sameTrainAutoBudget && s.sameTrainAutoBudget.version === version ? s.sameTrainAutoBudget : { version, used: 0 };

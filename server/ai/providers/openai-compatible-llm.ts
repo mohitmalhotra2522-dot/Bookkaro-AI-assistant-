@@ -136,6 +136,7 @@ export class OpenAICompatibleLLMProvider implements LLMProvider {
         context: input.context ?? null, currentTurnToolResults: input.currentTurnToolResults ?? [],
         recentMessages: input.history.slice(-8).map(h => ({ role: h.role, content: String(h.content).slice(0, 400) })),
         approvedTools: input.chainStop ? [] : tools,
+        ...(input.safetyNet ? { backendSafetyNet: input.safetyNet } : {}),
         ...(input.chainStop
           ? { chainStop: { reason: input.chainStop.reason, instruction: input.chainStop.instruction } }
           : { toolCallFormat: 'To request railway data add "toolCalls": [{"name": "<approved tool>", "arguments": {...}}]; omit it otherwise.' })
@@ -389,6 +390,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
             ...((r as any).sourceConflict ? { sourceConflict: (r as any).sourceConflict } : {}),
             // P42.2: seat facts before `data` so a clipped transcript never loses them
             ...(r.ok && r.seatCheck ? { seatCheck: r.seatCheck } : {}),
+            // P42.5: BFE eligibility fact (same train, board from an earlier station) — a fact, never an instruction
+            ...(r.ok && (r as any).bfeEligibility ? { bfeEligibility: bfeEligibilityLLMView((r as any).bfeEligibility) } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
               : { error: { code: (r.error as any)?.code, message: clip(factOnly(String((r.error as any)?.message || '')), 300), ...argumentDetails((r.error as any)?.details),
                   ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)),
@@ -399,8 +402,16 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
     }
   }
   // Prompt 27: the backend stopped the chain — a structured stop reason; the next message must be the answer
+  // P42.5: the backend safety-net result (structured, labelled as backend-originated — never a fake assistant tool call)
+  if (input.safetyNet) messages.push({ role: 'system', content: `BACKEND_SAFETY_NET ${clip(JSON.stringify({ origin: input.safetyNet.origin, outcome: input.safetyNet.outcome, results: input.safetyNet.results, ...(input.safetyNet.skipped ? { skipped: input.safetyNet.skipped } : {}) }), MAX_SAME_TRAIN_RESULT_CHARS)}\n${input.safetyNet.instruction}` });
   if (input.chainStop) messages.push({ role: 'system', content: `CHAIN_STOP ${JSON.stringify({ reason: input.chainStop.reason, code: input.chainStop.code })}: ${input.chainStop.instruction}` });
   return messages;
+}
+
+/** P42.5: the eligibility fact without its internal binding ids (turn / journey binding stays backend-side). */
+function bfeEligibilityLLMView(e: any): Record<string, unknown> {
+  const { binding, ...rest } = e || {};
+  return rest;
 }
 
 /** Prompt 25 Part 8: the structured validation reason (argument / expected / received) — nothing else from details. */

@@ -25,6 +25,8 @@ import { factOnly, missingInfoOf } from '../response/backend-question-policy';
 import { searchSameTrainAlternatives, liveSameTrainDeps, resolveSameTrainProviders, findSameTrainResult } from '../../railway/same-train/same-train-service';
 import { seatCheckFromSearch, seatCheckFromAvailability, seatCheckView, SameTrainErrorClass, SAME_TRAIN_BUDGET_EXCEEDED } from '@shared/same-train-shortage';
 import { sameTrainSearchesPerTurn } from '@shared/same-train-alternatives';
+import { evaluateBfeEligibility, bfeEligibilityCurrent, bfeKey, type BfeEligibility, type BfeBinding } from '@shared/bfe-eligibility';
+import { MAX_TOOL_STEPS_PER_TURN as BFE_MAX_TOOL_STEPS } from '../tool-runtime/railway-tool-runtime';
 import { sameTrainLLMView } from '../../railway/same-train/same-train-view';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { LLMProvider } from '../providers/llm-provider';
@@ -218,6 +220,36 @@ function identityStep(id?: ToolResultIdentity): { toolEntity?: Record<string, st
   return { ...(Object.keys(e).length ? { toolEntity: e } : {}), entityBindingStatus: id.binding };
 }
 
+/** P42.5 — one fresh availability fact of the current turn (input to BFE eligibility; never a decision). */
+type BfeFact =
+  | { kind: 'CHECK'; ok: boolean; binding: BfeBinding; provider: string | null; trainNumber: string; trainName?: string; classCode: string; date: string | null; origin: string | null; destination: string | null; status: string | null }
+  | { kind: 'SEARCH'; binding: BfeBinding; provider: string | null; data: any; date: string | null; origin: string | null; destination: string | null };
+
+/** P42.5 — what Muse receives after the backend safety-net (structured; Muse writes the reply). */
+export interface BfeSafetyNetInput {
+  origin: 'BACKEND_SAFETY_NET';
+  outcome: 'EXECUTED' | 'BFE_SKIPPED_TOOL_BUDGET';
+  instruction: string;
+  results: Array<Record<string, unknown>>;
+  skipped?: Array<Record<string, unknown>>;
+}
+
+export interface BfeSafetyNetLog {
+  event: 'bfe_safety_net'; sessionId: string | null; turnId: string | null; journeyVersion: number | null; trainNumber: string; classCode: string; date: string | null;
+  passengerCount: number | null; bfeEligible: boolean; eligibilityReason: string | null; museRequestedBfe: boolean; safetyNetTriggered: boolean;
+  skippedReason: string | null; toolExecutionId: string | null; bfeResultsCount: number; verifiedResultsCount: number; staleResultCount: number; latencyMs: number;
+}
+
+/** P42.5: `bfe_safety_net` metadata log — on unless BFE_SAFETY_NET_LOG=0 (off by default under vitest unless =1). */
+const bfeLogEnabled = () => process.env.BFE_SAFETY_NET_LOG === '1' || (process.env.BFE_SAFETY_NET_LOG !== '0' && !process.env.VITEST);
+
+export const BFE_SAFETY_NET_INSTRUCTION =
+  'You answered without checking same-train earlier-boarding options although fresh availability of this turn shows a shortage for this party. '
+  + 'The backend ran the existing SEARCH_SAME_TRAIN_ALTERNATIVES tool for exactly that train / class / date (it chose, ranked, selected and applied nothing). '
+  + 'Now write your reply from ALL verified results of this turn. Mention same-train options only if verified ones exist (AVAILABLE for the whole party, or RAC — RAC stays RAC, never call it a confirmed seat); '
+  + 'if none were verified or the search failed / was skipped, say so briefly and keep the original result. Never call an option best unless you rank it with PRESENT_SAME_TRAIN_ALTERNATIVES. '
+  + 'In voice, do not read every option — summarise. Do not repeat this note to the user.';
+
 export class LLMToolCallingRuntime {
   private validator = new ToolCallValidator();
   private searchOrch: RailwaySearchOrchestrator;
@@ -318,6 +350,11 @@ export class BoundToolRuntime {
     let lastDecision: AgentDecision | null = null;
     let nativeRecoveries = 0;
     let lastError: OrchestratorError | undefined;
+    // P42.5: BFE safety-net — checked at most once per turn, only when Muse answers without calling the BFE tool
+    let safetyNetChecked = false;
+    let safetyNet: BfeSafetyNetInput | undefined;
+    let safetyNetDraft: string | null = null;
+    this.bfeFacts = [];
     let llmLatencyMs = 0;
     let llmCalls = 0;
     const H = this.hooks;
@@ -370,7 +407,7 @@ export class BoundToolRuntime {
       const chainSteps = recs.map((r, i) => ({
         stepNumber: i + 1, llmCall: recLlmCall.get(r.toolExecutionId) || 0, toolName: r.tool, toolArgumentsSanitized: { ...(r.argumentsSummary || {}) },
         toolResultStatus: String(r.status), toolResultId: r.toolExecutionId,
-        decisionReason: r.rejectionReason === 'DUPLICATE_CALL' ? 'DEDUPLICATED' : r.retryOf ? 'BACKEND_RETRY' : r.llmRetry ? 'LLM_RETRY'
+        decisionReason: this.safetyNetExecIds.has(r.toolExecutionId) ? 'BACKEND_SAFETY_NET' : r.rejectionReason === 'DUPLICATE_CALL' ? 'DEDUPLICATED' : r.retryOf ? 'BACKEND_RETRY' : r.llmRetry ? 'LLM_RETRY'
           : r.status === 'REJECTED' ? `REJECTED:${r.rejectionReason || 'INVALID'}` : 'LLM_TOOL_CALL',
         retryCount: r.retryOf || r.llmRetry ? 1 : 0, latencyMs: r.latencyMs ?? null, parallelGroup: r.parallelGroup ?? null,
         ...identityStep(steps.find(st => st.result?.toolExecutionId === r.toolExecutionId)?.result?.identity)
@@ -444,11 +481,15 @@ export class BoundToolRuntime {
         tools: exposedTools(),
         context: H.buildContext?.(),
         currentTurnToolResults: [...turnResults],
-        agentTranscript: transcript.map(st => ({ ...st, toolCalls: [...st.toolCalls], results: [...st.results] }))
+        agentTranscript: transcript.map(st => ({ ...st, toolCalls: [...st.toolCalls], results: [...st.results] })),
+        ...(safetyNet ? { safetyNet } : {})
       })).decision;
       } catch (e: any) {
         llmLatencyMs += Date.now() - t0;
         safeObs(() => H.observer?.onLLM?.('end', iter, { toolCalls: 0, final: true }));
+        // P42.5: Muse already answered this turn before the safety-net ran — its own answer stands (the verified
+        // same-train cards are attached by the normal result path); nothing is fabricated
+        if (safetyNet && safetyNetDraft !== null && !H.isStale?.()) return done(safetyNetDraft, 'final');
         return done('', 'error', { code: 'LLM_UNAVAILABLE', message: LLM_UNAVAILABLE_MESSAGE, details: { reason: isLLMProviderError(e) ? e.code : 'LLM_ERROR', iteration: iter } } as any);
       }
       if (!decision || typeof decision !== 'object') {
@@ -503,6 +544,17 @@ export class BoundToolRuntime {
         // Prompt 23: a native agent that proposed a session update waits for its validated outcome → ask it again
         if (decision.continueAfterApply) continue;
         const msg = decision.finalMessage || decision.clarification || '';
+        // P42.5 — BFE safety-net (NOT an intent router): Muse answered without SEARCH_SAME_TRAIN_ALTERNATIVES although a
+        // fresh availability fact of THIS turn is hard-eligible → the existing tool runs once through the same validator
+        // → runtime → orchestrator → provider path, and Muse gets one more call to present it (Muse decides the wording).
+        if (!safetyNetChecked) {
+          safetyNetChecked = true;
+          const recBefore = this.turn.records.length;
+          const sn = await this.bfeSafetyNet(steps, turnResults, localHistory, iter, iter < this.maxIterations - 1);
+          markRecords(recBefore);
+          if (sn.stale) return done('', 'stale', { code: 'STALE_TOOL_RESULT', message: 'Late result from an obsolete request was ignored.' });
+          if (sn.input) { safetyNet = sn.input; safetyNetDraft = msg; continue; }
+        }
         return done(msg, 'final');
       }
 
@@ -655,13 +707,18 @@ export class BoundToolRuntime {
       this.observeSameTrain(vt, norm, x.record.toolExecutionId, x.prepared.journeyVersion, x.latencyMs);
     }
     const sourceConflict = norm.success ? this.detectSourceConflict(vt, norm, x) : undefined;
+    // P42.5: structured BFE eligibility fact for Muse (CHECK_AVAILABILITY) + this turn's availability facts for the safety-net
+    // (a FAILED exact availability check is recorded too: it supersedes an earlier shortage fact as unknown — never a trigger)
+    const bfe = this.bfeOf(vt, norm, x);
     steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', dataSource: x.dataSource ?? null, validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
     turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? (vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? sameTrainLLMView(norm.data) : norm.data) : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status,
       outcome: toolOutcomeOf({ ok: norm.success, empty: x.empty, status: x.record.status, code: norm.error?.code, normalizedCode: x.error?.normalized }), dataSource: x.dataSource ?? null, attempts: x.record.attempt || 1,
       ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}),
-      identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}), ...(norm.success ? this.seatCheckOf(vt, norm) : {}) });
-    localHistory.push({ role: 'tool', content: JSON.stringify({ ...(norm.success ? this.seatCheckOf(vt, norm) : {}), ...this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null), ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}) }), toolCallId: tc.callId, toolName: tc.name });
+      identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}), ...(norm.success ? this.seatCheckOf(vt, norm) : {}), ...bfe.view });
+    localHistory.push({ role: 'tool', content: JSON.stringify({ ...(norm.success ? this.seatCheckOf(vt, norm) : {}), ...bfe.view, ...this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null), ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}) }), toolCallId: tc.callId, toolName: tc.name });
     this.syncToSession(vt, norm);
+    // the fact is bound to the journey / selection AFTER its own commit (a later change supersedes it)
+    if (bfe.fact) { const now = this.bfeNow(); bfe.fact.binding = { ...bfe.fact.binding, journeyVersion: now.journeyVersion, selectedTrain: now.selectedTrain, selectedClass: now.selectedClass }; }
     if (sourceConflict) this.dropConflictingValue(vt, sourceConflict);
     if (!norm.success) {
       H.emit?.('TOOL_FAILED', { toolName: vt.name, code: norm.error?.code, stage: 'provider', status: x.record.status, toolExecutionId: x.record.toolExecutionId });
@@ -738,7 +795,7 @@ export class BoundToolRuntime {
       originSweep: a.originSweep !== false, destinationSweep: a.destinationSweep !== false, destinationExtensionStations: a.destinationExtensionStations,
       combinedPairs: a.combinedPairs, includeFare: !!a.includeFare, webEvidence: !!a.webEvidence,
       providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders,
-      triggerReason: a.triggerReason ?? null, triggerSource: a.triggerSource || 'NONE',
+      triggerReason: a.triggerReason ?? null, triggerSource: this.safetyNetCallIds.has(vt.callId) ? 'SAFETY_NET' : (a.triggerSource || 'NONE'),
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion: s.journeyVersion ?? null }
     }, liveSameTrainDeps(this.tools as any, {
       isCurrent: () => (guard?.canApply ? guard.canApply() : true) && !H.isStale?.(),
@@ -751,6 +808,169 @@ export class BoundToolRuntime {
   }
 
   private sameTrainBudget: { turn: string; used: number } = { turn: '', used: 0 };
+
+  // ───────────────────────── P42.5 — BFE eligibility + safety-net ─────────────────────────
+  /** availability facts produced in THIS turn (reset at the start of every run) */
+  private bfeFacts: BfeFact[] = [];
+  /** synthetic safety-net tool calls (by callId) and their execution records — observability + triggerSource only */
+  private safetyNetCallIds = new Set<string>();
+  private safetyNetExecIds = new Set<string>();
+
+  private bfeTurnId(): string { return String(this.hooks.turnId ?? this.hooks.requestId ?? ''); }
+
+  private bfeNow() {
+    const s: any = this.getSession();
+    const sel: any = s.selectedTrain;
+    const pax = Number(s.passengersCount);
+    return {
+      sessionId: (s.sessionId ?? null) as string | null, turnId: this.bfeTurnId(), journeyVersion: (s.journeyVersion ?? null) as number | null, date: (s.date ?? null) as string | null,
+      passengers: Number.isInteger(pax) && pax >= 1 ? pax : null,
+      selectedTrain: sel ? (String(sel.number ?? sel.trainNumber ?? '') || null) : null,
+      selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null,
+      origin: (s.origin ?? null) as string | null, destination: (s.destination ?? null) as string | null
+    };
+  }
+
+  /** Collect a fresh availability fact (CHECK_AVAILABILITY / SEARCH_TRAINS) and return Muse's structured view. */
+  private bfeOf(vt: ValidatedToolCall, norm: NormalizedToolResult, x: ExecutedCall): { view: { bfeEligibility?: BfeEligibility }; fact?: BfeFact } {
+    if (vt.name !== 'CHECK_AVAILABILITY' && vt.name !== 'SEARCH_TRAINS') return { view: {} };
+    if (!sameTrainAlternativesEnabledFromEnv()) return { view: {} };
+    if (!norm.success && vt.name === 'SEARCH_TRAINS') return { view: {} };
+    const now = this.bfeNow();
+    const binding: BfeBinding = { sessionId: now.sessionId, turnId: now.turnId, journeyVersion: (x.prepared.journeyVersion ?? now.journeyVersion) as any,
+      toolExecutionId: x.record.toolExecutionId, selectedTrain: now.selectedTrain, selectedClass: now.selectedClass };
+    const provider = String((x.prepared.tc as any)?.provider || x.provider || norm.provider || '').toLowerCase() || null;
+    const d: any = norm.data || {};
+    const a: any = vt.arguments || {};
+    if (vt.name === 'SEARCH_TRAINS') {
+      const fact: BfeFact = { kind: 'SEARCH', binding, provider, data: d, date: d?.journey?.date ?? a.date ?? null, origin: a.origin ?? null, destination: a.destination ?? null };
+      this.bfeFacts.push(fact);
+      return { view: {}, fact };
+    }
+    const s: any = this.getSession();
+    const trainNumber = String(d.trainNumber ?? a.trainNumber ?? '');
+    const row = ((s.searchResults?.trains || []) as any[]).find(t => String(t.trainNumber ?? t.number) === trainNumber);
+    const sel: any = s.selectedTrain;
+    const trainName = d.trainName ?? row?.trainName ?? row?.name ?? (sel && String(sel.number ?? sel.trainNumber) === trainNumber ? (sel.name ?? sel.trainName) : undefined);
+    const fact: BfeFact = { kind: 'CHECK', ok: !!norm.success, binding, provider, trainNumber, trainName, classCode: String(d.travelClass ?? a.travelClass ?? '').toUpperCase(),
+      date: d.date ?? a.date ?? now.date, origin: a.origin ?? now.origin, destination: a.destination ?? now.destination, status: norm.success ? (d.status ?? null) : null };
+    this.bfeFacts.push(fact);
+    return { view: norm.success ? { bfeEligibility: this.bfeEligibilityOf(fact, now.passengers) } : {}, fact };
+  }
+
+  private bfeEligibilityOf(f: BfeFact, passengers: number | null, classCode?: string, trainNumber?: string): BfeEligibility {
+    if (f.kind === 'CHECK') {
+      return evaluateBfeEligibility({ ok: f.ok, status: f.status, trainNumber: f.trainNumber, trainName: f.trainName, date: f.date, classCode: f.classCode,
+        requestedOrigin: f.origin, requestedDestination: f.destination, passengers, binding: f.binding });
+    }
+    const row = ((f.data?.trains || []) as any[]).find(t => String(t?.trainNumber ?? t?.number ?? '') === trainNumber);
+    const c = row ? ((row.classes || []) as any[]).find(x => String(x?.code ?? x ?? '').toUpperCase() === classCode) : undefined;
+    return evaluateBfeEligibility({ ok: !!c, status: c?.availability ?? null, trainNumber, trainName: row?.trainName ?? row?.name, date: f.date, classCode,
+      requestedOrigin: f.origin, requestedDestination: f.destination, passengers, binding: f.binding });
+  }
+
+  /**
+   * P42.5 Part 8 — the safety-net. Runs only when Muse gave its answer WITHOUT calling SEARCH_SAME_TRAIN_ALTERNATIVES
+   * for a hard-eligible, CURRENT availability fact of this turn (same session / turn / journeyVersion / date / selection),
+   * the tool is enabled, no newer turn superseded this one, and budget remains. It invokes ONLY the existing tool through
+   * the existing validator → runtime → orchestrator → provider path (budget counted like any call); it never chooses,
+   * ranks, selects or changes the session. Budget exhausted → Muse is told BFE_SKIPPED_TOOL_BUDGET (no fake results).
+   */
+  private async bfeSafetyNet(steps: ToolCallStep[], turnResults: TurnToolResultView[], localHistory: HistoryMsg[], iter: number, llmRoundLeft: boolean)
+    : Promise<{ input?: BfeSafetyNetInput; stale?: boolean }> {
+    const H = this.hooks;
+    if (!sameTrainAlternativesEnabledFromEnv() || !this.bfeFacts.length || H.isStale?.()) return {};
+    if (!REGISTERED_TOOLS.some(t => t.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES')) return {};
+    const t0 = Date.now();
+    const now = this.bfeNow();
+    // latest fact per train|class wins (a later re-check that shows seats cancels an earlier shortage)
+    const latest = new Map<string, { e: BfeEligibility; provider: string | null }>();
+    for (const f of this.bfeFacts) {
+      const es: BfeEligibility[] = f.kind === 'CHECK' ? [this.bfeEligibilityOf(f, now.passengers)]
+        // a search list: only the CURRENT train + class (the one the session now holds) — never every row
+        : now.selectedTrain && now.selectedClass ? [this.bfeEligibilityOf(f, now.passengers, now.selectedClass, now.selectedTrain)].filter(e => e.status) : [];
+      for (const e of es) latest.set(`${e.trainNumber}|${e.classCode}`, { e, provider: f.provider });
+    }
+    const eligible = [...latest.values()].filter(({ e }) => e.eligible && bfeEligibilityCurrent(e, now).current);
+    if (!eligible.length) return {};
+    // Muse already asked for this train + class in this turn (executed, failed or rejected) → no duplicate call
+    const requested = new Set(steps.filter(st => st.toolCall?.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES')
+      .map(st => { const a: any = st.validatedArguments || st.toolCall?.arguments || {}; return `${String(a.trainNumber ?? '')}|${String(a.travelClass ?? now.selectedClass ?? '').toUpperCase()}`; }));
+    const log = (e: BfeEligibility, f: Partial<BfeSafetyNetLog>) => this.logBfe({
+      event: 'bfe_safety_net', sessionId: now.sessionId, turnId: now.turnId, journeyVersion: now.journeyVersion, trainNumber: e.trainNumber, classCode: e.classCode,
+      date: e.date ?? now.date, passengerCount: now.passengers, bfeEligible: e.eligible, eligibilityReason: e.reason, museRequestedBfe: false, safetyNetTriggered: false,
+      skippedReason: null, toolExecutionId: null, bfeResultsCount: 0, verifiedResultsCount: 0, staleResultCount: 0, latencyMs: Date.now() - t0, ...f });
+    const pending: Array<{ e: BfeEligibility; provider: string | null }> = [];
+    for (const c of eligible) {
+      if (requested.has(`${c.e.trainNumber}|${c.e.classCode}`)) log(c.e, { museRequestedBfe: true });
+      else pending.push(c);
+    }
+    if (!pending.length) return {};
+    // Muse must present any safety-net result — without an LLM round left, nothing runs (Muse's answer stands)
+    if (!llmRoundLeft) { for (const c of pending) log(c.e, { skippedReason: 'NO_LLM_ROUND' }); return {}; }
+    const view = (e: BfeEligibility) => ({ trainNumber: e.trainNumber, ...(e.trainName ? { trainName: e.trainName } : {}), date: e.date, classCode: e.classCode,
+      requestedOrigin: e.requestedOrigin, requestedDestination: e.requestedDestination, passengers: e.passengers, reason: e.reason,
+      ...(e.confirmedSeats !== undefined ? { confirmedSeats: e.confirmedSeats } : {}), status: e.status });
+    const skipView = (e: BfeEligibility) => ({ ...view(e), status: 'BFE_SKIPPED_TOOL_BUDGET', availabilityStatus: e.status });
+    const used = this.sameTrainBudget.turn === now.turnId ? this.sameTrainBudget.used : 0;
+    const room = Math.max(0, Math.min(sameTrainSearchesPerTurn() - used, BFE_MAX_TOOL_STEPS - this.turn.callsUsed));
+    const run = pending.slice(0, room);
+    const skipped = pending.slice(room);
+    for (const c of skipped) log(c.e, { skippedReason: 'BFE_SKIPPED_TOOL_BUDGET' });
+    if (!run.length || !this.turn.startRound()) {
+      for (const c of run) log(c.e, { skippedReason: 'BFE_SKIPPED_TOOL_BUDGET' });
+      return { input: { origin: 'BACKEND_SAFETY_NET', outcome: 'BFE_SKIPPED_TOOL_BUDGET', instruction: BFE_SAFETY_NET_INSTRUCTION, results: [],
+        skipped: [...run, ...skipped].map(c => skipView(c.e)) } };
+    }
+    const calls: ToolCall[] = run.map(c => {
+      const providerOk = c.provider && resolveSameTrainProviders(c.provider).ok ? c.provider : null;   // the provider Muse used — never a backend pick
+      return { callId: `bfe_sn_${uuidv4()}`, name: 'SEARCH_SAME_TRAIN_ALTERNATIVES' as any, arguments: {
+        trainNumber: c.e.trainNumber, travelClass: c.e.classCode, ...(c.e.date ? { date: c.e.date } : {}),
+        ...(c.e.requestedOrigin ? { origin: c.e.requestedOrigin } : {}), ...(c.e.requestedDestination ? { destination: c.e.requestedDestination } : {}),
+        ...(now.passengers ? { passengersCount: now.passengers } : {}), triggerReason: c.e.reason, ...(providerOk ? { providers: providerOk } : {}) } };
+    });
+    for (const c of calls) this.safetyNetCallIds.add(c.callId);
+    const recBefore = this.turn.records.length;
+    let stale = false;
+    const byCall = new Map<string, any>();
+    await this.turn.runRound(calls, this.executor, {
+      fromLLM: true,
+      onRejected: (p) => {
+        this.recordRejected(p, iter, turnResults, localHistory, steps);
+        byCall.set(String(p.tc?.callId), { ok: false, error: { code: p.error.code, message: factOnly(String(p.error.message || '')).slice(0, 240) } });
+      },
+      onExecuted: (x) => {
+        const r = this.recordExecuted(x, iter, turnResults, localHistory, steps);
+        if (r.stale) { stale = true; return false; }
+        const tr = turnResults[turnResults.length - 1];
+        byCall.set(String(x.prepared.tc.callId), { ok: !!tr?.ok, toolExecutionId: x.record.toolExecutionId,
+          ...(tr?.ok ? { data: tr.data } : { error: { code: (tr?.error as any)?.code ?? 'FAILED', message: factOnly(String((tr?.error as any)?.message || '')).slice(0, 240) } }),
+          _raw: x.success ? x.data : null });
+        return true;
+      }
+    });
+    for (const rec of this.turn.records.slice(recBefore)) this.safetyNetExecIds.add(rec.toolExecutionId);
+    if (stale || H.isStale?.()) return { stale: true };
+    const results = calls.map((tc, i) => {
+      const r = byCall.get(tc.callId) || { ok: false, error: { code: 'NOT_EXECUTED' } };
+      const raw: any = r._raw;
+      const alts: any[] = Array.isArray(raw?.alternatives) ? raw.alternatives : [];
+      log(run[i].e, { safetyNetTriggered: true, toolExecutionId: r.toolExecutionId ?? null, bfeResultsCount: alts.filter(a => !a.isRequestedPair).length,
+        verifiedResultsCount: Number(raw?.verifiedAlternativeCount ?? 0), staleResultCount: raw?.stale ? alts.length : 0, latencyMs: Date.now() - t0,
+        ...(r.ok ? {} : { skippedReason: String(r.error?.code || 'FAILED') }) });
+      const { _raw, ...pub } = r;
+      return { eligibility: view(run[i].e), ...pub };
+    });
+    return { input: { origin: 'BACKEND_SAFETY_NET', outcome: 'EXECUTED', instruction: BFE_SAFETY_NET_INSTRUCTION, results,
+      ...(skipped.length ? { skipped: skipped.map(c => skipView(c.e)) } : {}) } };
+  }
+
+  /** metadata only — no names, ages, phone, OTP, credentials or provider bodies */
+  private logBfe(rec: BfeSafetyNetLog): void {
+    this.hooks.emit?.('BFE_SAFETY_NET' as any, { ...rec });
+    if (bfeLogEnabled()) { try { console.log(JSON.stringify(rec)); } catch { /* never breaks a turn */ } }
+  }
+
 
   /**
    * P42.2 — structured seat facts for Muse on SEARCH_TRAINS / CHECK_AVAILABILITY results (only when the same-train tool
@@ -775,7 +995,7 @@ export class BoundToolRuntime {
       event: 'same_train_alternative', sessionId: s.sessionId, turnId: this.hooks.turnId ?? null, toolExecutionId, journeyVersion: journeyVersion ?? null,
       trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, requestedPassengerCount: vt.arguments.passengersCount,
       availabilityStatus: p0?.availabilityStatus ?? null, availableSeatCount: p0?.availableSeatCount ?? null,
-      alternativeTriggered: true, triggerReason: vt.arguments.triggerReason ?? null, triggerSource: vt.arguments.triggerSource ?? 'NONE',
+      alternativeTriggered: true, triggerReason: vt.arguments.triggerReason ?? null, triggerSource: this.safetyNetCallIds.has(vt.callId) ? 'SAFETY_NET' : (vt.arguments.triggerSource ?? 'NONE'),
       provider: String(vt.arguments.providers || ''), fresh: !!d?.fresh, latencyMs,
       resultCount: d ? (d.alternatives || []).length : 0, verifiedAlternativeCount: d?.verifiedAlternativeCount ?? 0,
       outcome: d?.outcome ?? null, errorCode: r.success ? null : (r.error?.code ?? null)

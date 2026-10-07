@@ -397,6 +397,10 @@ export const SAME_TRAIN_ALTERNATIVES_PROMPT_GUIDANCE = `- SEARCH_SAME_TRAIN_ALTE
   CONFLICTING means providers disagree — state no value. You rank and recommend; to show your best match on screen
   call PRESENT_SAME_TRAIN_ALTERNATIVES. Mention only the 1–3 most useful options (in voice: the best one or two).
   Nothing is booked or changed by these tools; the user picks an option explicitly on screen.
+- P42.5: CHECK_AVAILABILITY results may carry bfeEligibility { eligible, reason, passengers, confirmedSeats, status } — a
+  backend FACT for the current party (eligible = a real shortage that boarding the SAME train from an earlier station may
+  fix). It is not an order. If you answer without the same-train search for an eligible fact, the backend may run it once
+  and send you BACKEND_SAFETY_NET with the result — then present it (or say nothing verified was found) in your own words.
 `;
 
 /** The native agent system prompt WITHOUT the P42 guidance (Same Train Alternative OFF — the default). */

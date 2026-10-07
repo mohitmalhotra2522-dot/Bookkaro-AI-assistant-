@@ -218,7 +218,7 @@ export interface SameTrainAlternativesResult {
   /** P42.2 (additive): party size, trigger, requested-pair assessment, outcome, completeness, creation context */
   requestedPassengerCount?: number;
   triggerReason?: ShortageTriggerReason | null;
-  triggerSource?: 'SESSION_EVIDENCE' | 'MUSE' | 'AUTO_DISPLAY' | 'NONE';
+  triggerSource?: 'SESSION_EVIDENCE' | 'MUSE' | 'AUTO_DISPLAY' | 'SAFETY_NET' | 'NONE';
   requestedPairAssessment?: SeatShortageAssessment | null;
   outcome?: SameTrainOutcome;
   verifiedAlternativeCount?: number;

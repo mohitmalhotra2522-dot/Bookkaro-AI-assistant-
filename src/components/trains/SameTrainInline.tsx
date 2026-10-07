@@ -72,17 +72,74 @@ export const SameTrainInline: React.FC<{
           aria-label={`Same train alternative for ${trainNumber} ${travelClass}`}>↗ {travelClass}: Same Train Alternative</button>
       : null;
   }
-  return <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={`${travelClass} · same train options`} />;
+  return <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={BFE_HEADING} classTag={travelClass} />;
 };
 
+/** P42.5 headings (Part 29): the earlier-boarding group is the BFE section; destination-only extensions are listed after it. */
+export const BFE_HEADING = 'Same train · pehle station se board karo';
+export const EXTENSION_HEADING = 'Same train · aage ke station tak ticket';
+export const MAX_SAME_TRAIN_OPTIONS = 15;
+
+/**
+ * P42.5 Part 32 — BookKaro's canBookAvail for a same-train option: AVAILABLE (whole party) and RAC can be booked;
+ * WAITLIST / NOT_AVAILABLE / REGRET / UNKNOWN / unverified cannot (no Select button).
+ */
+export function canBookAvail(a: any): boolean {
+  return isVerifiedSameTrainAlternative(a) && (a.availability === 'AVAILABLE' || a.availability === 'RAC');
+}
+
+/**
+ * P42.5 Part 31 — extra class chips: only classes the provider actually returned for this option (a.classOptions),
+ * never the hero class again, at most 3. BookKaro's same-train search is per class, so today this is usually empty.
+ */
+export function extraClassChips(a: any): Array<{ code: string; status: string }> {
+  const hero = String(a?.travelClass || '').toUpperCase();
+  const seen = new Set<string>([hero]);
+  const out: Array<{ code: string; status: string }> = [];
+  for (const c of (Array.isArray(a?.classOptions) ? a.classOptions : []) as any[]) {
+    const code = String(c?.code || '').toUpperCase();
+    const status = String(c?.statusText || c?.status || '').trim();
+    if (!code || !status || seen.has(code)) continue;
+    seen.add(code); out.push({ code, status });
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+/**
+ * P42.5 Parts 29/34/40/41 — verified options of THIS train only, grouped: earlier boarding (ticket origin ≠ requested
+ * origin) first, then destination-only extensions. Dedup: earlier group by trainNumber + bookFrom (ticketOrigin), the
+ * extension group by trainNumber + bookUpto (ticketDestination); at most 15 options overall. Backend / Muse order kept.
+ */
+export function groupSameTrainOptions(d: any): { earlier: any[]; further: any[] } {
+  const train = String(d?.trainNumber || '');
+  const opts = verifiedInRouteOrder(d).filter(a => canBookAvail(a) && (!train || a.trainNumber === undefined || String(a.trainNumber) === train));
+  const earlier: any[] = []; const further: any[] = [];
+  const seen = new Set<string>();
+  for (const a of opts) {
+    const isEarlier = a.ticketOrigin !== (a.requestedOrigin || d?.requestedOrigin);
+    const key = isEarlier ? `E|${a.trainNumber}|${a.ticketOrigin}` : `X|${a.trainNumber}|${a.ticketDestination}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    (isEarlier ? earlier : further).push(a);
+  }
+  const both = [...earlier, ...further].slice(0, MAX_SAME_TRAIN_OPTIONS);
+  return { earlier: both.filter(a => earlier.includes(a)), further: both.filter(a => further.includes(a)) };
+}
+
 /** Compact list of verified options (shared by the inline hint and the expanded chat card). Renders nothing if none. */
-export const SameTrainOptionList: React.FC<{ d: any; sessionId: string | null; disabled?: boolean; onHandoff: (text: string) => void; heading?: string }> = ({ d, sessionId, disabled, onHandoff, heading }) => {
-  const opts = verifiedInRouteOrder(d);
-  if (!opts.length) return null;
+export const SameTrainOptionList: React.FC<{ d: any; sessionId: string | null; disabled?: boolean; onHandoff: (text: string) => void; heading?: string; classTag?: string }> = ({ d, sessionId, disabled, onHandoff, heading, classTag }) => {
+  const { earlier, further } = groupSameTrainOptions(d);
+  if (!earlier.length && !further.length) return null;
+  const head = (text: string) => (
+    <div className="bk-sti__head"><IconRoute size={13} /> {text}{classTag && <span className="bk-tag">{classTag}</span>}{d.isMock && <span className="bk-tag bk-tag--warn">Development data — not live</span>}</div>
+  );
   return (
-    <div className="bk-sti" aria-label={heading || 'Same train options'}>
-      {heading && <div className="bk-sti__head"><IconRoute size={13} /> {heading}{d.isMock && <span className="bk-tag bk-tag--warn">Development data — not live</span>}</div>}
-      {opts.map(a => <InlineOption key={a.alternativeId} d={d} a={a} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
+    <div className="bk-sti" aria-label={heading || BFE_HEADING}>
+      {earlier.length > 0 && head(BFE_HEADING)}
+      {earlier.map(a => <InlineOption key={a.alternativeId} d={d} a={a} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
+      {further.length > 0 && head(EXTENSION_HEADING)}
+      {further.map(a => <InlineOption key={a.alternativeId} d={d} a={a} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
     </div>
   );
 };
@@ -109,7 +166,8 @@ const InlineOption: React.FC<{ d: any; a: any; sessionId: string | null; disable
         <span className={`bk-tag bk-tag--${isRac ? 'warn' : 'good'}`}>{tag}</span>
         <span className="bk-sti__pair"><b>BOOK</b> {stn(a.ticketOrigin, a.ticketOriginName)} → {stn(a.ticketDestination, a.ticketDestinationName)}</span>
         {a.fare?.status === 'PROVIDER' && (a.fare.total ?? a.fare.perPassenger) != null && <span className="bk-sti__fare">{inr(a.fare.total ?? a.fare.perPassenger)}</span>}
-        {!confirm && (
+        {extraClassChips(a).map(c => <span key={c.code} className="bk-tag">{c.code} · {c.status}</span>)}
+        {!confirm && canBookAvail(a) && (
           <button type="button" className="bk-btn bk-btn--primary bk-btn--sm bk-sti__use" disabled={disabled || busy || !sessionId}
             onClick={() => (a.verificationStatus === 'PARTIALLY_VERIFIED' ? setConfirm(true) : use(false))}
             aria-label={`Select ${a.ticketOrigin} to ${a.ticketDestination}`}>{busy ? 'Checking…' : 'Select'}</button>

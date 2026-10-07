@@ -279,6 +279,15 @@ const App: React.FC = () => {
   const ctxAny: any = context;
   const canOpenPaxForm = !!sessionId && !!ctxAny?.selectedTrain && !!ctxAny?.selectedClass && !['HANDOFF_READY', 'BOOKING_SUBMITTED', 'CONFIRMED', 'COMPLETE'].includes(String(ctxAny?.bookingState || ''));
   const openPaxForm = () => { if (canOpenPaxForm && !isLoading) { setSheet(null); setPaxForm(true); } };
+  // P42.5 Part 33: a same-train option was selected (fresh recheck passed, ticket pair applied) → the inner page is
+  // already closed; once that turn finishes, the passenger form opens directly (no extra back press)
+  const paxAfterSameTrainRef = useRef(false);
+  const handoffSameTrain = (text: string) => { paxAfterSameTrainRef.current = true; setSheet(null); void send(text, 'TEXT'); };
+  useEffect(() => {
+    if (!paxAfterSameTrainRef.current || isLoading) return;
+    paxAfterSameTrainRef.current = false;
+    if (canOpenPaxForm) setPaxForm(true);
+  }, [isLoading, canOpenPaxForm]);
   /** After the backend accepted the form, ask for the review in a VISIBLE chat turn (fare / availability re-checked by the API). */
   const onPaxSaved = (count: number) => {
     setPaxForm(false);
@@ -349,7 +358,7 @@ const App: React.FC = () => {
             onSameTrain={appStatus.sameTrainAlternatives ? (n: string, c?: string) => handleSameTrain(n, c || (ctx?.selectedTrain?.number === n ? ctx?.selectedClass : undefined)) : undefined}
             // P42.4: verified same-train options appear by themselves under waitlisted classes of the CURRENT list only
             autoSameTrain={appStatus.sameTrainAlternatives && sessionId && typeof d.searchResultsVersion === 'number' && d.searchResultsVersion === ctx?.searchResultsVersion
-              ? { sessionId, searchResultsVersion: d.searchResultsVersion, passengers: Number(ctx?.passengersCount) || 1, onHandoff: (text: string) => { void send(text, 'TEXT'); } }
+              ? { sessionId, searchResultsVersion: d.searchResultsVersion, passengers: Number(ctx?.passengersCount) || 1, onHandoff: handoffSameTrain }
               : undefined} />
         );
       }
@@ -380,7 +389,7 @@ const App: React.FC = () => {
       case 'availability': return <Info.AvailabilityNote key={key} d={d} />;
       case 'same_train_alternatives': return (
         <SameTrainCard key={key} d={d} sessionId={sessionId} disabled={isLoading}
-          onHandoff={(text: string) => { void send(text, 'TEXT'); }}
+          onHandoff={handoffSameTrain}
           onCheckAgain={() => handleSameTrain(d.trainNumber, d.travelClass)} />
       );
       case 'fare': return <Info.FareNote key={key} d={d} />;

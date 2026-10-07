@@ -17,6 +17,8 @@ export interface TurnToolResultView {
   sourceConflict?: SourceConflict;
   /** P42.2: structured seat facts for the party (shortages / availableSeatCount / triggerReason) — facts only. */
   seatCheck?: Record<string, unknown>;
+  /** P42.5: structured BFE eligibility fact (CHECK_AVAILABILITY) — facts only, Muse decides */
+  bfeEligibility?: Record<string, any>;
   data?: any;
   error?: { code: string; message: string; details?: any };
   /** Prompt 17: SUCCEEDED with zero items (e.g. no trains on the route) — NOT a failure. */
@@ -73,6 +75,11 @@ export interface LLMTurnInput {
    * answer ONLY from the authoritative tool results already in this turn, and say plainly what could not be checked.
    */
   chainStop?: { reason: 'TOOL_BUDGET_EXHAUSTED' | 'TOOL_LOOP_DETECTED'; code: string; instruction: string };
+  /**
+   * P42.5: the backend BFE safety-net ran the existing SEARCH_SAME_TRAIN_ALTERNATIVES tool (or skipped it for budget)
+   * after an answer without it, for a hard-eligible availability fact of this turn. Structured; Muse writes the reply.
+   */
+  safetyNet?: { origin: 'BACKEND_SAFETY_NET'; outcome: 'EXECUTED' | 'BFE_SKIPPED_TOOL_BUDGET'; instruction: string; results: Array<Record<string, unknown>>; skipped?: Array<Record<string, unknown>> };
 }
 
 /** Prompt 23: the backend's validated outcome of one update_booking_session proposal (never raw user secrets). */
