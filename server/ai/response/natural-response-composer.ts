@@ -483,8 +483,9 @@ export class NaturalResponseComposer {
     collectFare(fareNums, { fare: s.fare, review: (s.review as any)?.snapshot, steps: views.filter(v => v.ok && v.toolName === 'GET_FARE').map(v => ({ fare: v.data })) });
     const idx = buildFactIndex(s, views as any);
     for (const n of idx.farePax) paxCounts.add(n);
-    // Prompt 26: availability evidence = CHECK_AVAILABILITY only (this turn's validated step / the runtime-committed session entry)
-    const availCtx: AvailabilityContext = { session: s, evidence: collectAvailabilityEvidence(s, (i.steps || []) as any[]), trains: idx.trains.map(f => ({ num: f.num, classes: f.classes })) };
+    // Prompt 26 / P42.12: availability evidence = CHECK_AVAILABILITY (this turn's validated step / the runtime-committed
+    // session entry) + the current same-journey search rows (lower precedence; never for an explicit fresh request)
+    const availCtx: AvailabilityContext = { session: s, evidence: collectAvailabilityEvidence(s, (i.steps || []) as any[], { userText: i.userText }), trains: idx.trains.map(f => ({ num: f.num, classes: f.classes })) };
     for (const m of `${i.backendReply} ${i.deterministicSpeech}`.matchAll(/₹\s?([\d,]+(?:\.\d+)?)/g)) fareNums.add(Number(m[1].replace(/,/g, '')));
     // Prompt 28: every railway claim is bound to ONE entity (explicit / reply antecedent / session focus) before it counts
     const binder = new ClaimEntityBinder({ idx, session: s, resultTrains: resultTrainsOf(idx, availCtx.evidence) });
@@ -575,7 +576,7 @@ export class NaturalResponseComposer {
       let probe = NEGATION_RE.test(t) ? t.replace(/\b\d{5}\b/g, m => userTrainNums.has(m) && !knownTrainNums.has(m) ? 'woh train' : m) : t;
       // times already judged as general knowledge (e.g. when Tatkal opens) are not timetable claims
       for (const g of hits.time?.general || []) probe = probe.split(g).join('—');
-      const g = railwayResponseGrounding.validate(probe, { session: s, steps: i.steps, records: (i.records || []) as any });
+      const g = railwayResponseGrounding.validate(probe, { session: s, steps: i.steps, records: (i.records || []) as any, userText: i.userText });
       if (g.rejected.length) return `GROUNDING:${g.rejected[0]}`;
       // P42.9 (D2): LAST gate, in EVERY turn (a "general" turn never exempts a dated railway fact): a train count /
       // availability / fare / status claim must be about the canonical date of the result behind it (count vs the result

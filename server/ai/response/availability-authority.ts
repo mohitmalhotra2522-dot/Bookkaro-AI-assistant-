@@ -1,8 +1,12 @@
 /**
  * Prompt 26 — Seat-availability authority (ONE deterministic rule, used by every response-validation layer).
  *
- *   SEAT_AVAILABILITY is authoritative ONLY when a CHECK_AVAILABILITY result (this turn's validated tool step, or the
- *   session entry the runtime committed from that tool) matches the claim's train + date + class + status.
+ *   SEAT_AVAILABILITY is authoritative ONLY when a provider availability result matches the claim's train + date +
+ *   class + status: a CHECK_AVAILABILITY result (this turn's validated tool step, or the session entry the runtime
+ *   committed from that tool) or — P42.12 — the per-class availability the CURRENT search result set (SEARCH_TRAINS,
+ *   same journey) returned for that row. CHECK_AVAILABILITY always wins for the train / class / date it covers;
+ *   search-row availability is never needed to be re-checked merely to be displayed (no selection required), but an
+ *   explicit fresh request ("abhi / dobara / fresh") is never answered from an earlier search result.
  *
  * Two separate questions, never mixed:
  *   1. CLASSIFICATION (linguistic): is this sentence a current seat-availability claim at all, or a general
@@ -10,17 +14,23 @@
  *      statement attributed to the user, or unrelated? Keywords are allowed HERE — only to decide what kind of
  *      sentence it is.
  *   2. AUTHORITY (structured): a live claim is verified only by matching availability evidence. Keyword presence —
- *      in the LLM's text, the backend's reply or the user's words — is NEVER evidence. SEARCH_TRAINS (even its
- *      per-class `avail` field), GET_TRAIN_INFO, GET_TIMETABLE, GET_FARE and general knowledge never prove seats.
+ *      in the LLM's text, the backend's reply or the user's words — is NEVER evidence. A class LIST, GET_TRAIN_INFO,
+ *      GET_TIMETABLE, GET_FARE and general knowledge never prove seats; an unknown / unparseable search-row status
+ *      proves nothing.
  *
  * Nothing here rewrites the LLM's language or calls a provider; an unverified claim is reported so the composer can
  * drop the sentence (existing safe behaviour) — availability is never invented.
  */
-import type { BookingSession } from '@shared/entities';
+import type { BookingSession, InfoAvailabilityRecord } from '@shared/entities';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { explicitDates } from './claim-dates';
+import { normalizeAvailabilityState, parseAvailableSeatCount } from '@shared/same-train-shortage';
+import { isExplicitFreshRequest } from '../tool-runtime/freshness';
 
 export const AVAILABILITY_TOOL = 'CHECK_AVAILABILITY';
+/** P42.12: the current search result set's per-class availability (lower precedence than CHECK_AVAILABILITY). */
+export const SEARCH_AVAILABILITY_SOURCE = 'SEARCH_TRAINS';
+export type AvailabilitySourceTool = typeof AVAILABILITY_TOOL | typeof SEARCH_AVAILABILITY_SOURCE;
 
 /** A single authoritative availability result (existing field names of AvailabilityResult / AvailabilityData). */
 export interface AvailabilityEvidence {
@@ -29,10 +39,13 @@ export interface AvailabilityEvidence {
   travelClass: string;
   status: string;
   available?: boolean;
-  sourceTool: typeof AVAILABILITY_TOOL;
+  sourceTool: AvailabilitySourceTool;
   sourceResultId: string | null;
-  /** 'TOOL_STEP' = this turn's validated result; 'SESSION' = committed by the runtime from CHECK_AVAILABILITY. */
-  origin: 'TOOL_STEP' | 'SESSION';
+  /** 'TOOL_STEP' = this turn's validated result; 'SESSION' = committed by the runtime from CHECK_AVAILABILITY;
+   *  'PRESERVED_CHECK' = P42-12 F3, an earlier turn's CHECK_AVAILABILITY of an UNSELECTED train / class, bound to the
+   *  exact train + class + date + route + current search result set; 'SEARCH_RESULT' = P42.12, a row of the current
+   *  same-journey search result set. Precedence: TOOL_STEP / SESSION > PRESERVED_CHECK > SEARCH_RESULT. */
+  origin: 'TOOL_STEP' | 'SESSION' | 'PRESERVED_CHECK' | 'SEARCH_RESULT';
   /** P42.2: a Same Train Alternative pair OTHER than the requested one — it only verifies a sentence that names one of
    *  its own ticket stations (code / name); otherwise it never stands in for the requested journey. */
   alternativePair?: { ticketOrigin: string; ticketDestination: string; tokens: string[] };
@@ -53,7 +66,7 @@ export interface AvailabilityProvenance {
   claimType: 'RAILWAY_LIVE_FACT' | 'USER_PROVIDED';
   factSubtype: 'SEAT_AVAILABILITY';
   verified: boolean;
-  sourceTool: typeof AVAILABILITY_TOOL | null;
+  sourceTool: AvailabilitySourceTool | null;
   sourceResultId: string | null;
   trainNumber?: string;
   date?: string;
@@ -83,11 +96,41 @@ export interface AvailabilityContext {
 
 const str = (v: any) => (v === undefined || v === null || v === '' ? undefined : String(v));
 
+const SEARCH_CATEGORY: Record<string, string> = { AVAILABLE: 'AVAILABLE', RAC: 'RAC', WAITLIST: 'WAITLIST', NOT_AVAILABLE: 'NOT_AVAILABLE', REGRET: 'NOT_AVAILABLE', TRAIN_CANCELLED: 'NOT_AVAILABLE' };
+
+/**
+ * P42.12 — a search row's raw provider status ("CURR_AVBL-0241", "AVAILABLE-0004", "RLWL83/WL68", "RAC 4",
+ * "Waitlist 12") in the same canonical form CHECK_AVAILABILITY uses ("AVAILABLE 241", "WL 68", "RAC 4"). The waitlist
+ * number is the CURRENT position (after "/WL") — never a seat count. Unknown / unparseable, or contradicting the
+ * provider's own category ("GNWL/AVAILABLE" vs AVAILABLE, "TRAIN CANCELLED" vs UNKNOWN) → undefined (proves nothing).
+ */
+export function searchRowAvailability(raw: unknown, category?: unknown): { status: string; available: boolean } | undefined {
+  const text = str(raw);
+  if (!text) return undefined;
+  const state = normalizeAvailabilityState(text);
+  if (state === 'UNKNOWN') return undefined;
+  if (category !== undefined && category !== null && String(category).toUpperCase() !== SEARCH_CATEGORY[state]) return undefined;
+  const up = text.toUpperCase();
+  switch (state) {
+    case 'AVAILABLE': { const n = parseAvailableSeatCount(text); return n === undefined ? { status: 'AVAILABLE', available: true } : { status: `AVAILABLE ${n}`, available: n > 0 }; }
+    case 'RAC': { const m = up.match(/RAC\s*(\d+)/); return { status: m ? `RAC ${Number(m[1])}` : 'RAC', available: false }; }
+    case 'WAITLIST': { const m = up.match(/\/\s*WL\s*(\d+)/) || up.match(/(\d+)/); return { status: m ? `WL ${Number(m[1])}` : 'WL', available: false }; }
+    case 'REGRET': return { status: 'REGRET', available: false };
+    case 'TRAIN_CANCELLED': return { status: 'TRAIN CANCELLED', available: false };
+    default: return { status: 'NOT AVAILABLE', available: false };
+  }
+}
+
+const sameJourney = (a: unknown, b: unknown) => !str(a) || !str(b) || String(a).toUpperCase() === String(b).toUpperCase();
+
 /**
  * Collect availability evidence. Accepts the composer's tool views ({toolName, ok, data}) and the runtime's steps
- * ({status, result: {toolName, data}}). ONLY CHECK_AVAILABILITY counts — any other tool is ignored by construction.
+ * ({status, result: {toolName, data}}). CHECK_AVAILABILITY results (and provider-checked Same Train evidence) count;
+ * P42.12: so does the per-class availability of the CURRENT same-journey search result set — only for a train /
+ * class / date no CHECK_AVAILABILITY result covers, and never when the user explicitly asked for fresh data
+ * (opts.userText) unless the search itself ran this turn. Any other tool is ignored by construction.
  */
-export function collectAvailabilityEvidence(session: BookingSession | any, steps: any[] = []): AvailabilityEvidence[] {
+export function collectAvailabilityEvidence(session: BookingSession | any, steps: any[] = [], opts: { userText?: string } = {}): AvailabilityEvidence[] {
   const s: any = session || {};
   const selected = str(s.selectedTrain?.number ?? s.selectedTrain?.trainNumber);
   const out: AvailabilityEvidence[] = [];
@@ -125,6 +168,131 @@ export function collectAvailabilityEvidence(session: BookingSession | any, steps
       sourceTool: AVAILABILITY_TOOL, sourceResultId: str(st?.execution?.toolExecutionId ?? st?.result?.toolExecutionId ?? st?.toolExecutionId ?? st?.callId) ?? null,
       origin: 'TOOL_STEP'
     });
+  }
+  // P42-12 F3: a preserved earlier CHECK of an unselected train outranks that row's (older) search-list value
+  out.push(...preservedCheckEvidence(s, steps, out, opts));
+  out.push(...searchRowEvidence(s, steps, out, opts));
+  return out;
+}
+
+// ------------------------------------------------------------------ P42-12 F3: preserved unselected-train CHECK
+
+const upper = (v: unknown) => String(v ?? '').trim().toUpperCase();
+const stationCode = (v: any) => upper(v && typeof v === 'object' ? v.code : v);
+
+/** Session key of a preserved CHECK: train | class | date | origin | destination. */
+export const infoAvailabilityKey = (r: Pick<InfoAvailabilityRecord, 'trainNumber' | 'travelClass' | 'date' | 'origin' | 'destination'>) =>
+  [String(r.trainNumber), upper(r.travelClass), String(r.date), stationCode(r.origin), stationCode(r.destination)].join('|');
+
+function currentResultSet(s: any): { id: string; trains: Set<string> } | null {
+  const sr = s?.searchResults;
+  if (!sr || !Array.isArray(sr.trains) || !str(sr.resultId)) return null;
+  return { id: String(sr.resultId), trains: new Set(sr.trains.map((t: any) => str(t?.trainNumber ?? t?.number)).filter(Boolean) as string[]) };
+}
+
+/** True only while the record belongs to the session's CURRENT journey (exact date + route) and CURRENT search result
+ *  set, and names a train of that set. A new search, a date / route change or a cleared list → never applies. */
+export function infoAvailabilityApplies(rec: Partial<InfoAvailabilityRecord> | null | undefined, session: BookingSession | any): boolean {
+  const s: any = session || {};
+  const list = currentResultSet(s);
+  if (!rec || !list || !str(rec.status) || !str(rec.trainNumber) || !str(rec.travelClass)) return false;
+  if (rec.searchResultId !== list.id || !list.trains.has(String(rec.trainNumber))) return false;
+  if (!str(s.date) || rec.date !== String(s.date)) return false;
+  const o = stationCode(s.origin), d = stationCode(s.destination);
+  return !!o && !!d && stationCode(rec.origin) === o && stationCode(rec.destination) === d;
+}
+
+/** The record for a successful CHECK of an unselected train / class — null unless it binds exactly to the current
+ *  journey + search result set (nothing is preserved for a train / date / route outside the current list). */
+export function infoAvailabilityRecord(session: BookingSession | any, args: { trainNumber: unknown; travelClass: unknown; date?: unknown },
+  data: any, meta: { dataSource?: 'MOCK' | 'LIVE'; fetchedAt?: string; toolExecutionId?: string } = {}): InfoAvailabilityRecord | null {
+  const s: any = session || {};
+  const rec: InfoAvailabilityRecord = {
+    trainNumber: String(args.trainNumber ?? ''), travelClass: upper(args.travelClass), date: String(str(args.date) ?? str(s.date) ?? ''),
+    origin: stationCode(s.origin), destination: stationCode(s.destination), searchResultId: currentResultSet(s)?.id ?? '',
+    status: String(data?.status ?? ''), ...(typeof data?.available === 'boolean' ? { available: data.available } : {}),
+    ...(meta.dataSource ? { dataSource: meta.dataSource } : {}), ...(meta.fetchedAt ? { fetchedAt: meta.fetchedAt } : {}),
+    ...(meta.toolExecutionId ? { toolExecutionId: meta.toolExecutionId } : {})
+  };
+  return infoAvailabilityApplies(rec, s) ? rec : null;
+}
+
+/** Records still valid for the current journey / result set (stale ones are dropped whenever a new one is written). */
+export function retainedInfoAvailability(session: BookingSession | any): Record<string, InfoAvailabilityRecord> {
+  const out: Record<string, InfoAvailabilityRecord> = {};
+  for (const [k, r] of Object.entries(((session as any)?.infoAvailability || {}) as Record<string, InfoAvailabilityRecord>)) if (infoAvailabilityApplies(r, session)) out[k] = r;
+  return out;
+}
+
+/** A CHECK_AVAILABILITY for this train / class that ran THIS turn and failed (timeout / provider error / stale). */
+function failedCheckThisTurn(steps: any[], num: string, cls: string): boolean {
+  return (steps || []).some(st => {
+    const name = st?.toolName ?? st?.result?.toolName ?? st?.toolCall?.name;
+    if (name !== AVAILABILITY_TOOL || (st?.status !== 'error' && st?.status !== 'stale' && !(st?.result && st.result.success === false && st?.status !== 'rejected'))) return false;
+    const a = st?.validatedArguments || {};
+    const tn = str(a.trainNumber), tc = str(a.travelClass)?.toUpperCase();
+    return (!tn || tn === num) && (!tc || tc === cls);
+  });
+}
+
+/**
+ * P42-12 F3: earlier-turn CHECK results of unselected trains (session.infoAvailability) — only for the exact train /
+ * class / date / route of the current search result set, only where no CHECK of this turn (or the selection's committed
+ * result) covers it, never when a CHECK for it failed this turn, and never for an explicit fresh request ("abhi /
+ * dobara / fresh" needs a new provider answer).
+ */
+function preservedCheckEvidence(s: any, steps: any[], checked: AvailabilityEvidence[], opts: { userText?: string }): AvailabilityEvidence[] {
+  const recs = Object.values((s.infoAvailability || {}) as Record<string, InfoAvailabilityRecord>);
+  if (!recs.length) return [];
+  if (opts.userText && isExplicitFreshRequest(opts.userText)) return [];
+  const covered = new Set(checked.filter(e => !e.alternativePair).map(e => `${e.trainNumber}|${e.travelClass}|${e.date ?? ''}`));
+  const out: AvailabilityEvidence[] = [];
+  for (const r of recs) {
+    if (!infoAvailabilityApplies(r, s)) continue;
+    const num = String(r.trainNumber), cls = upper(r.travelClass), key = `${num}|${cls}|${r.date}`;
+    if (covered.has(key) || failedCheckThisTurn(steps, num, cls)) continue;
+    covered.add(key);
+    out.push({ trainNumber: num, date: r.date, travelClass: cls, status: String(r.status), available: typeof r.available === 'boolean' ? r.available : undefined,
+      sourceTool: AVAILABILITY_TOOL, sourceResultId: str(r.toolExecutionId) ?? null, origin: 'PRESERVED_CHECK' });
+  }
+  return out;
+}
+
+function searchRowEvidence(s: any, steps: any[], checked: AvailabilityEvidence[], opts: { userText?: string }): AvailabilityEvidence[] {
+  const sr = s.searchResults;
+  if (!sr || !Array.isArray(sr.trains) || !sr.trains.length) return [];
+  const date = str(sr.date ?? sr.journey?.date) ?? str(s.date);
+  // a result set of another journey (the user changed date / route since) is stale — it proves nothing
+  if (!sameJourney(sr.date ?? sr.journey?.date, s.date) || !sameJourney(sr.origin ?? sr.journey?.origin, s.origin)
+    || !sameJourney(sr.destination ?? sr.journey?.destination, s.destination)) return [];
+  // freshness: "abhi / dobara / fresh" needs a new provider answer — an earlier search result never stands in for it
+  const searchedNow = (steps || []).some(st => (st?.toolName ?? st?.result?.toolName ?? st?.toolCall?.name) === 'SEARCH_TRAINS'
+    && (st?.ok === true || st?.status === 'ok' || st?.result?.success === true));
+  if (opts.userText && isExplicitFreshRequest(opts.userText) && !searchedNow) return [];
+  const covered = new Set(checked.filter(e => !e.alternativePair).map(e => `${e.trainNumber}|${e.travelClass}|${e.date ?? ''}`));
+  // a CHECK_AVAILABILITY that ran THIS turn and failed (timeout / provider error / stale) stays a failure: the earlier
+  // search row never stands in for it (an unknown outcome is never presented as AVAILABLE / NOT AVAILABLE)
+  for (const st of steps || []) {
+    const name = st?.toolName ?? st?.result?.toolName ?? st?.toolCall?.name;
+    if (name !== AVAILABILITY_TOOL || (st?.status !== 'error' && st?.status !== 'stale' && !(st?.result && st.result.success === false && st?.status !== 'rejected'))) continue;
+    const a = st?.validatedArguments || {};
+    const tn = str(a.trainNumber), tc = str(a.travelClass)?.toUpperCase();
+    for (const t of sr.trains) for (const c of (t?.classes || [])) {
+      const n = str(t?.trainNumber ?? t?.number), k = str(c?.code)?.toUpperCase();
+      if ((!tn || tn === n) && (!tc || tc === k)) covered.add(`${n}|${k}|${date ?? ''}`);
+    }
+  }
+  const out: AvailabilityEvidence[] = [];
+  for (const t of sr.trains) {
+    const num = str(t?.trainNumber ?? t?.number);
+    if (!num) continue;
+    for (const c of (t.classes || [])) {
+      const cls = str(c?.code)?.toUpperCase();
+      const av = cls ? searchRowAvailability(c.availability, c.availabilityStatus) : undefined;
+      if (!cls || !av || covered.has(`${num}|${cls}|${date ?? ''}`)) continue;
+      out.push({ trainNumber: num, date, travelClass: cls, status: av.status, available: av.available,
+        sourceTool: SEARCH_AVAILABILITY_SOURCE, sourceResultId: str(sr.resultId ?? sr.sourceToolResultId) ?? null, origin: 'SEARCH_RESULT' });
+    }
   }
   return out;
 }
@@ -410,7 +578,7 @@ export function judgeAvailabilityClaim(t: string, ctx: AvailabilityContext): Ava
   }
   return {
     outcome: 'VERIFIED_AVAILABILITY', reason: null, claim, evidence: e,
-    provenance: { claimType: 'RAILWAY_LIVE_FACT', factSubtype: 'SEAT_AVAILABILITY', verified: true, sourceTool: AVAILABILITY_TOOL, sourceResultId: e.sourceResultId,
+    provenance: { claimType: 'RAILWAY_LIVE_FACT', factSubtype: 'SEAT_AVAILABILITY', verified: true, sourceTool: e.sourceTool, sourceResultId: e.sourceResultId,
       trainNumber: e.trainNumber, date: e.date, travelClass: e.travelClass, availability: e.status }
   };
 }

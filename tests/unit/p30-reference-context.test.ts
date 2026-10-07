@@ -193,6 +193,8 @@ describe('P30 G2 — focus and class carry-over', () => {
   it('[8] a class merely listed / an invalid class is never availability evidence', async () => {
     const h = await searched();
     await h.say('12014 wali');
+    // P42.12: a search row's availability value IS evidence — "merely listed" = the class has no availability value
+    for (const t of h.s().searchResults.trains) for (const c of t.classes) { c.availability = null; c.availabilityStatus = 'UNKNOWN'; }
     const out = await compose(h.s(), '12014 mein 3A available hai.');
     expect(out.rejected.map((r: any) => r.reason).join(',')).toMatch(/CLASS_NOT_LISTED|UNVERIFIED_AVAILABILITY/);
     const out2 = await compose(h.s(), '12014 mein CC available hai.');

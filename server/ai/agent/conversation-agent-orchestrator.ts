@@ -569,7 +569,7 @@ export class ConversationAgentOrchestrator {
     extra.entityRejections = [];
     try { opts.observer?.onStatus?.('GENERATING_RESPONSE'); } catch { /* observer only */ }
     const passengerFieldsUpdated = passengerFieldsChanged(passengersBefore, passengerSnapshot(sess));   // P42.1: real changes only
-    const composed = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims, extra.entityRejections, passengerFieldsUpdated);
+    const composed = this.compose(sess, rt, blockErr, progress, cards, mode, handoffSync.notes, postNotes, extra.rejectedClaims, extra.entityRejections, passengerFieldsUpdated, llmInput);
     // ---- Prompt 29: final action-claim guard — "availability check kar raha hoon" / "fare check ho gaya" survive only
     //      when THIS turn's execution records (LLM tool calls + backend preparation refreshes) support them. Runs on the
     //      final backend reply, so the screen text, the composer's fallback and the TTS speech all derive from the same
@@ -679,11 +679,11 @@ export class ConversationAgentOrchestrator {
 
   // ---------------------------------------------------------------- composition
 
-  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = [], entityRejections: Array<{ sentence: string; reason: string; binding: string }> = [], passengerFieldsUpdated?: string[]): string {
+  private compose(s: BookingSession, rt: ToolRuntimeResult, blockErr: OrchestratorError | undefined, progress: string[], cards: any[], mode: 'TEXT' | 'VOICE', preNotes: string[] = [], postNotes: string[] = [], rejectedClaims: string[] = [], entityRejections: Array<{ sentence: string; reason: string; binding: string }> = [], passengerFieldsUpdated?: string[], userText?: string): string {
     // Prompt 16: LLM wording may phrase authoritative facts only (invented train / fare / PNR / availability removed)
     const factCheck = (text: string): string => {
       // Prompt 17: RailwayResponseGroundingValidator — every fact needs RAILWAY_PROVIDER / BOOKING_RECORD / BOOKING_SESSION
-      const g = railwayResponseGrounding.validate(text, { session: s, steps: rt.steps, records: this.postBooking.store.getBookingsForSession(s.sessionId) as any });
+      const g = railwayResponseGrounding.validate(text, { session: s, steps: rt.steps, records: this.postBooking.store.getBookingsForSession(s.sessionId) as any, userText });
       rejectedClaims.push(...g.rejected);
       return g.text;
     };
@@ -693,6 +693,10 @@ export class ConversationAgentOrchestrator {
     const recordRejections = (r: Array<{ sentence: string; reason: string; binding: string }>) => {
       entityRejections.push(...r);
       for (const x of r) { const m = /^UNVERIFIED_FARE:(.+)$/.exec(String(x.reason)); if (m && !rejectedClaims.includes(`FARE:${m[1]}`)) rejectedClaims.push(`FARE:${m[1]}`); }
+      // P42.12: a sentence removed here never reaches the grounding validator — its invented train number is still
+      // reported in the P16 `rejectedClaims` contract (TRAIN:<n>); wording is unaffected (the sentence is already gone)
+      for (const x of r) for (const c of railwayResponseGrounding.validate(x.sentence, { session: s, steps: rt.steps, records: this.postBooking.store.getBookingsForSession(s.sessionId) as any, userText }).rejected)
+        if (/^TRAIN:/.test(c) && !rejectedClaims.includes(c)) rejectedClaims.push(c);
     };
     const parts: string[] = [];
     // v0.39.6: step-by-step passenger details — the agent's reply already asks its next question (from
@@ -763,7 +767,7 @@ export class ConversationAgentOrchestrator {
       // P42.1 hardening: internal preference codes in Muse's wording are shown as natural labels (no sentence added)
       const ruleGuard = guardSameTrainRuleClaims(humanizePreferenceCodes(paxGuard.text), rt.steps);
       entityRejections.push(...ruleGuard.removed.map(r => ({ sentence: '', reason: `SAME_TRAIN_RULE_CLAIM:${r}`, binding: 'NONE' })));
-      const guarded = ruleGuard.text ? factCheck(lifecycleClaimGuard(factGuard(ruleGuard.text, rt.steps, mode, s, recordRejections), prepChange)) : '';
+      const guarded = ruleGuard.text ? factCheck(lifecycleClaimGuard(factGuard(ruleGuard.text, rt.steps, mode, s, recordRejections, userText), prepChange)) : '';
       if (guarded) { parts.push(guarded); museTexts.add(guarded); llmWordingUsed = true; llmAsked = /\?|\b(bataiye|batayein|bataen|batao|boliye|chuniye|likhiye)\b/i.test(guarded); }
       // (a removed booking-state claim is not a failed fact — the backend's own state message follows;
       //  P42: neither is a removed unverified boarding claim — the Same Train Alternative fact line follows)
@@ -1146,13 +1150,13 @@ export function lifecycleClaimGuard(text: string, preparationChangeApplied = fal
 }
 
 export function factGuard(message: string, steps: ToolCallStep[], mode: 'TEXT' | 'VOICE', session?: BookingSession,
-  onRejected?: (r: Array<{ sentence: string; reason: string; binding: string }>) => void): string {
+  onRejected?: (r: Array<{ sentence: string; reason: string; binding: string }>) => void, userText?: string): string {
   const ok = steps.filter(st => st.status === 'ok' && st.result.toolName !== 'SEARCH_TRAINS');
   // Prompt 28: claim ↔ entity binding — a fare / seat claim about the wrong train / class / date (or an unresolvable
   // "is train") is removed sentence by sentence — also when the LLM answered WITHOUT a tool this turn (checked against
   // the session's committed results); nothing left → the deterministic tool facts (or nothing → the caller's fallback)
   if (session) {
-    const b = bindAndVerifyClaims(message, session, steps);
+    const b = bindAndVerifyClaims(message, session, steps, { userText });
     if (b.rejected.length) {
       onRejected?.(b.rejected);
       const kept = b.kept.join(' ').trim();

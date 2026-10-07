@@ -21,6 +21,8 @@ export interface FactSources {
   steps: Array<{ status: string; result: { toolName: string; data?: any; error?: { message?: string } | null } }>;
   /** Authoritative booking records for the session (BookingHistoryStore). */
   records?: Array<{ train?: { trainNumber?: string }; pnr?: string | null; fareSummary?: { total?: number | null } | null }>;
+  /** P42.12: this turn's user text — an explicit fresh request is never answered from an earlier search row. */
+  userText?: string;
 }
 
 export interface FactGuardResult { text: string; rejected: string[] }
@@ -54,7 +56,7 @@ export function guardResponseFacts(text: string, src: FactSources): FactGuardRes
   for (const r of src.records || []) if (r.pnr) pnrs.add(String(r.pnr));
   for (const st of src.steps) if (st.status === 'ok' && st.result.toolName === 'CHECK_PNR') numbersIn(st.result.data?.pnr, P10, pnrs);
   // Prompt 26: availability authority = CHECK_AVAILABILITY evidence matched to the sentence's train / date / class / status
-  const availability = { session: s, evidence: collectAvailabilityEvidence(s, src.steps as any[]) };
+  const availability = { session: s, evidence: collectAvailabilityEvidence(s, src.steps as any[], { userText: src.userText }) };
 
   const rejected: string[] = [];
   const kept = String(text).split(SENT_SPLIT).filter(sn => {

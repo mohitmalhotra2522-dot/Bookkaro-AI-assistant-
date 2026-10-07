@@ -205,14 +205,14 @@ export function guardFareClaims(text: string, session: BookingSession | any, ste
   return { kept, rejected };
 }
 
-export function bindAndVerifyClaims(text: string, session: BookingSession | any, steps: any[] = [])
+export function bindAndVerifyClaims(text: string, session: BookingSession | any, steps: any[] = [], opts: { userText?: string } = {})
   : { kept: string[]; rejected: Array<{ sentence: string; reason: string; binding: ClaimBindingStatus }>; bindings: ClaimBinding[] } {
   const views: FactView[] = (steps || []).map((st: any) => ({
     toolName: st?.result?.toolName ?? st?.toolCall?.name, ok: st?.status === 'ok' || st?.result?.success === true,
     data: st?.result?.data, callId: st?.toolCall?.callId, identity: st?.result?.identity
   }));
   const idx = buildFactIndex(session, views);
-  const evidence = collectAvailabilityEvidence(session, steps);
+  const evidence = collectAvailabilityEvidence(session, steps, opts);
   const availCtx: AvailabilityContext = { session, evidence, trains: idx.trains.map(f => ({ num: f.num, classes: f.classes })) };
   const binder = new ClaimEntityBinder({ idx, session, resultTrains: resultTrainsOf(idx, evidence) });
   const kept: string[] = []; const rejected: Array<{ sentence: string; reason: string; binding: ClaimBindingStatus }> = []; const bindings: ClaimBinding[] = [];

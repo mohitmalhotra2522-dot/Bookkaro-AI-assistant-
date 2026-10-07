@@ -127,7 +127,7 @@ export class ConversationStateManager {
       clear('bookingExecution');
     }
     for (const k of ['origin', 'originName', 'destination', 'destinationName', 'date', 'passengersCount', 'preferredClass', 'preferredTime', 'requestedClass',
-      'searchResults', 'lastSearch', 'searchMeta', 'selectedTrain', 'selectedClass', 'selectedJourney', 'fare', 'availability',
+      'searchResults', 'lastSearch', 'searchMeta', 'selectedTrain', 'selectedClass', 'selectedJourney', 'fare', 'availability', 'infoAvailability',
       'lastTrainInfo', 'lastTimetable', 'focusTrainNumber', 'previousTrainNumber', 'focusTurnId', 'staleReference', 'review', 'readiness', 'confirmation',
       'confirmedReviewVersion', 'carryOverSelection', 'lastPassengerRefId', 'activeBookingId', 'postBookingClarification',
       'pendingLifecycleAction', 'lifecycleClarification', 'lastLifecycleAction', 'lastDetectedChanges'] as Array<keyof BookingSession>) clear(k);
@@ -197,7 +197,9 @@ export class ConversationStateManager {
         };
       }
       s.focusTurnId = undefined;
-      clr('searchResults'); clr('selectedTrain'); clr('selectedClass'); clr('availability'); clr('fare');
+      clr('searchResults'); clr('selectedTrain'); clr('selectedClass'); clr('availability'); clr('infoAvailability'); clr('fare');
+      // P42-12 F3: cross-train CHECK evidence belongs to the old journey too
+      s.infoAvailability = undefined;
       s.availableTrains = [];
       s.searchResults = undefined;
       s.lastSearch = undefined;
@@ -262,6 +264,7 @@ export class ConversationStateManager {
       s.selectedClass = undefined;
       s.fare = undefined;
       s.availability = undefined;
+      s.infoAvailability = undefined;   // P42-12 F3: route-bound cross-train CHECK evidence
       s.passengers = [];
       s.currentPassengerIndex = 0;
       s.reviewConfirmed = false;
@@ -274,6 +277,7 @@ export class ConversationStateManager {
       s.selectedClass = undefined;
       s.fare = undefined;
       s.availability = undefined;
+      s.infoAvailability = undefined;   // P42-12 F3: date-bound cross-train CHECK evidence
     }
     if (updates.passengerCount !== undefined && updates.passengerCount !== s.passengersCount) {
       s.passengers = [];

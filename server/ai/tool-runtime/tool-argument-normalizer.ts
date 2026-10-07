@@ -138,9 +138,13 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
     }
     if (tool === 'CHECK_AVAILABILITY') delete args.passengersCount;   // availability is per class, not per head
     // Part 39 — the LLM chose a different train than the selected one and the user did NOT name it.
+    // P42.12: an availability ENQUIRY about another row of the current same-journey result set that the user NAMED
+    // ("Vande Bharat wali" → 22488) needs no selection. Unnamed ("availability batao" with a train selected) or an
+    // ambiguous name still asks — the LLM never substitutes a train. Positional references use trainRef. GET_FARE unchanged.
     const sel = trainOf(session);
     const proposed = args.trainNumber !== undefined ? String(args.trainNumber) : undefined;
-    if (sel && proposed && proposed !== sel && !new RegExp(`(?<!\\d)${proposed}(?!\\d)`).test(userText || '')) {
+    const listedEnquiry = tool === 'CHECK_AVAILABILITY' && !!proposed && namedResultRow(session, userText || '') === proposed;
+    if (sel && proposed && proposed !== sel && !listedEnquiry && !new RegExp(`(?<!\\d)${proposed}(?!\\d)`).test(userText || '')) {
       return { ok: false, code: 'CONTEXT_CONFLICT', message: `${sel} selected hai. ${proposed} check karna hai?`, details: { field: 'selectedTrain', current: sel, proposed } };
     }
   }
@@ -155,4 +159,25 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
   }
 
   return { ok: true, arguments: args, corrections };
+}
+
+const GENERIC_NAME_WORDS = new Set(['express', 'mail', 'superfast', 'special', 'passenger', 'local', 'train', 'wali', 'wala', 'new', 'junction']);
+
+/**
+ * P42.12: the ONE row of the session's CURRENT search result set (same date / route as the session journey) whose
+ * distinctive name word the user said ("Vande Bharat wali", "Shan-e-Punjab ki"). Generic words and the journey's own
+ * station names never identify a train; a word shared by several rows identifies none (→ null, the caller asks).
+ */
+function namedResultRow(session: any, userText: string): string | null {
+  const sr = session?.searchResults;
+  if (!sr || !Array.isArray(sr.trains) || !userText) return null;
+  const same = (a: unknown, b: unknown) => a === undefined || a === null || a === '' || b === undefined || b === null || b === ''
+    || String(a).toUpperCase() === String(b).toUpperCase();
+  if (!same(sr.date ?? sr.journey?.date, session.date) || !same(sr.origin ?? sr.journey?.origin, session.origin)
+    || !same(sr.destination ?? sr.journey?.destination, session.destination)) return null;
+  const words = (v: unknown) => String(v ?? '').toLowerCase().split(/[^a-z]+/).filter(w => w.length >= 4);
+  const stations = new Set([...words(session.originName), ...words(session.destinationName)]);
+  const said = new Set(words(userText));
+  const hits = sr.trains.filter((t: any) => words(t?.trainName ?? t?.name).some(w => !GENERIC_NAME_WORDS.has(w) && !stations.has(w) && said.has(w)));
+  return hits.length === 1 ? String(hits[0]?.trainNumber ?? hits[0]?.number ?? '') || null : null;
 }

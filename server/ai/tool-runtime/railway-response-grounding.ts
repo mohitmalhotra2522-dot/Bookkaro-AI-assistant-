@@ -51,7 +51,7 @@ export class RailwayResponseGroundingValidator {
     for (const st of okSteps) collectTimes(st.result.data, times);
     for (const r of src.records || []) collectTimes(r, times);
     // Prompt 26: a status code ("WL 12", "RAC 4") is verified only by a matching CHECK_AVAILABILITY result (scoped)
-    const availability = { session: s, evidence: collectAvailabilityEvidence(s, src.steps as any[]) };
+    const availability = { session: s, evidence: collectAvailabilityEvidence(s, src.steps as any[], { userText: src.userText }) };
     const pnrKnown = has('CHECK_PNR') || (src.records || []).some(r => !!r.pnr);
     const liveKnown = has('TRACK_TRAIN');
     const cancelledKnown = has('GET_CANCELLED_TRAINS') || okSteps.some(st => st.result.toolName === 'TRACK_TRAIN' && /cancel/i.test(JSON.stringify(st.result.data || {})));

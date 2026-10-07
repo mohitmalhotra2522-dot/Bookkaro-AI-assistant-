@@ -1,8 +1,11 @@
 /**
  * PROMPT 26 — G3: strict seat-availability authority through the FULL agent stack (native OpenAI-compatible tool
  * calling against a fake server → RailwayToolRuntime → MockRailwayProvider → NaturalResponseComposer).
- * Mock railway data: 12014 CC "Available", 12497 CC "RAC 4", 12497 SL "Waitlist 12". Search rows also carry a per-class
- * `avail` field — which must NEVER count as availability. No network, no credits, no booking, no handoff.
+ * Mock railway data: 12014 CC "Available", 12497 CC "RAC 4", 12497 SL "Waitlist 12". P42.12: a CURRENT search row's
+ * per-class availability IS provider availability (tests/integration/p42-12-preselection-availability.test.ts); the
+ * tests below that are about OTHER authority questions (class lists, info / fare, user words, cleanup, CHECK scope)
+ * run with `rail.listedOnly` — rows exactly like live RailCore search rows (availability null / UNKNOWN), so that
+ * nothing but the question under test can verify a claim. No network, no credits, no booking, no handoff.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ConversationStateManager } from '../../server/ai/state/conversation-state';
@@ -24,7 +27,14 @@ const ENV = { LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: KEY, LLM_MODEL: 'f
 class SpyRailway extends MockRailwayProvider {
   n: Record<string, number> = {};
   private b(k: string) { this.n[k] = (this.n[k] || 0) + 1; }
-  async searchTrains(r: any): Promise<any> { this.b('search'); return super.searchTrains(r); }
+  /** P42.12: search rows WITHOUT per-class availability (live RailCore shape: availability null, UNKNOWN). */
+  listedOnly = false;
+  async searchTrains(r: any): Promise<any> {
+    this.b('search');
+    const res: any = await super.searchTrains(r);
+    if (this.listedOnly && res?.data?.trains) res.data.trains = res.data.trains.map((t: any) => ({ ...t, classes: (t.classes || []).map((c: any) => ({ ...c, availability: null, availabilityStatus: 'UNKNOWN' })) }));
+    return res;
+  }
   async getTrainInfo(r: any): Promise<any> { this.b('info'); return super.getTrainInfo(r); }
   async checkAvailability(r: any): Promise<any> { this.b('avail'); return super.checkAvailability(r); }
   async getFare(r: any): Promise<any> { this.b('fare'); return super.getFare(r); }
@@ -84,6 +94,7 @@ const envBefore = process.env.REAL_IRCTC_ENABLED;
 beforeEach(() => {
   railwayRegistry.setActive('p26-spy');
   rail.n = {};
+  rail.listedOnly = false;
   outputs.length = 0;
   fetchSpy = vi.spyOn(globalThis, 'fetch' as any).mockImplementation(((url: any, init: any) => {
     if (String(url).startsWith('http://127.0.0.1:')) return realFetch(url, init);
@@ -130,6 +141,7 @@ describe('P26 G3 — general knowledge and class lists are not availability', ()
   });
 
   it('[2] class list: "CC aur 2S available" after a search becomes "classes listed"; no availability tool, no availability state', async () => {
+    rail.listedOnly = true;                                                   // rows list classes only (no availability value)
     const h = mk({ 'Kal Amritsar se Delhi ki trains dikhao': [{ calls: [SEARCH] }, { content: 'Kal ke liye 3 trainein mili hain. 12014 Amritsar Shatabdi mein CC aur 2S available hain. 12497 Shan-e-Punjab mein 3A, CC, SL aur 2S classes listed hain.' }] });
     const r = await h.say('Kal Amritsar se Delhi ki trains dikhao');
     expect(execs(r)).toEqual([['SEARCH_TRAINS', 'SUCCEEDED', null]]);
@@ -144,12 +156,14 @@ describe('P26 G3 — general knowledge and class lists are not availability', ()
 });
 
 describe('P26 G3 — unsupported availability is removed; no cross-tool leakage', () => {
-  it('[3] SEARCH_TRAINS rows (with their "avail" field) prove nothing: availability sentences go, the arrival fact stays — text and voice alike', async () => {
+  it('[3] SEARCH_TRAINS rows WITHOUT an availability value prove nothing: availability sentences go, the arrival fact stays — text and voice alike', async () => {
+    rail.listedOnly = true;
     const plan = { 'Inme availability kaisi hai?': [{ content: '12014 mein CC available hai. 12497 CC mein RAC 4 hai. 12014 10:50 par pahunchti hai.' }] };
     for (const mode of ['TEXT', 'VOICE'] as const) {
       const h = mk(plan);
       await h.say(SEARCH_T, mode);
-      expect(JSON.stringify(h.s().searchResults)).toMatch(/RAC 4/);         // the search result DID carry an avail field
+      expect(JSON.stringify(h.s().searchResults)).toMatch(/"code":"CC"/);   // the rows DO list the classes …
+      expect(JSON.stringify(h.s().searchResults)).not.toMatch(/RAC 4|"availability":"Available"/);   // … with no availability value
       const r = await h.say('Inme availability kaisi hai?', mode);
       expect(execs(r), mode).toEqual([]);
       expect(reasons(r), mode).toEqual(['UNVERIFIED_AVAILABILITY', 'UNVERIFIED_AVAILABILITY']);
@@ -160,6 +174,7 @@ describe('P26 G3 — unsupported availability is removed; no cross-tool leakage'
   });
 
   it('[3b] GET_TRAIN_INFO + GET_FARE results do not prove seats: the fare sentence stays, the seat sentence goes', async () => {
+    rail.listedOnly = true;
     const h = mk({
       '12014 ki info aur CC fare batao': [{ calls: [{ name: 'GET_TRAIN_INFO', args: { trainNumber: '12014' } }, { name: 'GET_FARE', args: {} }] },
         v => ({ content: `12014 CC ka fare ₹${v.results.find(r => r.name === 'GET_FARE')?.content?.data?.perPassenger} hai. CC mein seats available hain.` })]
@@ -174,6 +189,7 @@ describe('P26 G3 — unsupported availability is removed; no cross-tool leakage'
   });
 
   it('[4] user-provided availability is not authority: an echo is removed, an attributed acknowledgement stays (USER_PROVIDED)', async () => {
+    rail.listedOnly = true;
     const h = mk({
       '12014 mein CC available hai na?': [{ content: 'Haan, 12014 mein CC available hai.' }],
       'Mujhe pata hai CC available hai, aage badho': [{ content: 'Aapne bataya CC available hai — ise abhi railway data se verify nahi kiya gaya. Kya main 12014 CC ki availability check karun?' }]
@@ -191,6 +207,7 @@ describe('P26 G3 — unsupported availability is removed; no cross-tool leakage'
   });
 
   it('[5] cleanup: a removed numbered availability item leaves no "1." / "2." / fragments', async () => {
+    rail.listedOnly = true;
     const h = mk({ 'Pehli train ka kya scene hai?': [{ content: '1. 12014 mein CC available hai.\n2. 12014 10:50 par pahunchti hai.\n- ' }] });
     await h.say(SEARCH_T);
     const r = await h.say('Pehli train ka kya scene hai?');
@@ -233,6 +250,7 @@ describe('P26 G3 — CHECK_AVAILABILITY is the authority (matching train / date 
   });
 
   it('[8] another train\'s or another date\'s claim is not covered by the 12014 · kal · CC result', async () => {
+    rail.listedOnly = true;
     const h = mk({
       'CC ki availability batao': [{ calls: [AV] }, { content: '12014 mein CC available hai.' }],
       'Aur baaki trains?': [{ content: '12497 mein CC available hai. Parso 12014 mein CC available hai. 12014 mein CC available hai.' }]

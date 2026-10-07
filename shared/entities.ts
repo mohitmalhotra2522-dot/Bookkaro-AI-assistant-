@@ -76,6 +76,27 @@ export interface AvailabilityResult {
   destination?: string;
 }
 
+/**
+ * P42-12 F3 (live fix): an information CHECK_AVAILABILITY result for a train / class that is NOT the booking selection.
+ * Response-validation evidence ONLY — never read by booking, review or readiness (those read `availability`). Bound to
+ * the exact train + class + date + route AND the search result set it was checked against; any other journey or a new
+ * search makes it inapplicable (and the state manager clears it on date / route change and journey reset).
+ */
+export interface InfoAvailabilityRecord {
+  trainNumber: string;
+  travelClass: string;
+  date: string;
+  origin: string;
+  destination: string;
+  /** resultId of the search result set current when the CHECK ran */
+  searchResultId: string;
+  status: string;
+  available?: boolean;
+  dataSource?: 'MOCK' | 'LIVE';
+  fetchedAt?: string;
+  toolExecutionId?: string;
+}
+
 export interface FareResult {
   perPassenger: number;
   total: number;
@@ -161,6 +182,8 @@ export interface BookingSession {
   selectedJourney?: { origin: StationCode; destination: StationCode; date: string; trainNumber: string };
   fare?: FareResult;
   availability?: Record<string, AvailabilityResult>;
+  /** P42-12 F3: unselected-train CHECK results (evidence only; see InfoAvailabilityRecord). Key: train|class|date|origin|destination. */
+  infoAvailability?: Record<string, InfoAvailabilityRecord>;
   bookingState: import('./states').BookingState;
   /** Prompt 18 (Part 19): pending question code derived from pendingInteraction (MISSING_DATE, SELECT_TRAIN, CONFIRM_REVIEW …). */
   pendingQuestion?: import('./turn-engine').PendingQuestionCode | null;

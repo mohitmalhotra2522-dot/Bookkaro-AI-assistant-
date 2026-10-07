@@ -58,6 +58,7 @@ export function mapProviderToolCall(tc: ToolCall): ToolCall {
 import { ToolCallValidator, type ValidatedToolCall } from '../tools/tool-call-validator';
 import { RailwayToolService } from '../../railway/tools/railway-tool-service';
 import { RailwaySearchOrchestrator } from '../../railway/orchestrator/search-orchestrator';
+import { infoAvailabilityRecord, infoAvailabilityKey, retainedInfoAvailability } from '../response/availability-authority';
 import type { BookingSession, BookingEventType } from '@shared/entities';
 import { BookingState } from '@shared/states';
 import type { TurnToolResultView, SourceConflict } from '../providers/llm-provider';
@@ -1247,7 +1248,9 @@ export class BoundToolRuntime {
             date: sr?.journey?.date ?? vt.arguments.date, origin: sr?.journey?.origin ?? vt.arguments.origin, destination: sr?.journey?.destination ?? vt.arguments.destination,
             sourceTurnId: H.turnId ?? null, sourceToolResultId: r.toolExecutionId ?? null },
           searchResultsVersion: version,
-          searchMeta: { resultId, retrievedAt, totalCount: trains.length }
+          searchMeta: { resultId, retrievedAt, totalCount: trains.length },
+          // P42-12 F3: a genuinely new result set — CHECK evidence preserved against the previous set no longer applies
+          infoAvailability: undefined
         };
         // Post-P42.10 F5: an LLM-filled search argument (e.g. a default 1 on a date correction) never changes the booking
         // passenger count — only a count grounded in the user's words this turn (same rule as update_booking_session)
@@ -1277,6 +1280,12 @@ export class BoundToolRuntime {
         // by class, so a different train's result must never look like the selected train's)
         const selNum = s.selectedTrain ? String((s.selectedTrain as any).number || (s.selectedTrain as any).trainNumber) : null;
         if (!selNum || String(vt.arguments.trainNumber) !== selNum || String(vt.arguments.travelClass).toUpperCase() !== String(s.selectedClass || '').toUpperCase()) {
+          // P42-12 F3 (live fix): …but it stays the newest provider evidence for THAT train / class in later turns — kept in
+          // a separate evidence-only record bound to train + class + date + route + current result set (booking state —
+          // selection, `availability`, fare, review — is never touched); without it the older search-row value would win
+          const rec = infoAvailabilityRecord(s, vt.arguments as any, r.data, { dataSource: source,
+            fetchedAt: r.provenance?.retrievedAt || r.timestamp, toolExecutionId: r.toolExecutionId });
+          if (rec) this.commitSession({ infoAvailability: { ...retainedInfoAvailability(s), [infoAvailabilityKey(rec)]: rec } } as any);
           H.emit?.('AVAILABILITY_CHECKED', { trainNumber: r.data?.trainNumber, travelClass: r.data?.travelClass, status: r.data?.status, date: r.data?.date, selection: false });
           break;
         }

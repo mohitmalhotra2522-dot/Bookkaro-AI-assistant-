@@ -326,7 +326,7 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
           foodPreference: { type: 'string', enum: ['VEG', 'NON_VEG', 'NO_FOOD'], description: 'only when context.bookingPreparation.passengerOptions.food.status is OFFERED' } } } } } },
         correctionTarget: STR('origin|destination|date|passengers|train|class'), correctionValueRaw: STR('corrected value as said'),
         affirmation: { type: 'boolean' }, newJourney: { type: 'boolean' },
-        selectionPurpose: { type: 'string', enum: ['INFORMATION', 'BOOKING'], description: 'Why a train/class is selected: INFORMATION = only to answer an availability / fare question (no booking started); BOOKING = the user wants to book.' },
+        selectionPurpose: { type: 'string', enum: ['INFORMATION', 'BOOKING'], description: 'Why a train/class is selected: INFORMATION = only to answer a fare question (no booking started; availability needs no selection); BOOKING = the user wants to book.' },
         lifecycleAction: STR('optional booking lifecycle label'), bookingReference: STR('booking reference from context')
       } },
       clarification: STR('optional short question if you need to ask')

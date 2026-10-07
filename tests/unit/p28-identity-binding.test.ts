@@ -302,7 +302,8 @@ describe('P28 G2 — fare / availability / timetable identity', () => {
     const msg = h.views.filter(v => v.user === '12497 3A availability').at(-1)!.results.at(-1)!.content;
     expect(msg).toMatchObject({ ok: false, error: { code: 'RESULT_IDENTITY_MISMATCH', errorType: 'IDENTITY', retryable: false } });
     expect(Object.keys(h.s().availability || {})).toHaveLength(0);
-    expect(collectAvailabilityEvidence(h.s(), [])).toEqual([]);
+    // P42.12: the current search rows are availability evidence of their own — the mismatched CHECK result is not
+    expect(collectAvailabilityEvidence(h.s(), []).filter(e => e.sourceTool === 'CHECK_AVAILABILITY')).toEqual([]);
   });
 
   it('[17] timetable identity: GET_TIMETABLE / GET_TRAIN_INFO carry the train; "Yeh 06:35 pe nikalti hai" after 12014 is cross-train', async () => {
