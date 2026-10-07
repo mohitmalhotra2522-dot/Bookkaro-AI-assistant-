@@ -379,6 +379,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
             //   turn for the same capability, so the reply can never hide them. API results are LIVE_API.
             ...sourceLabelOf(c.name, r, (input.agentTranscript || []) as any),
             ...((r as any).sourceConflict ? { sourceConflict: (r as any).sourceConflict } : {}),
+            // P42.2: seat facts before `data` so a clipped transcript never loses them
+            ...(r.ok && r.seatCheck ? { seatCheck: r.seatCheck } : {}),
             ...(r.ok ? { data: trimResult(r.data), ...(r.followUp ? { followUp: r.followUp } : {}) }
               : { error: { code: (r.error as any)?.code, message: clip(factOnly(String((r.error as any)?.message || '')), 300), ...argumentDetails((r.error as any)?.details),
                   ...pickStructured(structuredToolError(r.toolName, r.error as any, r.attempts || 1)),
@@ -402,7 +404,7 @@ function pickStructured(e: ReturnType<typeof structuredToolError>): Record<strin
 function argumentDetails(d: any): Record<string, string> {
   if (!d || typeof d !== 'object') return {};
   const out: Record<string, string> = {};
-  for (const k of ['argument', 'expected', 'received', 'previousCode', 'attempts'] as const) if (typeof d[k] === 'string') out[k] = clip(d[k], 120);
+  for (const k of ['argument', 'expected', 'received', 'previousCode', 'attempts', 'errorClass'] as const) if (typeof d[k] === 'string') out[k] = clip(d[k], 120);
   return out;
 }
 

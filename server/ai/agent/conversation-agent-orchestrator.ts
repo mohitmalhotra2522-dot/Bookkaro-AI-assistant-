@@ -18,7 +18,8 @@
  */
 import { guardSameTrainRuleClaims } from '../response/same-train-claims';
 import { sameTrainCardData, sameTrainFallbackText } from '../../railway/same-train/same-train-view';
-import { isSameTrainResultStale } from '../../railway/same-train/same-train-service';
+import { isSameTrainResultStale, findSameTrainResult } from '../../railway/same-train/same-train-service';
+import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { ReconciliationConfig } from '../../booking/lifecycle/reconciliation-config';
 import type { BookingProviderRegistry } from '../../booking/provider/booking-provider-registry';
@@ -757,10 +758,17 @@ export class ConversationAgentOrchestrator {
     const stSteps = nonSearch.filter(st => st.result.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES' || st.result.toolName === 'PRESENT_SAME_TRAIN_ALTERNATIVES');
     if (stSteps.length) {
       const stored: any = (s as any).sameTrainAlternatives;
-      const okSearch = [...stSteps].reverse().find(st => st.status === 'ok' && st.result.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES');
-      const okPresent = stSteps.some(st => st.status === 'ok' && st.result.toolName === 'PRESENT_SAME_TRAIN_ALTERNATIVES');
-      const result = okSearch ? (stored && stored.alternativeSearchId === okSearch.result.data?.alternativeSearchId ? stored : okSearch.result.data) : okPresent ? stored : null;
-      if (result) cards.push({ type: 'same_train_alternatives', data: sameTrainCardData(result, { stale: isSameTrainResultStale(s, result) }) });
+      const okSearches = stSteps.filter(st => st.status === 'ok' && st.result.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES');
+      const okSearch = okSearches[okSearches.length - 1];
+      const okPresent = stSteps.filter(st => st.status === 'ok' && st.result.toolName === 'PRESENT_SAME_TRAIN_ALTERNATIVES');
+      const result = okSearch ? (findSameTrainResult(s, String(okSearch.result.data?.alternativeSearchId || '')) || okSearch.result.data) : okPresent.length ? stored : null;
+      // P42.2: one card per result set produced (or ranked) this turn — multi-class / multi-train searches each keep
+      // their own card — and ONLY when it holds a verified alternative for the whole party (no empty / fake card)
+      const ids = [...new Set([...okSearches.map(st => String(st.result.data?.alternativeSearchId || '')), ...okPresent.map(st => String(st.result.data?.alternativeSearchId || ''))].filter(Boolean))];
+      for (const id of ids) {
+        const r: any = findSameTrainResult(s, id) || okSearches.find(st => st.result.data?.alternativeSearchId === id)?.result.data;
+        if (r && (r.alternatives || []).some(isVerifiedSameTrainAlternative)) cards.push({ type: 'same_train_alternatives', data: sameTrainCardData(r, { stale: isSameTrainResultStale(s, r) }) });
+      }
       const failed = [...stSteps].reverse().find(st => st.status !== 'ok' && st.result.toolName === 'SEARCH_SAME_TRAIN_ALTERNATIVES');
       if (okSearch && !llmWordingUsed) parts.push(sameTrainFallbackText(result));
       else if (!okSearch && failed && !llmWordingUsed && !honestFallbackUsed) parts.push(sameTrainFallbackText(null, String(failed.result.error?.code || '')));

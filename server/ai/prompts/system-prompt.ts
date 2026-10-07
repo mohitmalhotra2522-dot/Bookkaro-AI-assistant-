@@ -384,9 +384,13 @@ YOUR REPLY (final answer, plain text, no markdown tables)
  * P42.1 (pre-release): the existing P42 Same Train Alternative guidance (text unchanged). It is injected into Muse's
  * system prompt ONLY when SAME_TRAIN_ALTERNATIVES_ENABLED is on — the same flag that exposes the P42 tools.
  */
-export const SAME_TRAIN_ALTERNATIVES_PROMPT_GUIDANCE = `- SEARCH_SAME_TRAIN_ALTERNATIVES (only if listed) is OPTIONAL and entirely your decision — e.g. the user asks for other
-  options on the same train, or the requested pair is waitlisted / full and the user wants to try. Never run it after
-  every search. It checks other TICKET station pairs on the SAME train (earlier ticket origin, a few stations past the
+export const SAME_TRAIN_ALTERNATIVES_PROMPT_GUIDANCE = `- SEARCH_SAME_TRAIN_ALTERNATIVES (only if listed) is OPTIONAL and entirely your decision — a recovery step for a
+  SHORTAGE: the requested pair is WAITLIST / NOT_AVAILABLE / REGRET / TRAIN_CANCELLED, or has fewer seats than passengers
+  (AVAILABLE-0001 for 3 passengers = only 1 seat: say "sirf 1 seat", never just "available"). Use seatCheck on
+  SEARCH_TRAINS / CHECK_AVAILABILITY results. Never for enough seats, never after every search, and UNKNOWN / timeout is
+  not a shortage. One call = one train + one class; for several shortage classes listed on the train or several shown
+  trains with a shortage, make targeted separate calls (never invent a class / train). outcome
+  NO_VERIFIED_SAME_TRAIN_ALTERNATIVE = nothing covers the party — say so plainly. It checks other TICKET station pairs on the SAME train (earlier ticket origin, a few stations past the
   destination). Ticket station ≠ travel station: if boardingRuleStatus / alightingRuleStatus is UNVERIFIED, never say
   the user can board / get off at the requested station — say it must be verified (e.g. "Amritsar se availability mil
   rahi hai, lekin Ludhiana se boarding ka rule verify karna zaroori hai."). UNKNOWN / TIMEOUT is not "no seats";

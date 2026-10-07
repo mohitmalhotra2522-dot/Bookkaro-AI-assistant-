@@ -179,6 +179,8 @@ export interface BookingSession {
   lastTimetable?: any;
   /** Prompt 42: latest Same Train Alternative result (SameTrainAlternativesResult) — never a booking field. */
   sameTrainAlternatives?: any;
+  /** P42.2: every same-train result kept this session (latest first, max 6) — multi-class / multi-train searches. */
+  sameTrainAlternativeSets?: any[];
 
   // ---- Multi-turn context hardening (Prompt 8) ----
   /** Structured pending interaction the backend is waiting for. Used to resolve

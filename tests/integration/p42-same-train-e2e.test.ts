@@ -165,13 +165,15 @@ describe('P42 G3 — Same Train Alternative through Muse', () => {
     let seen: any;
     const h = harness({ [USER]: (v: TurnView) => { if (v.step === 0) return { calls: [SEARCH()] }; seen = stResult(v); return { content: 'Jalandhar wale option par providers ka data match nahi kar raha.' }; } });
     const r = await h.say(USER);
-    const juc = card(r).alternatives.find((a: any) => a.ticketOrigin === 'JUC');
+    expect(card(r)).toBeUndefined();                                                                 // P42.2: card only when a verified alternative exists
+    const res = h.s().sameTrainAlternatives;                                                         // the stored result the card would have been built from
+    const juc = res.alternatives.find((a: any) => a.ticketOrigin === 'JUC');
     expect(juc).toMatchObject({ availability: 'CONFLICTING', verificationStatus: 'CONFLICTING' });
     expect(juc.conflict.values).toHaveLength(2);
-    expect(card(r).errors).toContain('PROVIDER_DATA_CONFLICT');
+    expect(res.errors).toContain('PROVIDER_DATA_CONFLICT');
     const jucForMuse: any = Object.values(deep(seen, 'alternatives')).find((a: any) => a.ticket === 'JUC→UMB');
     expect(jucForMuse.availability).toBe('CONFLICTING');
-    expect(card(r).presentation.decidedBy).toBe('NONE');                                            // Muse did not rank → backend does not either
+    expect(res.presentation.decidedBy).toBe('NONE');                                            // Muse did not rank → backend does not either
   });
 
   it('[5] all providers fail → honest typed error to Muse, pinned message on screen, no card, nothing invented', async () => {

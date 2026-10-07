@@ -16,6 +16,8 @@
  * status is UNVERIFIED and the UI / reply must say so.
  */
 
+import type { NormalizedAvailabilityState, SeatSufficiency, ShortageTriggerReason, SeatShortageAssessment, SameTrainOutcome } from './same-train-shortage';
+
 export const SAME_TRAIN_ALTERNATIVES_TOOL = 'SEARCH_SAME_TRAIN_ALTERNATIVES' as const;
 export const PRESENT_SAME_TRAIN_ALTERNATIVES_TOOL = 'PRESENT_SAME_TRAIN_ALTERNATIVES' as const;
 export const SAME_TRAIN_TOOL_NAMES = Object.freeze([SAME_TRAIN_ALTERNATIVES_TOOL, PRESENT_SAME_TRAIN_ALTERNATIVES_TOOL] as const);
@@ -130,6 +132,14 @@ export interface SameTrainAlternative {
   alightingRuleStatus: RuleStatus;
   availability: CombinedAvailability;
   availabilityStatusText?: string;
+  /** P42.2: normalized 7-state status (REGRET / TRAIN_CANCELLED kept distinct; CONFLICTING / no answer → UNKNOWN) */
+  availabilityStatus?: NormalizedAvailabilityState;
+  /** P42.2: provider's exact seat count (AVAILABLE only, never inferred) */
+  availableSeatCount?: number;
+  /** P42.2: the party size this pair was checked for */
+  requestedPassengerCount?: number;
+  /** P42.2: SUFFICIENT only when availableSeatCount ≥ requestedPassengerCount (or bare AVAILABLE for 1 passenger) */
+  seatSufficiency?: SeatSufficiency;
   fare: { status: 'PROVIDER' | 'UNAVAILABLE' | 'NOT_REQUESTED' | 'CONFLICTING'; total?: number; perPassenger?: number; currency?: string; provider?: string };
   verificationStatus: VerificationStatus;
   /** true only for VERIFIED (availability + any boarding/alighting rule verified) */
@@ -205,6 +215,18 @@ export interface SameTrainAlternativesResult {
   completedAt: string;
   latencyMs: number;
   isMock: boolean;
+  /** P42.2 (additive): party size, trigger, requested-pair assessment, outcome, completeness, creation context */
+  requestedPassengerCount?: number;
+  triggerReason?: ShortageTriggerReason | null;
+  triggerSource?: 'SESSION_EVIDENCE' | 'MUSE' | 'NONE';
+  requestedPairAssessment?: SeatShortageAssessment | null;
+  outcome?: SameTrainOutcome;
+  verifiedAlternativeCount?: number;
+  /** false when the candidate list was truncated or some provider calls failed / timed out — never claim exhaustive */
+  searchComplete?: boolean;
+  toolExecutionId?: string | null;
+  /** session selection at creation: a result is stale only when train / class changed AFTER it was produced */
+  contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null };
 }
 
 /** Bounded search limits (spec "SEARCH LIMITS") — configurable via env, clamped to safe ranges. */
@@ -229,3 +251,9 @@ export const SAME_TRAIN_DEFAULT_LIMITS: Readonly<SameTrainLimits> = Object.freez
 });
 export const DESTINATION_EXTENSION_MIN = 5;
 export const DESTINATION_EXTENSION_MAX = 7;
+
+/** P42.2 — per-turn budget of SEARCH_SAME_TRAIN_ALTERNATIVES calls (SAME_TRAIN_MAX_SEARCHES_PER_TURN, clamped 1–8, default 4). */
+export function sameTrainSearchesPerTurn(env: Record<string, string | undefined> = (typeof process !== 'undefined' ? process.env : {}) as any): number {
+  const n = Number(env.SAME_TRAIN_MAX_SEARCHES_PER_TURN);
+  return Number.isInteger(n) && n >= 1 ? Math.min(8, n) : 4;
+}

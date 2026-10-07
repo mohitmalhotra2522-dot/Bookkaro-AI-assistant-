@@ -21,6 +21,9 @@ import {
   SameTrainErrorCode as E, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_DEFAULT_LIMITS, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX,
   sameTrainJourneyKeyString
 } from '@shared/same-train-alternatives';
+import {
+  type ShortageTriggerReason, evaluateSeatShortage, normalizeAvailabilityState, isVerifiedSameTrainAlternative, SameTrainOutcome, SameTrainErrorClass
+} from '@shared/same-train-shortage';
 
 // ------------------------------------------------------------------ limits
 
@@ -155,13 +158,9 @@ export function planCandidates(stations: RouteStation[], duplicates: Set<string>
 
 /** Provider status string → canonical category. Anything unrecognised stays UNKNOWN (never NOT_AVAILABLE). */
 export function availabilityCategory(status: unknown): AvailabilityCategory {
-  const s = String(status ?? '').trim().toUpperCase().replace(/[_-]+/g, ' ');
-  if (!s) return 'UNKNOWN';
-  if (/^(CURR\s?)?(AVAILABLE|AVL|AVBL)\b/.test(s)) return 'AVAILABLE';
-  if (/^RAC\b/.test(s)) return 'RAC';
-  if (/^(GNWL|RLWL|PQWL|TQWL|RSWL|NPWL|CKWL|WL|WAITLIST(ED)?|WAITING)\b/.test(s)) return 'WAITLIST';
-  if (/^(REGRET|NOT AVAILABLE|NOT AVBL|NO ROOM|TRAIN CANCELLED|TRAIN DEPARTED)\b/.test(s)) return 'NOT_AVAILABLE';
-  return 'UNKNOWN';
+  // P42.2: one normalizer (shared) — REGRET / TRAIN_CANCELLED keep their own state there and map to NOT_AVAILABLE here
+  const st = normalizeAvailabilityState(status);
+  return st === 'REGRET' || st === 'TRAIN_CANCELLED' ? 'NOT_AVAILABLE' : st;
 }
 
 /** category + first position number — two providers "agree" only when both match ("WL 12" ≠ "WL 15"). */
@@ -301,12 +300,21 @@ export function mergeCandidate(pair: CandidatePair, evidence: ProviderEvidence[]
     intendedBoardingStation: ctx.requestedOrigin, intendedAlightingStation: ctx.requestedDestination,
     boardingRuleStatus: rules.boarding, alightingRuleStatus: rules.alighting,
     availability, ...(statusText ? { availabilityStatusText: statusText } : {}),
+    // P42.2: party-bound seat facts (exact provider count only; CONFLICTING / no answer → UNKNOWN, never a shortage)
+    ...seatFactsOf(conflicting ? undefined : statusText, ctx.passengersCount),
     fare, verificationStatus, actionable: verificationStatus === 'VERIFIED',
     evidence, webEvidence: web, warnings,
     ...(conflicting ? { conflict: { providers: ok.map(e => e.provider), values: ok.map(e => ({ provider: e.provider, status: e.availability!.status })) } } : {}),
     extensionStations: 0,   // set by the runner (route index distance past the requested destination)
     fetchedAt
   };
+}
+
+/** P42.2: normalized state + exact seat count + sufficiency for the party (never inferred from AVAILABLE alone). */
+function seatFactsOf(statusText: string | undefined, pax: number): Pick<SameTrainAlternative, 'availabilityStatus' | 'availableSeatCount' | 'requestedPassengerCount' | 'seatSufficiency'> {
+  const a = evaluateSeatShortage({ status: statusText, requestedPassengerCount: pax });
+  return { availabilityStatus: a.availabilityStatus, ...(a.availableSeatCount !== undefined ? { availableSeatCount: a.availableSeatCount } : {}),
+    requestedPassengerCount: pax, seatSufficiency: a.sufficiency };
 }
 
 // ------------------------------------------------------------------ runner
@@ -318,11 +326,15 @@ export interface SameTrainSearchRequest {
   originSweep: boolean; destinationSweep: boolean; destinationExtensionStations?: number; combinedPairs?: 'AUTO' | 'ALWAYS' | 'NEVER';
   includeFare: boolean; webEvidence: boolean;
   providers: ProviderRef[]; routeProvider: ProviderRef; webProviders: ProviderRef[];
+  /** P42.2 (optional, recorded only): why this search ran, the tool execution id and the session selection at call time */
+  triggerReason?: ShortageTriggerReason | null; triggerSource?: 'SESSION_EVIDENCE' | 'MUSE' | 'NONE';
+  toolExecutionId?: string | null;
+  contextSnapshot?: { selectedTrain: string | null; selectedClass: string | null; journeyVersion: number | null };
 }
 
 export type SameTrainRunOutcome =
   | { ok: true; result: SameTrainAlternativesResult }
-  | { ok: false; code: SameTrainErrorCode; message: string; partial?: Partial<SameTrainAlternativesResult> };
+  | { ok: false; code: SameTrainErrorCode; message: string; partial?: Partial<SameTrainAlternativesResult>; errorClass?: SameTrainErrorClass };
 
 const shortId = () => randomUUID().replace(/-/g, '').slice(0, 12);
 
@@ -338,14 +350,15 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
 
   // 1) route — from the Muse-chosen route provider only (no hidden failover)
   const routeResp = await withTimeout(Promise.resolve().then(() => deps.getRoute(req.routeProvider, req.trainNumber)), L.perCallTimeoutMs);
-  if (routeResp.timedOut) return { ok: false, code: E.SEARCH_TIMEOUT, message: `${req.routeProvider.label || req.routeProvider.id} se route time par nahi aaya.` };
+  if (routeResp.timedOut) return { ok: false, code: E.SEARCH_TIMEOUT, errorClass: SameTrainErrorClass.TOOL_TIMEOUT, message: `${req.routeProvider.label || req.routeProvider.id} se route time par nahi aaya.` };
   const rv: any = routeResp.value;
   if (!rv || rv.ok !== true) {
     const code = String(rv?.error?.code || '');
-    return { ok: false, code: TIMEOUT_CODES.has(code) ? E.SEARCH_TIMEOUT : E.INVALID_TRAIN_ROUTE, message: `Train ${req.trainNumber} ka route ${req.routeProvider.label || req.routeProvider.id} se verify nahi ho paaya.` };
+    return { ok: false, code: TIMEOUT_CODES.has(code) ? E.SEARCH_TIMEOUT : E.INVALID_TRAIN_ROUTE,
+      errorClass: TIMEOUT_CODES.has(code) ? SameTrainErrorClass.TOOL_TIMEOUT : SameTrainErrorClass.INVALID_TRAIN_ROUTE, message: `Train ${req.trainNumber} ka route ${req.routeProvider.label || req.routeProvider.id} se verify nahi ho paaya.` };
   }
   const route = normalizeRoute(rv.data);
-  if (!route.ok) return { ok: false, code: route.code, message: route.message };
+  if (!route.ok) return { ok: false, code: route.code, message: route.message, errorClass: SameTrainErrorClass.INVALID_TRAIN_ROUTE };
   const planned = planCandidates(route.stations, route.duplicates, req, L);
   if (!planned.ok) return { ok: false, code: planned.code, message: planned.message };
   const plan = planned.plan;
@@ -383,7 +396,9 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   };
   await runPhase(plan.phase1);
   const policy = req.combinedPairs || 'AUTO';
-  const goodCategory = (pairs: CandidatePair[]) => pairs.some(p => (evidenceByPair.get(p.pairId) || []).some(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS' && (e.availability?.category === 'AVAILABLE' || e.availability?.category === 'RAC')));
+  // P42.2: an AVAILABLE pair with fewer seats than passengers is not "good" (combined pairs may still help the party)
+  const goodCategory = (pairs: CandidatePair[]) => pairs.some(p => (evidenceByPair.get(p.pairId) || []).some(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS'
+    && (e.availability?.category === 'RAC' || (e.availability?.category === 'AVAILABLE' && evaluateSeatShortage({ status: e.availability.status, requestedPassengerCount: req.passengersCount }).sufficiency !== 'INSUFFICIENT'))));
   const runCombined = plan.phase2.length > 0 && (policy === 'ALWAYS' || (policy === 'AUTO' && !goodCategory(plan.phase1)));
   if (runCombined) await runPhase(plan.phase2);
   const pairs = [...plan.phase1, ...(runCombined ? plan.phase2 : [])];
@@ -453,16 +468,23 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const latencyMs = now() - t0;
   deps.log?.('same_train_search', { alternativeSearchId, providers: req.providers.map(p => p.id).join(','), candidateCount: pairs.length,
     resultCount: alternatives.length, succeeded: apiEv.filter(e => e.outcome === 'SUCCESS').length, timeouts: apiEv.filter(e => e.outcome === 'TIMEOUT').length, latencyMs });
-  if (skippedStale || !current()) return { ok: false, code: E.STALE_RESULT, message: 'Journey badal gayi — yeh alternative result ab purana hai.' };
+  if (skippedStale || !current()) return { ok: false, code: E.STALE_RESULT, errorClass: SameTrainErrorClass.STALE, message: 'Journey badal gayi — yeh alternative result ab purana hai.' };
   if (!anySuccess) {
     const allTimeout = apiEv.length > 0 && apiEv.every(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT));
-    return { ok: false, code: allTimeout ? E.SEARCH_TIMEOUT : E.SEARCH_FAILED, message: SAME_TRAIN_ALL_FAILED_MESSAGE };
+    // P42.2: typed error class — a timeout is TOOL_TIMEOUT (never NOT_AVAILABLE); only-malformed answers are INVALID_TOOL_RESULT
+    const allInvalid = apiEv.length > 0 && apiEv.every(e => e.outcome === 'REJECTED');
+    return { ok: false, code: allTimeout ? E.SEARCH_TIMEOUT : E.SEARCH_FAILED, message: SAME_TRAIN_ALL_FAILED_MESSAGE,
+      errorClass: allTimeout ? SameTrainErrorClass.TOOL_TIMEOUT : allInvalid ? SameTrainErrorClass.INVALID_TOOL_RESULT : SameTrainErrorClass.PROVIDER_UNAVAILABLE };
   }
   const anyFailure = apiEv.some(e => e.outcome !== 'SUCCESS');
   if (anyFailure && apiEv.some(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT))) errors.push(E.SEARCH_TIMEOUT);
   if (alternatives.some(a => a.verificationStatus === 'CONFLICTING')) errors.push(E.PROVIDER_DATA_CONFLICT);
-  const foundAlternative = alternatives.some(a => !a.isRequestedPair && (a.availability === 'AVAILABLE' || a.availability === 'RAC') && (a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED'));
+  // P42.2: a verified alternative needs seats for the WHOLE party (AVAILABLE count ≥ passengers) or RAC
+  const verifiedAlternativeCount = alternatives.filter(isVerifiedSameTrainAlternative).length;
+  const foundAlternative = verifiedAlternativeCount > 0;
   if (!foundAlternative) errors.push(E.NOT_FOUND);
+  const p0 = alternatives.find(a => a.isRequestedPair);
+  const requestedPairAssessment = p0 ? evaluateSeatShortage({ status: p0.availability === 'CONFLICTING' ? undefined : p0.availabilityStatusText, requestedPassengerCount: req.passengersCount }) : null;
   const journeyKey = sameTrainJourneyKeyString({ trainNumber: req.trainNumber, date: req.date, travelClass: req.travelClass, origin: ctx.requestedOrigin, destination: ctx.requestedDestination, passengersCount: req.passengersCount });
   const result: SameTrainAlternativesResult = {
     kind: 'SAME_TRAIN_ALTERNATIVES', alternativeSearchId, resultSetId: `sts_${shortId()}`,
@@ -479,7 +501,15 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     status: anyFailure ? 'PARTIAL' : foundAlternative ? 'OK' : 'NOT_FOUND',
     errors: [...new Set(errors)], webEvidence,
     presentation: { bestMatchId: null, order: alternatives.map(a => a.alternativeId), decidedBy: 'NONE' },
-    fresh: true, cached: false, startedAt, completedAt, latencyMs, isMock
+    fresh: true, cached: false, startedAt, completedAt, latencyMs, isMock,
+    requestedPassengerCount: req.passengersCount,
+    triggerReason: req.triggerReason ?? null, triggerSource: req.triggerSource ?? 'NONE',
+    requestedPairAssessment,
+    outcome: foundAlternative ? SameTrainOutcome.FOUND : SameTrainOutcome.NONE,
+    verifiedAlternativeCount,
+    searchComplete: !plan.truncated && !anyFailure,
+    toolExecutionId: req.toolExecutionId ?? null,
+    ...(req.contextSnapshot ? { contextSnapshot: req.contextSnapshot } : {})
   };
   return { ok: true, result };
 }

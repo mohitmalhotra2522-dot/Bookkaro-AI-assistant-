@@ -13,6 +13,7 @@ import { providerToolCatalog, inProviderScope } from '../../ai/tools/provider-to
 import { railwayRegistry } from '../registry/provider-registry';
 import { RailwayToolService } from '../tools/railway-tool-service';
 import { WEB_PROVIDER_IDS } from '../providers/web/web-providers';
+import { evaluateSeatShortage } from '@shared/same-train-shortage';
 import {
   type SameTrainAlternative, type SameTrainAlternativesResult, type SameTrainErrorCode, SameTrainErrorCode as E,
   sameTrainJourneyKeyString
@@ -112,7 +113,7 @@ export async function searchSameTrainAlternatives(req: SameTrainSearchRequest, d
 
 export interface RevalidationOutcome {
   ok: boolean;
-  code?: SameTrainErrorCode | 'ALTERNATIVE_NOT_ACTIONABLE' | 'ALTERNATIVE_NO_LONGER_AVAILABLE';
+  code?: SameTrainErrorCode | 'ALTERNATIVE_NOT_ACTIONABLE' | 'ALTERNATIVE_NO_LONGER_AVAILABLE' | 'ALTERNATIVE_INSUFFICIENT_SEATS';
   message: string;
   alternative?: Pick<SameTrainAlternative, 'alternativeId' | 'trainNumber' | 'travelClass' | 'date' | 'ticketOrigin' | 'ticketDestination' | 'boardingStation' | 'alightingStation' | 'boardingRuleStatus' | 'alightingRuleStatus' | 'verificationStatus'>;
   fresh?: { provider: string; status: string; category: string; fetchedAt: string }[];
@@ -155,6 +156,11 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
   if (new Set(ok.map(a => statusKey(a.ev.availability!.status))).size > 1) return { ok: false, code: E.PROVIDER_DATA_CONFLICT, message: 'Providers ka fresh data match nahi kar raha.', alternative: view, fresh };
   const cat = ok[0].ev.availability!.category;
   if (cat === 'NOT_AVAILABLE' || cat === 'UNKNOWN') return { ok: false, code: 'ALTERNATIVE_NO_LONGER_AVAILABLE', message: `Fresh check: ${ok[0].ev.availability!.status} — yeh option ab available nahi.`, alternative: view, fresh };
+  // P42.2: the fresh count must still cover the whole party ("AVAILABLE-0001" for 3 passengers is not selectable)
+  const seats = evaluateSeatShortage({ status: ok[0].ev.availability!.status, requestedPassengerCount: alt.passengersCount });
+  if (seats.sufficiency === 'INSUFFICIENT') {
+    return { ok: false, code: 'ALTERNATIVE_INSUFFICIENT_SEATS', message: `Fresh check: ${ok[0].ev.availability!.status} — ${alt.passengersCount} passengers ke liye seats kaafi nahi.`, alternative: view, fresh };
+  }
   const handoffText = `Same Train Alternative chuna (${alt.alternativeId}): train ${alt.trainNumber}, ${alt.travelClass}, ${alt.date}, ticket ${alt.ticketOrigin} se ${alt.ticketDestination}. Isi ticket journey ke saath booking aage badhao.`;
   return { ok: true, message: `Fresh check: ${ok[0].ev.availability!.status}.`, alternative: view, fresh, handoffText };
 }
@@ -173,7 +179,45 @@ export function currentSameTrainKey(s: any, r: Pick<SameTrainAlternativesResult,
   });
 }
 
-/** Stored result for this session, or null when it is stale against the current journey. */
+/**
+ * Stored result for this session is stale against the current journey.
+ * Date / route / passengers: any set session value that differs → stale (unchanged P42 rule).
+ * Train / class (P42.2): a result created by the runtime carries the session selection at creation (contextSnapshot) —
+ * it becomes stale only when the selected train / class CHANGED after it was produced and no longer matches the result.
+ * That keeps Muse's multi-class (2A while 1A is selected) and multi-train (another displayed train before selection)
+ * results current, while "Actually 2A" makes a 3A result stale and 12903 → 12014 makes every 12903 result stale.
+ * Results without a snapshot (older / engine-direct) keep the original P42 key comparison.
+ */
 export function isSameTrainResultStale(s: any, r: SameTrainAlternativesResult | undefined | null): boolean {
-  return !!r && currentSameTrainKey(s, r) !== r.journeyKey;
+  if (!r) return false;
+  const snap = r.contextSnapshot;
+  if (!snap) return currentSameTrainKey(s, r) !== r.journeyKey;
+  if (s?.date && String(s.date) !== r.date) return true;
+  if (s?.origin && String(s.origin) !== r.requestedOrigin) return true;
+  if (s?.destination && String(s.destination) !== r.requestedDestination) return true;
+  if (s?.passengersCount && Number(s.passengersCount) !== Number(r.passengersCount)) return true;
+  const selTrain = s?.selectedTrain ? String(s.selectedTrain.number ?? s.selectedTrain.trainNumber ?? '') || null : null;
+  if (selTrain && selTrain !== r.trainNumber && selTrain !== (snap.selectedTrain || null)) return true;
+  const selClass = s?.selectedClass ? String(s.selectedClass).toUpperCase() : null;
+  if (selClass && selClass !== r.travelClass && selClass !== (snap.selectedClass || null)) return true;
+  return false;
+}
+
+/** Key to hand to revalidateSameTrainAlternative: the result's own key while current, else the current journey key. */
+export function sameTrainSelectionKey(s: any, r: SameTrainAlternativesResult): string {
+  if (!r.contextSnapshot) return currentSameTrainKey(s, r);
+  return isSameTrainResultStale(s, r) ? `${currentSameTrainKey(s, r)}|STALE` : r.journeyKey;
+}
+
+/** P42.2: every same-train result kept for this session (latest first, bounded) — multi-class / multi-train searches. */
+export function sameTrainResultsOf(s: any): SameTrainAlternativesResult[] {
+  const out: SameTrainAlternativesResult[] = [];
+  const seen = new Set<string>();
+  for (const r of [s?.sameTrainAlternatives, ...((s?.sameTrainAlternativeSets || []) as any[])]) {
+    if (r && r.alternativeSearchId && !seen.has(r.alternativeSearchId)) { seen.add(r.alternativeSearchId); out.push(r); }
+  }
+  return out;
+}
+export function findSameTrainResult(s: any, alternativeSearchId: string): SameTrainAlternativesResult | undefined {
+  return sameTrainResultsOf(s).find(r => r.alternativeSearchId === alternativeSearchId);
 }

@@ -33,6 +33,9 @@ export interface AvailabilityEvidence {
   sourceResultId: string | null;
   /** 'TOOL_STEP' = this turn's validated result; 'SESSION' = committed by the runtime from CHECK_AVAILABILITY. */
   origin: 'TOOL_STEP' | 'SESSION';
+  /** P42.2: a Same Train Alternative pair OTHER than the requested one — it only verifies a sentence that names one of
+   *  its own ticket stations (code / name); otherwise it never stands in for the requested journey. */
+  alternativePair?: { ticketOrigin: string; ticketDestination: string; tokens: string[] };
 }
 
 export type AvailabilityClassification =
@@ -103,11 +106,14 @@ export function collectAvailabilityEvidence(session: BookingSession | any, steps
     // Prompt 42: a Same Train Alternative result is provider availability evidence too — per checked ticket pair, only
     // successful PROVIDER_API answers (never UNVERIFIED_WEB, never a failed / rejected / timed-out call)
     if (name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' && ok && d && Array.isArray(d.alternatives)) {
-      for (const alt of d.alternatives) for (const e of (alt?.evidence || [])) {
-        if (e?.level !== 'PROVIDER_API' || e?.outcome !== 'SUCCESS' || !str(e?.availability?.status)) continue;
-        out.push({ trainNumber: str(e.trainNumber), date: str(e.date), travelClass: String(e.travelClass || '').toUpperCase(),
-          status: String(e.availability.status), available: e.availability.category === 'AVAILABLE',
-          sourceTool: AVAILABILITY_TOOL, sourceResultId: str(e.toolExecutionId) ?? null, origin: 'TOOL_STEP' });
+      for (const alt of d.alternatives) {
+        const pair = alt && !alt.isRequestedPair ? alternativePairOf(alt) : undefined;
+        for (const e of (alt?.evidence || [])) {
+          if (e?.level !== 'PROVIDER_API' || e?.outcome !== 'SUCCESS' || !str(e?.availability?.status)) continue;
+          out.push({ trainNumber: str(e.trainNumber), date: str(e.date), travelClass: String(e.travelClass || '').toUpperCase(),
+            status: String(e.availability.status), available: e.availability.category === 'AVAILABLE',
+            sourceTool: AVAILABILITY_TOOL, sourceResultId: str(e.toolExecutionId) ?? null, origin: 'TOOL_STEP', ...(pair ? { alternativePair: pair } : {}) });
+        }
       }
       continue;
     }
@@ -122,6 +128,24 @@ export function collectAvailabilityEvidence(session: BookingSession | any, steps
   return out;
 }
 
+/** P42.2: the ticket stations of an alternative pair that differ from the requested journey (code + name tokens). */
+function alternativePairOf(alt: any): AvailabilityEvidence['alternativePair'] {
+  const tokens: string[] = [];
+  const add = (code: any, name: any) => {
+    if (str(code)) tokens.push(String(code).toUpperCase());
+    const n = String(name || '').toLowerCase().replace(/\b(jn|junction|cantt?|city|railway station)\b\.?/g, ' ').replace(/\s+/g, ' ').trim();
+    if (n.length >= 4) tokens.push(n);
+    const first = n.split(' ')[0];
+    if (first && first.length >= 5 && first !== n) tokens.push(first);
+  };
+  if (alt.ticketOrigin && alt.ticketOrigin !== alt.requestedOrigin) add(alt.ticketOrigin, alt.ticketOriginName);
+  if (alt.ticketDestination && alt.ticketDestination !== alt.requestedDestination) add(alt.ticketDestination, alt.ticketDestinationName);
+  return { ticketOrigin: String(alt.ticketOrigin || ''), ticketDestination: String(alt.ticketDestination || ''), tokens: [...new Set(tokens)] };
+}
+const escRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const mentionsPair = (t: string, pair: NonNullable<AvailabilityEvidence['alternativePair']>) => pair.tokens.some(k =>
+  /^[A-Z0-9]+$/.test(k) ? new RegExp(`\\b${k}\\b`).test(t) : new RegExp(`\\b${escRe(k)}`, 'i').test(t));
+
 // ------------------------------------------------------------------ classification (linguistic only)
 
 const CLASS_CODE_RE = /\b(1A|2A|3A|3E|CC|EC|SL|2S|FC|EA)\b/g;
@@ -132,6 +156,11 @@ const STATUS_NUM_SRC = String.raw`\b(RAC|WL|GNWL|RLWL|PQWL|TQWL|RSWL|waitlist(?:
 const STATUS_NUM_RE = new RegExp(STATUS_NUM_SRC, 'i');
 /** "5 seats available", "2 berths khaali hain" */
 const COUNT_SEAT_RE = /\b(\d{1,3}|ek|do|teen|char|chaar|paanch|das|one|two|three|four|five|ten)\s+(seats?|berths?)\b(?=[^.?!]*\b(available|khaali|khali|bachi|bache|baaki|left|remaining)\b)/i;
+/** P42.2: "3 seats hain", "sirf 1 seat hai", "3 seats mil rahi hain" — a count stated as the current state (the verb
+ *  follows the count directly, so "2 seats chahiye" / "2 seats book karni hain" are not seat claims) */
+const COUNT_SEAT_STATE_RE = /\b(\d{1,3}|ek|do|teen|char|chaar|paanch|das|one|two|three|four|five|ten)\s+(seats?|berths?)\s+(?:hi\s+|bhi\s+)?(hain|hai|h|he|mil\s+rahi|mil\s+rahe|mil\s+jayengi|mil\s+jayegi|milengi|milegi|milenge)\b/i;
+const COUNT_WORDS: Record<string, number> = { ek: 1, one: 1, do: 2, two: 2, teen: 3, three: 3, char: 4, chaar: 4, four: 4, paanch: 5, five: 5, das: 10, ten: 10 };
+const countOf = (w: string) => { const n = Number(w); return Number.isFinite(n) ? n : COUNT_WORDS[w.toLowerCase()]; };
 /** present / definite affirmation of seats ("available hai", "seats khaali", "seat mil jayegi", "confirmed seat milegi") */
 const PRESENT_AFFIRM_RE = /\b(available\s+(hai|hain|h|he|ho|tha|thi)\b|(is|are)\s+(currently\s+|still\s+|now\s+)?available|available\s+(now|abhi)\b|seats?\s+(available|khaali|khali|bachi|bache|baaki|left)|berths?\s+(available|khaali|khali|bachi|left)|availability\s+(hai|hain|achhi|good|open)\b|(seats?|tickets?|berths?)\s+(mil\s+(jaayegi|jayegi|jaegi|jayega|jaega|jaayega)|milegi|milega|mil\s+rahi|mil\s+rahe)|seats?\s+confirm(ed)?\s+(hai|milegi|milega|ho\s+(jayegi|jaayegi|jaegi))|confirmed\s+seats?\s+(hai|hain|milegi|milega|available)|cnf\s+(hai|milega|milegi)|seats?\s+pakki|pakki\s+seats?)/i;
 const TREND_RE = /\b(bhar\s+rahi|bhar\s+rahe|filling\s+(up|fast)|kam\s+(bachi|bache)|few\s+seats|limited\s+seats|last\s+few\s+seats)\b/i;
@@ -172,7 +201,7 @@ export function classifyAvailabilityClaim(t: string, origin: 'USER' | 'ASSISTANT
   const neg = NEG_STATE_RE.test(text);
   if (!AVAIL_WORD_RE.test(text) && !neg) return 'NONE';
   const code = STATUS_NUM_RE.test(text);
-  const count = COUNT_SEAT_RE.test(text);
+  const count = COUNT_SEAT_RE.test(text) || COUNT_SEAT_STATE_RE.test(text);
   const pos = PRESENT_AFFIRM_RE.test(text) || TREND_RE.test(text);
   const trainAnchor = trainNumsIn(text).length > 0 || THIS_TRAIN_RE.test(text);
   const anchored = trainAnchor || DAY_RE.test(text) || codesIn(text).length > 0;
@@ -209,8 +238,8 @@ function claimedStatuses(t: string): ClaimedStatus[] {
   if (NEG_STATE_RE.test(t)) return [{ kind: 'NOT_AVAILABLE' }];
   if (/\bRAC\b/i.test(t)) return [{ kind: 'RAC' }];
   if (/\b(WL|waitlist(ed)?|waiting)\b/i.test(t)) return [{ kind: 'WL' }];
-  const c = t.match(COUNT_SEAT_RE);
-  if (c) { const n = Number(c[1]); return [{ kind: 'AVAILABLE', ...(Number.isFinite(n) ? { n } : {}) }]; }
+  const c = t.match(COUNT_SEAT_RE) || t.match(COUNT_SEAT_STATE_RE);
+  if (c) { const n = countOf(c[1]); return [{ kind: 'AVAILABLE', ...(n !== undefined ? { n } : {}) }]; }
   if (PRESENT_AFFIRM_RE.test(t) || TREND_RE.test(t)) return [{ kind: 'AVAILABLE' }];
   return [{ kind: 'ANY' }];
 }
@@ -251,9 +280,13 @@ function scoped(t: string, ctx: AvailabilityContext) {
   const date = claimDate(t, s);
   const named = codesIn(t);
   const classes = named.length ? named : (s.selectedClass ? [String(s.selectedClass).toUpperCase()] : []);
-  const trainEvidence = ctx.evidence.filter(e =>
+  // P42.2: a sentence naming an alternative ticket station is judged ONLY against that pair's evidence; a sentence
+  // naming none is judged against the requested journey only (another pair's "AVAILABLE 3" never proves it)
+  const datedTrain = ctx.evidence.filter(e =>
     (!trainNumbers.length || (!!e.trainNumber && trainNumbers.includes(e.trainNumber)))
     && (!date || !e.date || e.date === date));
+  const pairNamed = datedTrain.filter(e => e.alternativePair && mentionsPair(t, e.alternativePair));
+  const trainEvidence = pairNamed.length ? pairNamed : datedTrain.filter(e => !e.alternativePair);
   const evidence = trainEvidence.filter(e => !classes.length || classes.includes(e.travelClass));
   // every named train and every named class needs its OWN matching result (CC checked ≠ 2S checked)
   const coversAll = evidence.length > 0
@@ -293,6 +326,13 @@ export function judgeAvailabilityClaim(t: string, ctx: AvailabilityContext): Ava
   }
   for (const c of statuses) if (!sc.evidence.some(e => statusMatches(c, e))) return { outcome: 'AVAILABILITY_MISMATCH', reason: mismatchReason(c), claim };
   const e = sc.evidence.find(x => statuses.every(c => statusMatches(c, x))) || sc.evidence[0];
+  // P42.2: "1A available hai" when the provider gave only 1 seat for a party of 3 hides the shortage — the exact count
+  // must be stated ("sirf 1 seat"); a bare AVAILABLE claim over an insufficient count is rejected
+  const pax = Number((ctx.session as any)?.passengersCount);
+  const seats = Number((normAvailabilityStatus(e.status).match(/^AVAILABLE (\d+)/) || [])[1]);
+  if (Number.isInteger(pax) && pax > 1 && Number.isFinite(seats) && seats < pax && statuses.some(c => c.kind === 'AVAILABLE' && c.n === undefined)) {
+    return { outcome: 'AVAILABILITY_MISMATCH', reason: 'AVAILABILITY_INSUFFICIENT_FOR_PARTY', claim, evidence: e };
+  }
   return {
     outcome: 'VERIFIED_AVAILABILITY', reason: null, claim, evidence: e,
     provenance: { claimType: 'RAILWAY_LIVE_FACT', factSubtype: 'SEAT_AVAILABILITY', verified: true, sourceTool: AVAILABILITY_TOOL, sourceResultId: e.sourceResultId,

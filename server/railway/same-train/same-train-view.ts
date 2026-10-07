@@ -9,6 +9,7 @@
  */
 import type { SameTrainAlternative, SameTrainAlternativesResult } from '@shared/same-train-alternatives';
 import { SAME_TRAIN_ALL_FAILED_MESSAGE } from '@shared/same-train-alternatives';
+import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 
 const evidenceLine = (a: SameTrainAlternative) => a.evidence
   .map(e => `${e.provider}:${e.outcome === 'SUCCESS' ? e.availability?.status : e.outcome === 'REJECTED' ? `REJECTED(${e.rejectedReason})` : e.outcome}`)
@@ -24,6 +25,11 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
     alternatives[a.alternativeId] = {
       kind: a.kind, ticket,
       availability: a.availability, ...(a.availabilityStatusText ? { status: a.availabilityStatusText } : {}),
+      // P42.2: REGRET / TRAIN_CANCELLED stay distinct; exact seat count + sufficiency for THIS party
+      ...(a.availabilityStatus && a.availabilityStatus !== a.availability && a.availabilityStatus !== 'UNKNOWN' ? { availabilityStatus: a.availabilityStatus } : {}),
+      // exceptions only (transcript budget): an AVAILABLE entry WITHOUT seatSufficiency covers the whole party
+      ...(a.seatSufficiency === 'INSUFFICIENT' ? { availableSeatCount: a.availableSeatCount, seatSufficiency: 'INSUFFICIENT' } : {}),
+      ...(a.seatSufficiency === 'COUNT_NOT_PROVIDED' ? { seatSufficiency: 'COUNT_NOT_PROVIDED' } : {}),
       verificationStatus: a.verificationStatus,
       ...(a.boardingRuleStatus !== 'NOT_REQUIRED' ? { boardingRuleStatus: a.boardingRuleStatus } : {}),
       ...(a.alightingRuleStatus !== 'NOT_REQUIRED' ? { alightingRuleStatus: a.alightingRuleStatus } : {}),
@@ -39,6 +45,12 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
   return {
     alternativeSearchId: r.alternativeSearchId, searchRef: r.alternativeSearchId,
     status: r.status, errors: r.errors, isMock: r.isMock,
+    // P42.2: outcome code (Muse phrases it), completeness, trigger (party size = passengersCount; requested pair = its
+    // own entry with availableSeatCount / seatSufficiency) — facts, no ranking
+    outcome: r.outcome ?? (r.errors.includes('ALTERNATIVE_NOT_FOUND') ? 'NO_VERIFIED_SAME_TRAIN_ALTERNATIVE' : 'VERIFIED_ALTERNATIVE_FOUND'),
+    verifiedAlternativeCount: r.verifiedAlternativeCount ?? r.alternatives.filter(isVerifiedSameTrainAlternative).length,
+    ...(r.triggerReason ? { triggerReason: r.triggerReason } : {}),
+    searchComplete: r.searchComplete ?? (!r.candidatesTruncated && r.status !== 'PARTIAL'),
     trainNumber: r.trainNumber, ...(r.trainName ? { trainName: r.trainName } : {}), date: r.date, travelClass: r.travelClass, passengersCount: r.passengersCount,
     requested: `${r.requestedOrigin}→${r.requestedDestination}`,
     route: { provider: r.route.provider, trainOrigin: r.route.trainOrigin, trainTerminal: r.route.trainTerminal,
@@ -47,7 +59,7 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
     candidateCount: r.candidateCount, shownCount: r.alternatives.length, invalidHidden: r.invalidCount, webEvidence: r.webEvidence,
     stationNames,
     alternatives,
-    rules: 'Ticket stations ≠ travel stations (travel = ticket unless travelOn is given). boardingRuleStatus/alightingRuleStatus UNVERIFIED → never say the user can board/deboard at the requested station; say it must be verified. UNKNOWN/TIMEOUT is not "no seats". CONFLICTING = providers disagree, state no value. You rank; PRESENT_SAME_TRAIN_ALTERNATIVES records your best match for the screen.'
+    rules: 'AVAILABLE without seatSufficiency = enough seats for passengersCount; INSUFFICIENT → say the exact count. searchComplete false → not all checked. Ticket stations ≠ travel stations (travel = ticket unless travelOn is given). boardingRuleStatus/alightingRuleStatus UNVERIFIED → never say the user can board/deboard at the requested station; say it must be verified. UNKNOWN/TIMEOUT is not "no seats". CONFLICTING = providers disagree, state no value. You rank; PRESENT_SAME_TRAIN_ALTERNATIVES records your best match for the screen.'
   };
 }
 
@@ -62,6 +74,7 @@ export function sameTrainCardData(r: SameTrainAlternativesResult, opts: { stale?
         ...(e.fare ? { fare: e.fare } : {}) }))
     })),
     route: { ...r.route },
+    verifiedAlternativeCount: r.verifiedAlternativeCount ?? r.alternatives.filter(isVerifiedSameTrainAlternative).length,
     stale: !!opts.stale
   };
 }
@@ -71,9 +84,10 @@ const label = (a: SameTrainAlternative) => `${a.ticketOriginName || a.ticketOrig
 /** Deterministic, fact-only one-liner (Hinglish) — used only when Muse's wording is missing / rejected. */
 export function sameTrainFallbackText(r: SameTrainAlternativesResult | null, errorCode?: string): string {
   if (!r) return errorCode === 'INVALID_TRAIN_ROUTE' ? 'Is train ka route verify nahi ho paaya, isliye same train alternative check nahi hua.' : SAME_TRAIN_ALL_FAILED_MESSAGE;
-  const good = r.alternatives.filter(a => !a.isRequestedPair && (a.availability === 'AVAILABLE' || a.availability === 'RAC') && (a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED'));
+  // P42.2: only options with seats for the whole party (or RAC); no card is shown when there is none
+  const good = r.alternatives.filter(isVerifiedSameTrainAlternative);
   const checked = `${r.trainNumber} ${r.travelClass} ke ${r.candidateCount} station pairs check kiye.`;
-  if (!good.length) return `${checked} Koi behtar same train option nahi mila — details screen par hain.`;
+  if (!good.length) return `${checked} ${r.passengersCount} passenger${r.passengersCount > 1 ? 's' : ''} ke liye koi verified same train alternative nahi mila.`;
   const first = good[0];
   const rule = first.boardingRuleStatus === 'UNVERIFIED' ? ` ${r.requestedOriginName || r.requestedOrigin} se boarding ka rule verify karna zaroori hai.`
     : first.alightingRuleStatus === 'UNVERIFIED' ? ` ${r.requestedDestinationName || r.requestedDestination} par utarne ka rule verify karna zaroori hai.` : '';

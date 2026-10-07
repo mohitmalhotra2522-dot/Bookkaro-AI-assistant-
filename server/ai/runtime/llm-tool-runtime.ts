@@ -22,14 +22,16 @@ import { getWebResearchService } from '../../research/web-research-service';
  * normalized tool results.
  */
 import { factOnly, missingInfoOf } from '../response/backend-question-policy';
-import { searchSameTrainAlternatives, liveSameTrainDeps, resolveSameTrainProviders } from '../../railway/same-train/same-train-service';
+import { searchSameTrainAlternatives, liveSameTrainDeps, resolveSameTrainProviders, findSameTrainResult } from '../../railway/same-train/same-train-service';
+import { seatCheckFromSearch, seatCheckFromAvailability, seatCheckView, SameTrainErrorClass, SAME_TRAIN_BUDGET_EXCEEDED } from '@shared/same-train-shortage';
+import { sameTrainSearchesPerTurn } from '@shared/same-train-alternatives';
 import { sameTrainLLMView } from '../../railway/same-train/same-train-view';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { LLMProvider } from '../providers/llm-provider';
 import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE, type AgentTranscriptStep, type SessionUpdateOutcomeView } from '../providers/llm-provider';
 import type { AgentDecision, OrchestratorError, TurnRecord } from '../decisions/agent-decision';
 import type { ToolCall, ToolDefinition } from '../tools/tool-registry';
-import { REGISTERED_TOOLS } from '../tools/tool-registry';
+import { REGISTERED_TOOLS, sameTrainAlternativesEnabledFromEnv } from '../tools/tool-registry';
 import { providerToolCatalog } from '../tools/provider-tools';
 
 /** P37: the tool list the LLM sees — provider-level tools when connectors are registered, else the canonical set. */
@@ -647,13 +649,18 @@ export class BoundToolRuntime {
       H.emit?.('STALE_RESULT_REJECTED', { toolName: vt.name, requestId: H.requestId, toolExecutionId: x.record.toolExecutionId, journeyVersionAtCall: x.prepared.journeyVersion, journeyVersionNow: s.journeyVersion });
       return { stale: true };
     }
+    // P42.2: the result carries its tool execution id; one metadata-only observability record per same-train search
+    if (vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES') {
+      if (norm.success && norm.data) norm.data = { ...norm.data, toolExecutionId: x.record.toolExecutionId };
+      this.observeSameTrain(vt, norm, x.record.toolExecutionId, x.prepared.journeyVersion, x.latencyMs);
+    }
     const sourceConflict = norm.success ? this.detectSourceConflict(vt, norm, x) : undefined;
     steps.push({ toolCall: tc, result: norm, iteration: iter, status: norm.success ? 'ok' : 'error', dataSource: x.dataSource ?? null, validatedArguments: vt.arguments, requestId: H.requestId, execution: x.record, llmResult: x.result });
     turnResults.push({ toolName: vt.name, callId: tc.callId, ok: norm.success, data: norm.success ? (vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES' ? sameTrainLLMView(norm.data) : norm.data) : undefined, error: norm.error, empty: x.empty || undefined, status: x.record.status,
       outcome: toolOutcomeOf({ ok: norm.success, empty: x.empty, status: x.record.status, code: norm.error?.code, normalizedCode: x.error?.normalized }), dataSource: x.dataSource ?? null, attempts: x.record.attempt || 1,
       ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}),
-      identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}) });
-    localHistory.push({ role: 'tool', content: JSON.stringify({ ...this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null), ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}) }), toolCallId: tc.callId, toolName: tc.name });
+      identity: norm.identity, resultRef: norm.resultRef, ...(norm.success ? this.followUpOf(vt, norm) : {}), ...(norm.success ? this.seatCheckOf(vt, norm) : {}) });
+    localHistory.push({ role: 'tool', content: JSON.stringify({ ...(norm.success ? this.seatCheckOf(vt, norm) : {}), ...this.serializeForLLM(norm, x.result, x.record.attempt || 1, x.dataSource ?? null), ...providerViewOf(x), ...(sourceConflict ? { sourceConflict } : {}) }), toolCallId: tc.callId, toolName: tc.name });
     this.syncToSession(vt, norm);
     if (sourceConflict) this.dropConflictingValue(vt, sourceConflict);
     if (!norm.success) {
@@ -712,6 +719,13 @@ export class BoundToolRuntime {
     const s: any = this.getSession();
     const pr = resolveSameTrainProviders(a.providers, a.routeProvider);
     if (!pr.ok) return { ok: false, error: { code: pr.code, message: pr.message } };
+    // P42.2 — tool budget: at most N same-train searches per turn (each is a bounded fan-out). Over budget → stop safely
+    // before any provider call; results already returned this turn are kept; nothing claims the search was exhaustive.
+    const turnKey = String(this.hooks.turnId ?? this.hooks.requestId ?? '');
+    const used = this.sameTrainBudget.turn === turnKey ? this.sameTrainBudget.used : 0;
+    const max = sameTrainSearchesPerTurn();
+    if (used >= max) return { ok: false, error: { code: SAME_TRAIN_BUDGET_EXCEEDED, message: `Is turn mein ${max} same train searches ho chuki hain — baaki options abhi check nahi kiye.`, details: { errorClass: SameTrainErrorClass.BUDGET, partial: true, maxSearchesPerTurn: max } } };
+    this.sameTrainBudget = { turn: turnKey, used: used + 1 };
     const row = ((s.searchResults?.trains || []) as any[]).find(t => String(t.trainNumber || t.number) === a.trainNumber);
     const sel: any = s.selectedTrain;
     const trainName = row?.trainName || row?.name || (sel && String(sel.number || sel.trainNumber) === a.trainNumber ? (sel.name || sel.trainName) : undefined);
@@ -723,21 +737,55 @@ export class BoundToolRuntime {
       origin: a.origin, destination: a.destination, originName: s.origin === a.origin ? s.originName : undefined, destinationName: s.destination === a.destination ? s.destinationName : undefined,
       originSweep: a.originSweep !== false, destinationSweep: a.destinationSweep !== false, destinationExtensionStations: a.destinationExtensionStations,
       combinedPairs: a.combinedPairs, includeFare: !!a.includeFare, webEvidence: !!a.webEvidence,
-      providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders
+      providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders,
+      triggerReason: a.triggerReason ?? null, triggerSource: a.triggerSource || 'NONE',
+      contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion: s.journeyVersion ?? null }
     }, liveSameTrainDeps(this.tools as any, {
       isCurrent: () => (guard?.canApply ? guard.canApply() : true) && !H.isStale?.(),
       log: (event, fields) => H.emit?.('SAME_TRAIN_SEARCH' as any, { event, ...fields })
     }));
     const t1 = new Date().toISOString();
     const meta = { source: out.ok && out.result.isMock ? 'mock' : 'live', providerId: pr.providers.map(p => p.id).join('+'), requestTimestamp: new Date(t0).toISOString(), responseTimestamp: t1, latencyMs: Date.now() - t0, cache: 'disabled' };
-    if (!out.ok) return { ok: false, error: { code: out.code, message: out.message }, meta };
+    if (!out.ok) return { ok: false, error: { code: out.code, message: out.message, ...(out.errorClass ? { details: { errorClass: out.errorClass } } : {}) }, meta };
     return { ok: true, data: out.result, meta };
+  }
+
+  private sameTrainBudget: { turn: string; used: number } = { turn: '', used: 0 };
+
+  /**
+   * P42.2 — structured seat facts for Muse on SEARCH_TRAINS / CHECK_AVAILABILITY results (only when the same-train tool
+   * is exposed): which train/class shows a shortage for THIS party. Facts only — Muse decides whether to search.
+   */
+  private seatCheckOf(vt: ValidatedToolCall, r: NormalizedToolResult): { seatCheck?: Record<string, unknown> } {
+    if (vt.name !== 'SEARCH_TRAINS' && vt.name !== 'CHECK_AVAILABILITY') return {};
+    if (!sameTrainAlternativesEnabledFromEnv()) return {};
+    const s: any = this.getSession();
+    const pax = Number.isInteger(Number(s.passengersCount)) && Number(s.passengersCount) >= 1 ? Number(s.passengersCount) : null;
+    const entries = vt.name === 'SEARCH_TRAINS' ? seatCheckFromSearch(r.data, pax) : seatCheckFromAvailability(r.data, vt.arguments, pax);
+    const view = seatCheckView(entries, pax, { sameTrainToolAvailable: true });
+    return view ? { seatCheck: view } : {};
+  }
+
+  /** P42.2 — metadata-only observability record (no PII, no keys, no raw provider body). */
+  private observeSameTrain(vt: ValidatedToolCall, r: NormalizedToolResult, toolExecutionId: string, journeyVersion: any, latencyMs: number): void {
+    const s: any = this.getSession();
+    const d: any = r.success ? r.data : null;
+    const p0 = d?.requestedPairAssessment || null;
+    this.hooks.emit?.('SAME_TRAIN_SEARCH' as any, {
+      event: 'same_train_alternative', sessionId: s.sessionId, turnId: this.hooks.turnId ?? null, toolExecutionId, journeyVersion: journeyVersion ?? null,
+      trainNumber: vt.arguments.trainNumber, travelClass: vt.arguments.travelClass, requestedPassengerCount: vt.arguments.passengersCount,
+      availabilityStatus: p0?.availabilityStatus ?? null, availableSeatCount: p0?.availableSeatCount ?? null,
+      alternativeTriggered: true, triggerReason: vt.arguments.triggerReason ?? null, triggerSource: vt.arguments.triggerSource ?? 'NONE',
+      provider: String(vt.arguments.providers || ''), fresh: !!d?.fresh, latencyMs,
+      resultCount: d ? (d.alternatives || []).length : 0, verifiedAlternativeCount: d?.verifiedAlternativeCount ?? 0,
+      outcome: d?.outcome ?? null, errorCode: r.success ? null : (r.error?.code ?? null)
+    });
   }
 
   /** Prompt 42 — Muse's ranking for the screen (validated ids only); no provider call, nothing booked. */
   private async presentSameTrain(vt: ValidatedToolCall): Promise<any> {
     const s: any = this.getSession();
-    const r = s.sameTrainAlternatives;
+    const r: any = findSameTrainResult(s, String(vt.arguments.alternativeSearchId || ''));
     if (!r || r.alternativeSearchId !== vt.arguments.alternativeSearchId) return { ok: false, error: { code: 'ALTERNATIVE_NOT_FOUND', message: 'Current Same Train Alternative result nahi mila.' } };
     const order = String(vt.arguments.order || '').split(',').filter(Boolean);
     const rest = (r.alternatives || []).map((x: any) => x.alternativeId).filter((id: string) => !order.includes(id));
@@ -874,11 +922,22 @@ export class BoundToolRuntime {
     if (vt.name === 'CHECK_PNR' || vt.name === 'TRACK_TRAIN') { H.onLiveTool?.('RESULT', vt.name, vt.arguments, { success: r.success, error: r.error }); return; }
     // Prompt 42: the latest Same Train Alternative result (with its journey key) is kept for stale checks, Muse's
     // presentation and an explicit "Use this option" revalidation. Booking fields are NEVER touched here.
-    if (vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES') { if (r.success) this.commitSession({ sameTrainAlternatives: r.data } as any); return; }
+    // P42.2: Muse may search several classes / displayed trains — every result is kept (bounded, latest first) so each
+    // card, PRESENT call and "Use this option" resolves against ITS OWN result set; `sameTrainAlternatives` = latest.
+    if (vt.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES') {
+      if (r.success) {
+        const prev = ((this.getSession() as any).sameTrainAlternativeSets || []) as any[];
+        this.commitSession({ sameTrainAlternatives: r.data, sameTrainAlternativeSets: [r.data, ...prev.filter(x => x?.alternativeSearchId !== r.data?.alternativeSearchId)].slice(0, 6) } as any);
+      }
+      return;
+    }
     if (vt.name === 'PRESENT_SAME_TRAIN_ALTERNATIVES') {
-      const cur: any = (this.getSession() as any).sameTrainAlternatives;
-      if (r.success && cur && cur.alternativeSearchId === r.data?.alternativeSearchId) {
-        this.commitSession({ sameTrainAlternatives: { ...cur, presentation: { bestMatchId: r.data.bestMatchId, order: r.data.order, decidedBy: 'MUSE', at: r.data.at } } } as any);
+      const sx: any = this.getSession();
+      const target: any = r.success ? findSameTrainResult(sx, String(r.data?.alternativeSearchId || '')) : undefined;
+      if (target) {
+        const updated = { ...target, presentation: { bestMatchId: r.data.bestMatchId, order: r.data.order, decidedBy: 'MUSE', at: r.data.at } };
+        const sets = ((sx.sameTrainAlternativeSets || []) as any[]).map(x => (x?.alternativeSearchId === updated.alternativeSearchId ? updated : x));
+        this.commitSession({ sameTrainAlternativeSets: sets, ...(sx.sameTrainAlternatives?.alternativeSearchId === updated.alternativeSearchId ? { sameTrainAlternatives: updated } : {}) } as any);
       }
       return;
     }

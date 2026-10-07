@@ -19,7 +19,9 @@ import { validateWebQuery } from '../../research/web-research-service';
 import type { BookingSession } from '@shared/entities';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import { SameTrainErrorCode } from '@shared/same-train-alternatives';
-import { resolveSameTrainProviders, isSameTrainResultStale } from '../../railway/same-train/same-train-service';
+import { resolveSameTrainProviders, isSameTrainResultStale, findSameTrainResult } from '../../railway/same-train/same-train-service';
+import { sessionShortageEvidence, museTriggerReason } from '../../railway/same-train/shortage-trigger';
+import { SAME_TRAIN_NOT_NEEDED } from '@shared/same-train-shortage';
 import { REGISTERED_TOOLS, getToolDefinition, type ToolCall, type ToolDefinition, type RegisteredToolName, type ToolParam } from './tool-registry';
 import type { OrchestratorError } from '../decisions/agent-decision';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
@@ -139,7 +141,10 @@ export class ToolCallValidator {
     const travelClass = String(args.travelClass || s.selectedClass || '').toUpperCase();
     if (!travelClass) return E(SameTrainErrorCode.NOT_READY, 'Kaunsi class ke liye check karna hai? (jaise CC, 3A, SL)', { missing: 'travelClass' });
     const row = ((s.searchResults?.trains || []) as any[]).find(t => String(t.trainNumber || t.number) === train);
-    const rowClasses: string[] = row ? [...(row.classes || []).map((c: any) => String(c.code || c).toUpperCase()), ...(row.availableClasses || []).map((c: any) => String(c).toUpperCase())] : [];
+    // P42.2: classes come from the authoritative train data (result row, else the selected train) — never invented
+    const selRow = !row && sel && String(sel.number || sel.trainNumber) === train ? sel : null;
+    const src = row || selRow;
+    const rowClasses: string[] = src ? [...(src.classes || []).map((c: any) => String(c.code || c).toUpperCase()), ...(src.availableClasses || []).map((c: any) => String(c).toUpperCase())] : [];
     if (rowClasses.length && !rowClasses.includes(travelClass)) return E('INVALID_TOOL_CALL', `${train} mein ${travelClass} class nahi hai (${rowClasses.join(', ')}).`);
     const date = this.resolveDateStr(args.date || s.date);
     if (!date) return E(SameTrainErrorCode.NOT_READY, 'Journey date abhi set nahi hai.', { missing: 'date', missingField: 'DATE' });
@@ -155,13 +160,26 @@ export class ToolCallValidator {
     }
     const pr = resolveSameTrainProviders(args.providers, args.routeProvider);
     if (!pr.ok) return E(pr.code, pr.message);
+    // P42.2 — passenger-count safety: current authoritative data for exactly this train / class / date / pair already
+    // covers the whole party → no same-train search (no provider traffic). Missing / UNKNOWN data never blocks.
+    const ev = sessionShortageEvidence(s, { trainNumber: train, travelClass, date, origin: o.code, destination: d.code, passengersCount: pax });
+    if (ev && ev.assessment.sufficiency === 'SUFFICIENT') {
+      return E(SAME_TRAIN_NOT_NEEDED, `${train} ${travelClass}: ${ev.status} — ${pax} passenger(s) ke liye seats kaafi hain.`,
+        { argument: 'trainNumber', expected: 'a shortage (WAITLIST / NOT_AVAILABLE / REGRET / TRAIN_CANCELLED / fewer seats than passengers)',
+          received: `${ev.status} for ${pax} passenger(s) (${ev.source})`, availabilityStatus: ev.assessment.availabilityStatus,
+          ...(ev.assessment.availableSeatCount !== undefined ? { availableSeatCount: ev.assessment.availableSeatCount } : {}), requestedPassengerCount: pax });
+    }
+    const museReason = museTriggerReason(args.triggerReason);
+    const triggerReason = ev?.assessment.shortage ? ev.assessment.triggerReason : museReason;
+    const triggerSource = ev?.assessment.shortage ? 'SESSION_EVIDENCE' : museReason ? 'MUSE' : 'NONE';
     const canonical: Record<string, any> = {
       trainNumber: train, travelClass, date, origin: o.code, destination: d.code, passengersCount: pax,
       originSweep: args.originSweep !== false, destinationSweep: args.destinationSweep !== false,
       ...(args.destinationExtensionStations !== undefined ? { destinationExtensionStations: Number(args.destinationExtensionStations) } : {}),
       combinedPairs: args.combinedPairs || 'AUTO',
       providers: pr.providers.map(p => p.id).join(','), routeProvider: pr.routeProvider.id, providerSelection: pr.selection,
-      includeFare: args.includeFare === true, webEvidence: args.webEvidence === true
+      includeFare: args.includeFare === true, webEvidence: args.webEvidence === true,
+      triggerReason, triggerSource
     };
     return { ok: true as const, v: { name: def.name, callId, arguments: canonical, tool: def } };
   }
@@ -169,8 +187,8 @@ export class ToolCallValidator {
   /** Prompt 42 — PRESENT_SAME_TRAIN_ALTERNATIVES: Muse's ranking must reference the CURRENT result's shown ids only. */
   private validateSameTrainPresent(callId: string, def: ToolDefinition, args: Record<string, any>, session: BookingSession) {
     const E = (code: any, message: string, details?: any) => ({ ok: false as const, error: { code, message, ...(details ? { details } : {}) } as OrchestratorError });
-    const r: any = (session as any).sameTrainAlternatives;
     const id = String(args.alternativeSearchId || '').trim();
+    const r: any = findSameTrainResult(session, id);   // P42.2: any kept result (multi-class / multi-train), latest first
     if (!r || r.alternativeSearchId !== id) return E(SameTrainErrorCode.NOT_FOUND, 'Yeh alternativeSearchId current Same Train Alternative result nahi hai.');
     if (isSameTrainResultStale(session, r)) return E(SameTrainErrorCode.STALE_RESULT, 'Journey badal gayi — yeh alternative result stale hai.');
     const shown = new Map<string, any>((r.alternatives || []).map((a: any) => [a.alternativeId, a]));

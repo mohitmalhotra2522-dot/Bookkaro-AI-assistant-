@@ -3,6 +3,7 @@ import { Sheet } from '../shell/Shell';
 import { IconAlert, IconArrowRight, IconCheck, IconInfo, IconRefresh, IconRoute, IconShield, IconSparkle } from '../icons/Icons';
 import { formatClock, formatDate, inr } from '../../lib/format';
 import { selectSameTrainAlternative } from '../../lib/api';
+import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 
 /**
  * P42 — Same Train Alternative card + panel. Renders ONLY the backend's validated result:
@@ -40,7 +41,9 @@ function orderedAlternatives(d: any): { best: Alt | null; original: Alt | null; 
 export const SameTrainCard: React.FC<{ d: any; sessionId: string | null; disabled?: boolean; onHandoff: (text: string) => void; onCheckAgain?: () => void }> = ({ d, sessionId, disabled, onHandoff, onCheckAgain }) => {
   const [open, setOpen] = useState(false);
   const { best } = useMemo(() => orderedAlternatives(d), [d]);
-  const found = (d.alternatives || []).filter((a: Alt) => !a.isRequestedPair && (a.availability === 'AVAILABLE' || a.availability === 'RAC') && (a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED')).length;
+  // P42.2: verified = another pair with seats for the WHOLE party (count ≥ passengers) or RAC — no verified option, no card
+  const found = (d.alternatives || []).filter((a: Alt) => isVerifiedSameTrainAlternative(a)).length;
+  if (!found) return null;
   return (
     <article className="bk-card bk-sta" aria-label="Same train alternatives">
       <div className="bk-sta__eyebrow"><IconRoute size={14} /> Same Train Alternative</div>
@@ -56,7 +59,7 @@ export const SameTrainCard: React.FC<{ d: any; sessionId: string | null; disable
         {d.stale && <span className="bk-tag bk-tag--bad">Outdated — journey changed</span>}
         {d.status === 'PARTIAL' && <span className="bk-tag bk-tag--warn">Some checks failed</span>}
         <span className="bk-tag bk-tag--navy">{d.candidateCount} pairs checked</span>
-        <span className={`bk-tag bk-tag--${found ? 'good' : 'navy'}`}>{found ? `${found} with seats / RAC` : 'No better option found'}</span>
+        <span className="bk-tag bk-tag--good">{`${found} verified for ${d.passengersCount} pax`}</span>
       </div>
       {best && (
         <div className="bk-sta__preview">
@@ -134,7 +137,9 @@ const OptionCard: React.FC<{ d: any; a: Alt; highlight?: boolean; hideUse?: bool
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  const actionable = a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED';
+  // P42.2: fewer seats than passengers is never selectable (the fresh server recheck enforces it too)
+  const actionable = (a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED') && a.seatSufficiency !== 'INSUFFICIENT';
+  const pax = Number(a.requestedPassengerCount ?? d.passengersCount);
   const ruleOk = (r: string) => r === 'NOT_REQUIRED' || r === 'VERIFIED';
   const reqO = stn(d.requestedOrigin, d.requestedOriginName || nameOf(d, d.requestedOrigin));
   const reqD = stn(d.requestedDestination, d.requestedDestinationName || nameOf(d, d.requestedDestination));
@@ -165,6 +170,8 @@ const OptionCard: React.FC<{ d: any; a: Alt; highlight?: boolean; hideUse?: bool
           : <div className="bk-sta-row bk-sta-row--warn"><span className="bk-sta-k">VERIFY</span><span className="bk-sta-v">{reqD} par utarne ka rule verify nahi hua</span></div>}
         {a.extensionStations > 0 && <div className="bk-sta-note">Ticket {reqD} se {a.extensionStations} station{a.extensionStations > 1 ? 's' : ''} aage tak</div>}
       </div>
+      {a.seatSufficiency === 'INSUFFICIENT' && <div className="bk-sta-note bk-sta-note--bad">Sirf {a.availableSeatCount} seat{a.availableSeatCount === 1 ? '' : 's'} — {pax} passengers ke liye kaafi nahi</div>}
+      {a.seatSufficiency === 'COUNT_NOT_PROVIDED' && <div className="bk-sta-note">Provider ne seat count nahi diya — {pax} passengers ke liye pakka nahi</div>}
       {a.conflict && <div className="bk-sta-note bk-sta-note--bad">{a.conflict.values.map((v: any) => `${v.provider}: ${v.status}`).join(' · ')} — koi value pakki nahi maani gayi</div>}
       {a.fare?.status === 'CONFLICTING' && <div className="bk-sta-note">Fare providers mein alag hai — fare nahi dikhaya</div>}
       <div className="bk-sta-evidence">

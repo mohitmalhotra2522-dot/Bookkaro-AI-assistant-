@@ -15,6 +15,8 @@ export interface TurnToolResultView {
   ok: boolean;
   /** P39: two providers disagreed for the same train / class / date in this turn (both values, never resolved). */
   sourceConflict?: SourceConflict;
+  /** P42.2: structured seat facts for the party (shortages / availableSeatCount / triggerReason) — facts only. */
+  seatCheck?: Record<string, unknown>;
   data?: any;
   error?: { code: string; message: string; details?: any };
   /** Prompt 17: SUCCEEDED with zero items (e.g. no trains on the route) — NOT a failure. */

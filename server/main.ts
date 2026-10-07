@@ -35,7 +35,7 @@ import { mockIrctcEnabled, renderMockIrctc, MOCK_IRCTC_SCENARIOS } from './irctc
 import { MOCK_IRCTC_REAL_SCENARIOS } from './irctc/mock/mock-irctc-real';
 import { EXECUTION_LOCKED_STATES } from '@shared/states';
 import { sameTrainAlternativesEnabledFromEnv } from './ai/tools/tool-registry';
-import { currentSameTrainKey, revalidateSameTrainAlternative } from './railway/same-train/same-train-service';
+import { revalidateSameTrainAlternative, findSameTrainResult, sameTrainSelectionKey } from './railway/same-train/same-train-service';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -230,8 +230,9 @@ server.post('/api/session/:id/same-train-alternative/select', async (request, re
   const body = (request.body || {}) as any;
   const s: any = stateManager.getSession(id);
   if (EXECUTION_LOCKED_STATES.has(s.bookingState)) return reply.status(409).send({ ok: false, code: 'INVALID_ACTION_FOR_STATE', message: 'Booking process chal raha hai — abhi option change nahi ho sakta.' });
-  const stored = s.sameTrainAlternatives;
-  const key = stored ? currentSameTrainKey(s, stored) : '';
+  // P42.2: the selection resolves against ITS OWN result set (multi-class / multi-train), never free-form text
+  const stored = findSameTrainResult(s, String(body.alternativeSearchId || '')) || s.sameTrainAlternatives;
+  const key = stored ? sameTrainSelectionKey(s, stored) : '';
   const t0 = Date.now();
   const out = await revalidateSameTrainAlternative(stored, String(body.alternativeSearchId || ''), String(body.alternativeId || ''), key,
     { acknowledgeUnverifiedRules: body.acknowledgeUnverifiedRules === true });
