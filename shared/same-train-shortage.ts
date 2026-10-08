@@ -41,6 +41,9 @@ export const SameTrainErrorClass = Object.freeze({
   INVALID_TRAIN_ROUTE: 'INVALID_TRAIN_ROUTE',
   /** P42-13: the provider's route data does not contain / order the requested pair — a data limitation, not a railway fact */
   ROUTE_DATA_UNVERIFIED: 'ROUTE_DATA_UNVERIFIED',
+  /** RailRadar Phase 1: primary and secondary route data make INCOMPATIBLE claims about the pair (e.g. opposite order) —
+   *  never resolved by picking a provider; treated as unverified (same truthful limitation to the user) */
+  ROUTE_DATA_CONFLICT: 'ROUTE_DATA_CONFLICT',
   STALE: 'STALE_SAME_TRAIN_ALTERNATIVE',
   BUDGET: 'TOOL_BUDGET_EXCEEDED'
 } as const);

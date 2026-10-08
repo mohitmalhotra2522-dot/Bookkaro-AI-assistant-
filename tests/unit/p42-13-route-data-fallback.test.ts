@@ -100,10 +100,18 @@ describe('P42-13 — route-data limitation is truthful', () => {
     expect(JSON.stringify(r)).not.toMatch(/alternatives|AVAILABLE/);
     expect(m.calls).toEqual([]); expect(m.fareCalls).toEqual([]);
   });
-  it('[E] no new provider call: the route comes from RailCore once; RailRadar (configured as fallback) is never called for a route-data limitation', async () => {
+  it('[E] no new provider call: the route comes from RailCore once; RailRadar (configured as fallback) is never called for a route-data limitation (RailRadar Phase 1 cross-check switched off)', async () => {
     const m = deps({ ok: true, data: ROUTE_12498 });
+    m.d.limits = { ...LIMITS, routeCrossCheck: false };
     await runSameTrainSearch(REQ(), m.d);
     expect(m.routeCalls).toEqual(['railcore']);
     expect(m.calls.filter(c => c.startsWith('railradar'))).toEqual([]);
+  });
+  it('[E2] RailRadar Phase 1 (cross-check on, default): exactly ONE extra RailRadar ROUTE call — never an availability / fare call', async () => {
+    const m = deps({ ok: true, data: ROUTE_12498 });
+    await runSameTrainSearch(REQ(), m.d);
+    expect(m.routeCalls).toEqual(['railcore', 'railradar']);
+    expect(m.calls).toEqual([]);
+    expect(m.fareCalls).toEqual([]);
   });
 });

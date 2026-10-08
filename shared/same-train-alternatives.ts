@@ -226,6 +226,13 @@ export interface SameTrainAlternativesResult {
     destinationExtension: string[];
     destinationSweep: 'NONE_TERMINAL' | 'EXTENSION' | 'DISABLED';
     stations: RouteStation[];
+    /** RailRadar Phase 1: which route data verified the requested pair in order (a statement about provider DATA only) */
+    verification?: SameTrainRouteVerification;
+    /** provider whose route data verified the pair */
+    verifiedBy?: string;
+    /** cross-check only: the primary route provider whose data could not verify the pair, and why */
+    primaryRouteProvider?: string;
+    primaryRouteResult?: 'STATION_MISSING' | 'ORDER_NOT_VERIFIED';
   };
   providers: Array<{ provider: string; label?: string; level: EvidenceLevel; requested: number; succeeded: number; failed: number; timeouts: number }>;
   candidateCount: number;
@@ -323,6 +330,28 @@ export interface SameTrainLimits {
   maxWebChecks: number;
   /** P42.7: total availability calls per provider across the (pair × class) matrix — bounded, never an unbounded crawl */
   maxAvailabilityChecks?: number;
+  /** RailRadar Phase 1: cross-check the route on the secondary route provider when the primary route data cannot verify
+   *  the requested pair (default on; SAME_TRAIN_ROUTE_CROSS_CHECK=off disables) */
+  routeCrossCheck?: boolean;
+}
+
+/**
+ * RailRadar Phase 1 — route verification outcome for the requested station pair (deterministic, provider-data relative):
+ *   VERIFIED_BY_RAILCORE        primary route data contains origin before destination (no secondary call)
+ *   ROUTE_VERIFIED_BY_RAILRADAR primary data could not verify; the secondary route data contains the pair in order AND
+ *                               agrees with the primary on the order of every station both routes share
+ *   ROUTE_UNVERIFIED            neither route data verifies the pair (or the secondary was unavailable)
+ *   ROUTE_DATA_CONFLICT         the two route data make incompatible claims (order disagreement) — never resolved by choice
+ */
+export type SameTrainRouteVerification = 'VERIFIED_BY_RAILCORE' | 'ROUTE_VERIFIED_BY_RAILRADAR';
+export type SameTrainRouteCheckVerdict = SameTrainRouteVerification | 'ROUTE_UNVERIFIED' | 'ROUTE_DATA_CONFLICT';
+export interface SameTrainRouteCheck {
+  verdict: SameTrainRouteCheckVerdict;
+  primaryProvider: string;
+  primaryResult?: 'STATION_MISSING' | 'ORDER_NOT_VERIFIED';
+  crossCheckProvider?: string;
+  /** VERIFIED | NOT_IN_ROUTE | ORDER | NO_OVERLAP | ORDER_DISAGREEMENT | DUPLICATE | ROUTE_INVALID | <provider error code> | TIMEOUT | NOT_CONFIGURED | DISABLED */
+  crossCheckResult?: string;
 }
 
 /** P42.7 hard caps of the recovery route matrix (env may lower, never raise). */

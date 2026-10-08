@@ -4,14 +4,31 @@
  * Documented endpoints only — no scraping of railradar.in pages.
  */
 import type {
-  RailwayResponse, SearchTrainsRequest, TrainSearchResultData, NormalizedTrain, TrainInfoRequest, TrainDetails,
+  RailwayResponse, RailwayErrorCode, SearchTrainsRequest, TrainSearchResultData, NormalizedTrain, TrainInfoRequest, TrainDetails,
   TimetableRequest, AvailabilityRequest, AvailabilityData, FareRequest, FareData, TrackRequest, TrackData, PNRRequest, PNRData, PNRPassengerStatus
 } from '../../types/railway-types';
 import { LiveRailwayProvider, need, MalformedProviderData } from './live-provider-base';
-import { str, num, hhmm, durationText, todayIST, canonicalAvailability, VALID_CLASSES } from './live-http';
+import { str, num, hhmm, durationText, todayIST, canonicalAvailability, VALID_CLASSES, type LiveHttpResult } from './live-http';
 
 /** RailRadar 404 = "requested train, station, or PNR record was not found" — but NOT an unknown route ("Route not found"). */
 const notFound = (status: number, json: any) => status === 404 && String(json?.error?.code || '') === 'NOT_FOUND' && !/route not found/i.test(String(json?.error?.message || ''));
+/**
+ * RailRadar Phase 1 — domain meaning of a 4xx error BODY (RailRadar answers some validation problems with 404, e.g.
+ * `API:DATA_NOT_AVAILABLE` "Invalid Journey Class for this Route.", contrary to its docs' 400). Classified by the body's
+ * meaning onto the EXISTING taxonomy; null → the generic status-based classification applies (429 → RATE_LIMITED,
+ * 5xx / unknown → PROVIDER_UNAVAILABLE, network timeout → TIMEOUT stay untouched).
+ *   train not found          → NOT_FOUND           (never "provider unavailable")
+ *   invalid journey class    → CLASS_NOT_AVAILABLE (the class is not offered on this train/route — not a seat status)
+ */
+export function classifyRailRadarError(httpStatus: number | null | undefined, json: any): RailwayErrorCode | null {
+  if (httpStatus !== 400 && httpStatus !== 404 && httpStatus !== 422) return null;
+  const code = String(json?.error?.code || '').toUpperCase();
+  const message = String(json?.error?.message || '');
+  if (code === 'TRAIN_NOT_FOUND' || (/^(NOT_FOUND|API:DATA_NOT_AVAILABLE)$/.test(code) && /\btrain\b[^.]*\bnot found\b/i.test(message))) return 'NOT_FOUND';
+  if (code === 'INVALID_CLASS' || /\binvalid (journey |travel )?class\b/i.test(message)) return 'CLASS_NOT_AVAILABLE';
+  return null;
+}
+
 const envelope = (json: any): any => {
   if (!json || json.success !== true || json.data === undefined || json.data === null) throw new MalformedProviderData('envelope');
   return json.data;
@@ -28,6 +45,13 @@ export class RailRadarProvider extends LiveRailwayProvider {
   readonly providerId = 'railradar' as const;
   readonly label = 'RailRadar (live)';
   protected authHeaders() { return { Authorization: `Bearer ${String(this.cfg.apiKey || '')}` }; }
+
+  /** RailRadar Phase 1: body-meaning classification first (see classifyRailRadarError), then the shared status mapping. */
+  protected httpFail<T>(r: Extract<LiveHttpResult, { ok: false }>, t0: number, notFoundCode: RailwayErrorCode = 'NOT_FOUND'): RailwayResponse<T> {
+    const domain = r.localThrottle ? null : classifyRailRadarError(r.error.httpStatus, r.json);
+    if (domain) return this.fail<T>(domain, t0, { httpStatus: r.error.httpStatus, retryable: false });
+    return super.httpFail<T>(r, t0, notFoundCode);
+  }
 
   searchTrains(req: SearchTrainsRequest): Promise<RailwayResponse<TrainSearchResultData>> {
     return this.run('SEARCH_TRAINS', async t0 => {

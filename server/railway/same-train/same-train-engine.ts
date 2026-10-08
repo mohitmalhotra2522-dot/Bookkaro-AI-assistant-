@@ -19,7 +19,7 @@ import {
   type ProviderEvidence, type RouteStation, type RuleStatus, type SameTrainAlternative, type SameTrainAlternativesResult,
   type SameTrainErrorCode, type SameTrainLimits, type VerificationStatus, type WebRouteEvidence,
   SameTrainErrorCode as E, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_DEFAULT_LIMITS, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX, MAX_EARLIER_STATIONS, MAX_AVAILABILITY_CHECKS,
-  sameTrainJourneyKeyString
+  sameTrainJourneyKeyString, type SameTrainRouteCheck, type SameTrainRouteVerification
 } from '@shared/same-train-alternatives';
 import {
   type ShortageTriggerReason, evaluateSeatShortage, normalizeAvailabilityState, isVerifiedSameTrainAlternative, SameTrainOutcome, SameTrainErrorClass
@@ -45,7 +45,9 @@ export function sameTrainLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Sa
     perCallTimeoutMs: envNum(env, 'SAME_TRAIN_CALL_TIMEOUT_MS', D.perCallTimeoutMs, 500, 30000),
     totalTimeoutMs: envNum(env, 'SAME_TRAIN_TOTAL_TIMEOUT_MS', D.totalTimeoutMs, 1000, 90000),
     maxWebChecks: envNum(env, 'SAME_TRAIN_MAX_WEB_CHECKS', D.maxWebChecks, 0, 20),
-    maxAvailabilityChecks: envNum(env, 'SAME_TRAIN_MAX_AVAILABILITY_CHECKS', D.maxAvailabilityChecks ?? 120, 1, MAX_AVAILABILITY_CHECKS)
+    maxAvailabilityChecks: envNum(env, 'SAME_TRAIN_MAX_AVAILABILITY_CHECKS', D.maxAvailabilityChecks ?? 120, 1, MAX_AVAILABILITY_CHECKS),
+    // RailRadar Phase 1: route cross-check on the secondary route provider (default on; off|false|0 disables)
+    routeCrossCheck: !/^(off|false|0)$/i.test(String(env.SAME_TRAIN_ROUTE_CROSS_CHECK ?? '').trim())
   };
 }
 
@@ -79,6 +81,36 @@ export function normalizeRoute(stops: unknown): { ok: true; stations: RouteStati
   }
   if (stations.length < 2) return { ok: false, code: E.INVALID_TRAIN_ROUTE, message: 'Train ka route provider se verify nahi ho paaya.' };
   return { ok: true, stations, duplicates };
+}
+
+// ------------------------------------------------------------------ route cross-check (RailRadar Phase 1)
+
+export type RouteCrossCheckVerdict =
+  | { verdict: 'VERIFIED' }
+  | { verdict: 'UNVERIFIED'; reason: 'NOT_IN_ROUTE' | 'ORDER' | 'DUPLICATE' | 'NO_OVERLAP' }
+  | { verdict: 'CONFLICT'; reason: 'ORDER_DISAGREEMENT' };
+
+/**
+ * Deterministic cross-check of the requested pair against a SECONDARY provider's route data, called only after the
+ * primary route data could not verify the pair. Absence is not contradiction:
+ *   - the secondary route must contain origin BEFORE destination (both present, neither a repeated station);
+ *   - every station both routes contain (non-repeated) must appear in the SAME relative order in both — any disagreement
+ *     (incl. the primary holding the pair in the opposite order) is a CONFLICT, never resolved by picking a provider;
+ *   - fewer than 2 shared stations = no corroboration that both describe the same run → UNVERIFIED.
+ * No railway fact is derived: the result only says what the two providers' route DATA show.
+ */
+export function crossCheckRoute(primary: RouteStation[], primaryDup: Set<string>, secondary: RouteStation[], secondaryDup: Set<string>,
+  origin: string, destination: string): RouteCrossCheckVerdict {
+  const o = String(origin || '').toUpperCase(), d = String(destination || '').toUpperCase();
+  if (secondaryDup.has(o) || secondaryDup.has(d)) return { verdict: 'UNVERIFIED', reason: 'DUPLICATE' };
+  const so = secondary.findIndex(s => s.code === o), sd = secondary.findIndex(s => s.code === d);
+  if (so < 0 || sd < 0) return { verdict: 'UNVERIFIED', reason: 'NOT_IN_ROUTE' };
+  if (so >= sd) return { verdict: 'UNVERIFIED', reason: 'ORDER' };
+  const secIndex = new Map(secondary.filter(s => !secondaryDup.has(s.code)).map(s => [s.code, s.index] as const));
+  const shared = primary.filter(s => !primaryDup.has(s.code) && secIndex.has(s.code)).map(s => secIndex.get(s.code)!);
+  for (let i = 1; i < shared.length; i++) if (shared[i] <= shared[i - 1]) return { verdict: 'CONFLICT', reason: 'ORDER_DISAGREEMENT' };
+  if (shared.length < 2) return { verdict: 'UNVERIFIED', reason: 'NO_OVERLAP' };
+  return { verdict: 'VERIFIED' };
 }
 
 // ------------------------------------------------------------------ planning
@@ -367,7 +399,9 @@ export function matrixClasses(travelClass: string, classes?: string[]): string[]
 
 export type SameTrainRunOutcome =
   | { ok: true; result: SameTrainAlternativesResult }
-  | { ok: false; code: SameTrainErrorCode; message: string; partial?: Partial<SameTrainAlternativesResult>; errorClass?: SameTrainErrorClass };
+  | { ok: false; code: SameTrainErrorCode; message: string; partial?: Partial<SameTrainAlternativesResult>; errorClass?: SameTrainErrorClass;
+      /** RailRadar Phase 1: route verification trail for a route-data failure (observability; no railway fact) */
+      routeCheck?: SameTrainRouteCheck };
 
 const shortId = () => randomUUID().replace(/-/g, '').slice(0, 12);
 
@@ -415,9 +449,48 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   }
   const route = normalizeRoute(rv.data);
   if (!route.ok) return { ok: false, code: route.code, message: route.message, errorClass: SameTrainErrorClass.INVALID_TRAIN_ROUTE };
-  const planned = planCandidates(route.stations, route.duplicates, req, L);
-  // P42-13: INVALID_STATION_PAIR is kept as the deterministic code; its class marks it as a route-DATA limitation
-  // (distinct from INVALID_TRAIN_ROUTE, which stays a genuine unusable-route verdict)
+  let planned = planCandidates(route.stations, route.duplicates, req, L);
+  // RailRadar Phase 1: verification label (provider DATA only). Primary route verified the pair → no secondary call.
+  let verification: SameTrainRouteVerification | undefined = routeProvider.id === req.routeProvider.id ? 'VERIFIED_BY_RAILCORE' : 'ROUTE_VERIFIED_BY_RAILRADAR';
+  let primaryRouteResult: SameTrainRouteCheck['primaryResult'];
+  if (!planned.ok && planned.code === E.INVALID_STATION_PAIR) {
+    // P42-13: INVALID_STATION_PAIR stays the deterministic code; its class marks a route-DATA limitation (never a railway fact)
+    const o = String(req.origin || '').toUpperCase(), d = String(req.destination || '').toUpperCase();
+    primaryRouteResult = route.stations.some(s => s.code === o) && route.stations.some(s => s.code === d) ? 'ORDER_NOT_VERIFIED' : 'STATION_MISSING';
+    const firstFailure = planned;
+    const check: SameTrainRouteCheck = { verdict: 'ROUTE_UNVERIFIED', primaryProvider: routeProvider.id, primaryResult: primaryRouteResult };
+    const unverified = (result: string, suffix = '') => ({ ok: false as const, code: firstFailure.code, message: firstFailure.message + suffix,
+      errorClass: SameTrainErrorClass.ROUTE_DATA_UNVERIFIED, routeCheck: { ...check, crossCheckResult: result } });
+    // cross-check ONLY when: enabled, the route came from the PRIMARY route provider (not already the P42.9 fallback),
+    // a distinct secondary route provider is configured, and the request is still current. Route data only — no
+    // search / availability / fare / live call is made here.
+    const cross = req.routeFallback && req.routeFallback.id !== req.routeProvider.id ? req.routeFallback : null;
+    if (L.routeCrossCheck === false) return unverified('DISABLED');
+    if (!cross) return unverified('NOT_CONFIGURED');
+    if (routeFallbackReason) return unverified('ALREADY_SECONDARY');
+    if (!current()) return { ok: false, code: E.STALE_RESULT, errorClass: SameTrainErrorClass.STALE, message: 'Journey badal gayi — yeh alternative result ab purana hai.' };
+    check.crossCheckProvider = cross.id;
+    const crossLabel = cross.label || cross.id;
+    stats.executed++;
+    const cr = await withTimeout(Promise.resolve().then(() => deps.getRoute(cross, req.trainNumber)), L.perCallTimeoutMs);
+    if (cr.timedOut) { stats.timeout++; return unverified('TIMEOUT', ` ${crossLabel} se route cross-check time par nahi aaya.`); }
+    const cv: any = cr.value;
+    if (!cv || cv.ok !== true) return unverified(String(cv?.error?.code || 'ERROR'), ` ${crossLabel} se route cross-check nahi ho paaya.`);
+    const r2 = normalizeRoute(cv.data);
+    if (!r2.ok) return unverified('ROUTE_INVALID', ` ${crossLabel} ka route data bhi is pair ko verify nahi kar paaya.`);
+    const v = crossCheckRoute(route.stations, route.duplicates, r2.stations, r2.duplicates, o, d);
+    if (v.verdict === 'CONFLICT') {
+      return { ok: false, code: firstFailure.code, errorClass: SameTrainErrorClass.ROUTE_DATA_CONFLICT,
+        message: `${routeProvider.label || routeProvider.id} aur ${crossLabel} ka route data is train ke stations ke order par match nahi karta, isliye ${o} → ${d} verify nahi ho paaya.`,
+        routeCheck: { ...check, verdict: 'ROUTE_DATA_CONFLICT', crossCheckResult: v.reason } };
+    }
+    if (v.verdict === 'UNVERIFIED') return unverified(v.reason, ` ${crossLabel} ka route data bhi is pair ko verify nahi kar paaya.`);
+    const planned2 = planCandidates(r2.stations, r2.duplicates, req, L);
+    if (!planned2.ok) return unverified(planned2.code, ` ${crossLabel} ka route data bhi is pair ko verify nahi kar paaya.`);
+    // ROUTE_VERIFIED_BY_RAILRADAR — the existing same-train logic continues on the secondary route; every availability /
+    // fare fact still comes from the unchanged provider calls below (RailCore primary, P42.9 fallback rules untouched)
+    planned = planned2; routeProvider = cross; verification = 'ROUTE_VERIFIED_BY_RAILRADAR';
+  }
   if (!planned.ok) return { ok: false, code: planned.code, message: planned.message, ...(planned.code === E.INVALID_STATION_PAIR ? { errorClass: SameTrainErrorClass.ROUTE_DATA_UNVERIFIED } : {}) };
   const plan = planned.plan;
   const routeFetchedAt = new Date(now()).toISOString();
@@ -618,6 +691,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     route: { provider: routeProvider.id, ...(routeFallbackReason ? { fallbackUsed: true, fallbackReason: routeFallbackReason } : {}), fetchedAt: routeFetchedAt, trainOrigin: plan.route[0].code, trainTerminal: plan.route[plan.route.length - 1].code,
       stationCount: plan.route.length, originSweep: plan.originAlternatives.map(s => s.code), destinationExtension: plan.destinationExtension.map(s => s.code),
       destinationSweep: plan.destinationSweep,
+      verification, verifiedBy: routeProvider.id,
+      ...(primaryRouteResult ? { primaryRouteProvider: req.routeProvider.id, primaryRouteResult } : {}),
       stations: plan.route.slice(Math.max(0, (plan.originAlternatives[0]?.index ?? plan.originIndex)), (plan.destinationExtension[plan.destinationExtension.length - 1]?.index ?? plan.destinationIndex) + 1) },
     providers, candidateCount: pairs.length, candidatesTruncated: plan.truncated,
     alternatives, invalidCount: all.length - visible.length,

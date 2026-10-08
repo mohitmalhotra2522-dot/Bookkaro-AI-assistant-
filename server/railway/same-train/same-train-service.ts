@@ -142,6 +142,10 @@ function logRecoveryStats(req: SameTrainSearchRequest, r: Awaited<ReturnType<typ
       providers: req.providers.map(p => p.id), fallbackProviders: Object.fromEntries(Object.entries(req.fallbackProviders || {}).map(([k, v]) => [k, v.id])),
       ...(res?.callStats || {}),
       ...(route?.fallbackUsed ? { routeProvider: route.provider, routeFallbackReason: route.fallbackReason } : {}),
+      // RailRadar Phase 1: route verification trail (provider ids + verdicts only)
+      ...(route?.verification ? { routeVerification: route.verification, routeVerifiedBy: route.verifiedBy } : {}),
+      ...(route?.primaryRouteResult ? { routeCrossCheck: { primaryProvider: route.primaryRouteProvider, primaryResult: route.primaryRouteResult, crossCheckProvider: route.verifiedBy, result: 'VERIFIED' } } : {}),
+      ...(!r.ok && (r as any).routeCheck ? { routeVerification: (r as any).routeCheck.verdict, routeCrossCheck: (r as any).routeCheck } : {}),
       latencyMs: res?.latencyMs ?? null
     }));
   } catch { /* observability must never break the recovery */ }
