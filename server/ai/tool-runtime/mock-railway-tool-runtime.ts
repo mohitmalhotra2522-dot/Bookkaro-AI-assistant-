@@ -103,7 +103,7 @@ export class MockRailwayToolRuntime {
     const ground: ToolGrounding = { userText, bookings: [], pnrOwner: () => 'NONE', bookingOwner: () => 'NONE' };
     const turn = rt.beginTurn({
       sessionId: session.sessionId, turnId, requestId: `req-${turnId}`, userText, getSession: () => session,
-      validate: (tc, s) => this.validator.validate(tc, s, ground) as any
+      validate: (tc, s) => this.validator.validate(tc, s, ground, { turnId, userText }) as any
     });
     const results: LLMToolResult[] = [];
     let stopped = false;

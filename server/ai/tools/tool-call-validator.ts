@@ -27,7 +27,8 @@ import { SAME_TRAIN_NOT_NEEDED, evaluateSeatShortage } from '@shared/same-train-
 export const REQUESTED_CLASS_CODES = new Set(['1A', '2A', '3A', '3E', 'SL', 'CC', 'EC', '2S', 'FC', 'EA', 'EV']);
 import { REGISTERED_TOOLS, getToolDefinition, type ToolCall, type ToolDefinition, type RegisteredToolName, type ToolParam } from './tool-registry';
 import type { OrchestratorError } from '../decisions/agent-decision';
-import { TrainReferenceResolver } from '../context/train-reference-resolver';
+import { TrainReferenceResolver, currentResults } from '../context/train-reference-resolver';
+import { resultSetOf } from '../context/reference-context';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
 import { normalizePnrInput, pnrsInText } from '../../booking/post-booking/pnr-validator';
@@ -47,6 +48,18 @@ export interface ValidatedToolCall {
  */
 const UNAVAILABLE_TOOLS: ReadonlySet<RegisteredToolName> = new Set<RegisteredToolName>([]);
 
+/**
+ * Tool-grounding fix: the CURRENT turn as seen by the tool runtime. `turnId` lets the validator tell a result set the user
+ * has already seen (an earlier turn) from one produced in this very turn; `userText` backs the user's-own-words check when no
+ * post-booking grounding is wired. Both optional — absent values never widen acceptance.
+ */
+export interface ToolTurnContext { turnId?: string; userText?: string }
+
+/** TRACK_TRAIN's user's-own-words check (Prompt 14), shared: the exact 4-5 digit train number appears in the user's text. */
+export function userTypedTrain(userText: string | undefined, trainNumber: string): boolean {
+  return !!userText && [...String(userText).matchAll(/(?<!\d)(\d{4,5})(?!\d)/g)].some(m => m[1] === trainNumber);
+}
+
 export class ToolCallValidator {
   /** Post-P42.10 F3: the existing backend reference resolver (current result set only, never a guess). */
   private readonly trainRefs = new TrainReferenceResolver();
@@ -55,7 +68,7 @@ export class ToolCallValidator {
    * @param ground Prompt 14 grounding for CHECK_PNR / TRACK_TRAIN (user's own words + this session's
    *               booking records). Without it, PNR / train values can never be grounded.
    */
-  validate(call: ToolCall, session: BookingSession, ground?: ToolGrounding): { ok: true; v: ValidatedToolCall } | { ok: false; error: OrchestratorError } {
+  validate(call: ToolCall, session: BookingSession, ground?: ToolGrounding, turn?: ToolTurnContext): { ok: true; v: ValidatedToolCall } | { ok: false; error: OrchestratorError } {
     if (!call || !call.name || typeof call.name !== 'string') {
       return { ok: false, error: { code: 'INVALID_TOOL_CALL', message: 'Tool call malformed hai.' } };
     }
@@ -103,8 +116,8 @@ export class ToolCallValidator {
     // 4. Per-tool state/argument validation
     switch (def.name) {
       case 'SEARCH_TRAINS': return this.validateSearch(call.callId, def, args, session);
-      case 'GET_TRAIN_INFO': return this.validateTrainInfo(call.callId, def, args, session);
-      case 'GET_TIMETABLE': return this.validateTimetable(call.callId, def, args, session);
+      case 'GET_TRAIN_INFO': return this.validateTrainInfo(call.callId, def, args, session, ground, turn);
+      case 'GET_TIMETABLE': return this.validateTimetable(call.callId, def, args, session, ground, turn);
       case 'CHECK_AVAILABILITY': return this.validateAvailability(call.callId, def, args, session);
       case 'GET_FARE': return this.validateFare(call.callId, def, args, session);
       case 'TRACK_TRAIN': return this.validateTrack(call.callId, def, args, session, ground);
@@ -282,7 +295,7 @@ export class ToolCallValidator {
     if (explicit) {
       const s = String(args.trainNumber).trim();
       if (!/^\d{4,5}$/.test(s)) return E('INVALID_TOOL_CALL', 'Train number 4-5 digits ka hona chahiye.');
-      const typed = !!g && [...g.userText.matchAll(/(?<!\d)(\d{4,5})(?!\d)/g)].some(m => m[1] === s);
+      const typed = !!g && userTypedTrain(g.userText, s);
       const own = g?.bookings.find(b => b.trainNumber === s);
       if (!typed && !own && !sessionTrains.has(s)) return E('AUTHORITATIVE_DATA_REQUIRED', 'Track karne ke liye train identify nahi hui.', { missingField: 'TRAIN' });
       return { ok: true as const, v: { name: def.name, callId, arguments: { trainNumber: s, ...(own ? { bookingId: own.bookingId } : {}) }, tool: def } };
@@ -347,21 +360,70 @@ export class ToolCallValidator {
     return (sel && (sel.number || sel.trainNumber)) || session.focusTrainNumber || null;
   }
 
-  private validateTrainInfo(callId: string, def: ToolDefinition, args: Record<string,any>, session: BookingSession) {
+  /**
+   * Tool-grounding fix (GET_TRAIN_INFO / GET_TIMETABLE): the same train-grounding sources as TRACK_TRAIN (the user's own words
+   * this turn, this session's booking record, the selected train, the focus train, the current results) — each bound to the
+   * CURRENT context. A well-formed number alone is never evidence of user intent:
+   *   - a result set the session journey moved away from (date / route change) grounds nothing;
+   *   - a result set produced in THIS turn has not been seen by the user yet — it grounds nothing by itself (only a number the
+   *     user typed this turn can pick a train from it), so a generic search can never be followed by a lookup of a train the
+   *     user did not mention or refer to;
+   *   - the focus train counts only while it is still bound to the current context (it is in the current, already shown
+   *     result set, or no result set exists).
+   * Ungrounded → rejected before any provider call (no result, no card, no focus change, nothing for the response to cite).
+   */
+  private groundedLookupTrains(session: BookingSession, g?: ToolGrounding, turn?: ToolTurnContext) {
+    const sel: any = session.selectedTrain;
+    const selected = sel ? String(sel.number || sel.trainNumber) : null;
+    const rows = currentResults(session);
+    const rs = resultSetOf(session);
+    const sr: any = session.searchResults;
+    const producedThisTurn = !!turn?.turnId && !!sr?.sourceTurnId && sr.sourceTurnId === turn.turnId;
+    // rows without provenance (legacy `availableTrains` shape) have no journey to drift from — still never same-turn
+    const shownCurrent = rows.length > 0 && (rs ? rs.current : !sr) && !producedThisTurn;
+    const shown = new Set<string>(shownCurrent ? rows.map(t => String(t.trainNumber)) : []);
+    const focus = session.focusTrainNumber ? String(session.focusTrainNumber) : null;
+    const focusBound = !!focus && (rows.length === 0 || shown.has(focus));
+    const userText = g?.userText ?? turn?.userText;
+    return {
+      selected, focus: focusBound ? focus : null,
+      allows: (n: string) => userTypedTrain(userText, n) || !!g?.bookings.some(b => b.trainNumber === n)
+        || n === selected || shown.has(n) || (focusBound && n === focus)
+    };
+  }
+
+  /** Grounded train for a per-train lookup: explicit argument (must be grounded) → selected train → bound focus train. */
+  private groundedLookupTrain(args: Record<string, any>, session: BookingSession, label: string, g?: ToolGrounding, turn?: ToolTurnContext):
+    { ok: true; trainNumber: string } | { ok: false; error: OrchestratorError } {
     const explicit = args.trainNumber !== undefined && args.trainNumber !== null && args.trainNumber !== '';
-    const trainNumber = this.focusTrain(args, session);
-    if (!trainNumber) return explicit
-      ? { ok:false as const, error:{ code:'INVALID_TOOL_CALL' as const, message:'Train number चाहिए (4-5 अंक)।' } }
-      : { ok:false as const, error:{ code:'MISSING_REQUIRED_FIELD' as const, message:'Train number nahi mila.', details: { missingField: 'TRAIN' } } };
+    const ground = this.groundedLookupTrains(session, g, turn);
+    if (explicit) {
+      const n = this.validateTrainNumber(args.trainNumber, session);
+      // (unchanged pre-fix codes: GET_TRAIN_INFO → INVALID_TOOL_CALL, GET_TIMETABLE → MISSING_REQUIRED_FIELD)
+      if (!n) return label === 'Timetable'
+        ? { ok: false, error: { code: 'MISSING_REQUIRED_FIELD', message: 'Timetable ke liye train number nahi mila.', details: { missingField: 'TRAIN' } } }
+        : { ok: false, error: { code: 'INVALID_TOOL_CALL', message: 'Train number चाहिए (4-5 अंक)।' } };
+      if (!ground.allows(n)) return { ok: false, error: { code: 'AUTHORITATIVE_DATA_REQUIRED' as any, message: `${label} ke liye train identify nahi hui.`, details: { missingField: 'TRAIN', reason: 'TRAIN_NOT_GROUNDED' } } };
+      return { ok: true, trainNumber: n };
+    }
+    const fallback = ground.selected || ground.focus;
+    if (!fallback) return { ok: false, error: { code: 'MISSING_REQUIRED_FIELD', message: label === 'Timetable' ? 'Timetable ke liye train number nahi mila.' : 'Train number nahi mila.', details: { missingField: 'TRAIN' } } };
+    return { ok: true, trainNumber: fallback };
+  }
+
+  private validateTrainInfo(callId: string, def: ToolDefinition, args: Record<string,any>, session: BookingSession, g?: ToolGrounding, turn?: ToolTurnContext) {
+    const t = this.groundedLookupTrain(args, session, 'Train info', g, turn);
+    if (!t.ok) return { ok:false as const, error: t.error };
+    const trainNumber = t.trainNumber;
     const date = args.date ? this.resolveDateStr(args.date) : undefined;
     if (args.date && !date) return { ok:false as const, error:{ code:'AMBIGUOUS_DATE' as const, message:'तारीख समझ नहीं आयी।' } };
     return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber, ...(date ? { date } : {}) }, tool: def } };
   }
 
-  private validateTimetable(callId: string, def: ToolDefinition, args: Record<string,any>, _session: BookingSession) {
-    const trainNumber = this.focusTrain(args, _session);
-    if (!trainNumber) return { ok:false as const, error:{ code:'MISSING_REQUIRED_FIELD' as const, message:'Timetable ke liye train number nahi mila.', details: { missingField: 'TRAIN' } } };
-    return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber }, tool: def } };
+  private validateTimetable(callId: string, def: ToolDefinition, args: Record<string,any>, session: BookingSession, g?: ToolGrounding, turn?: ToolTurnContext) {
+    const t = this.groundedLookupTrain(args, session, 'Timetable', g, turn);
+    if (!t.ok) return { ok:false as const, error: t.error };
+    return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber: t.trainNumber }, tool: def } };
   }
 
   /**

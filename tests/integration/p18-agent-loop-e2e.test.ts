@@ -145,7 +145,7 @@ describe('P18 G3 — tool loop behaviour', () => {
     const h = mk();
     await h.say('Amritsar se Delhi kal 2 log'); await h.say('12497');
     h.llm.evil = 'chain';
-    const r = await h.say('details batao');
+    const r = await h.say('12497 ka timetable batao');
     h.llm.evil = null;
     expect(succeeded(r)).toEqual(['SEARCH_TRAINS', 'GET_TIMETABLE']);
     const plans = r.turnLog.toolPlans.filter((p: any) => p.status === 'SUCCEEDED').map((p: any) => p.planNodeId);

@@ -213,7 +213,7 @@ describe('P17 G2 — runtime gates and executions', () => {
   it('[18] limits: MAX_TOOL_CALLS_PER_TURN=8 (9th rejected, stop) and MAX_TOOL_ROUNDS_PER_TURN=5', async () => {
     expect(MAX_TOOL_CALLS_PER_TURN).toBe(8); expect(MAX_TOOL_ROUNDS_PER_TURN).toBe(5);
     const s = mockToolSession();
-    const t = turnFor(s, 'info');
+    const t = turnFor(s, 'info 12000 12001 12002 12003 12004 12005 12006 12007 12008');
     const ex = new ScriptedRailwayExecutor();
     const calls = Array.from({ length: 9 }, (_, i) => call('GET_TRAIN_INFO', { trainNumber: String(12000 + i) }));
     const rej: any[] = [];
@@ -224,7 +224,7 @@ describe('P17 G2 — runtime gates and executions', () => {
     const t2 = turnFor(s, 'x');
     expect([1, 2, 3, 4, 5, 6].map(() => t2.startRound())).toEqual([true, true, true, true, true, false]);
     // deterministic backend prep calls are exempt from the LLM budget
-    const t3 = turnFor(s, 'x');
+    const t3 = turnFor(s, 'x 12000 12001 12002 12003 12004 12005 12006 12007 12008');
     const ex3 = new ScriptedRailwayExecutor();
     await t3.runRound(calls as any, ex3, { fromLLM: false, onRejected: () => {}, onExecuted: () => true });
     expect(ex3.calls).toHaveLength(9);

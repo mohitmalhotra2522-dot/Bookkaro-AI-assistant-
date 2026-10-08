@@ -330,7 +330,9 @@ export class BoundToolRuntime {
       get userText() { return ctx.userText; },
       getSession: () => self.getSession(),
       validate: (tc: ToolCall, s: BookingSession) => {
-        const r: any = self.validator.validate(tc, s, self.hooks.grounding?.(ctx.userText));
+        // Tool-grounding fix: the current turn id + text let per-train lookups tell an already shown result set from one
+        // produced in this turn (GET_TRAIN_INFO / GET_TIMETABLE grounding)
+        const r: any = self.validator.validate(tc, s, self.hooks.grounding?.(ctx.userText), { turnId: self.hooks.turnId, userText: ctx.userText });
         // P-3 follow-up: SEARCH_TRAINS class / time filters only when the CURRENT user turn asks for them (same principle
         // as the passenger count) — a saved preference in Muse's context is never copied into a plain search.
         if (r?.ok && r.v?.tool?.name === 'SEARCH_TRAINS') {
