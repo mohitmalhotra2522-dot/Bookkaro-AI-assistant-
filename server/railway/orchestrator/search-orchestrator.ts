@@ -55,8 +55,10 @@ export class RailwaySearchOrchestrator {
     let destination = detectedUpdates.destination ?? session.destination;
     let destinationName = detectedUpdates.destinationName ?? session.destinationName;
     let date = detectedUpdates.date ?? session.date;
-    let preferredClass = detectedUpdates.preferredClass ?? session.preferredClass;
-    let preferredTime = detectedUpdates.preferredTime ?? session.preferredTime;
+    // P-3: a search uses ONLY the filters of the CURRENT request. A saved session preference is conversational context
+    // for the LLM — it never becomes an invisible search constraint (it must not hide or change provider results).
+    const preferredClass = detectedUpdates.preferredClass;
+    const preferredTime = detectedUpdates.preferredTime;
     const passengersCount = detectedUpdates.passengerCount ?? session.passengersCount;
 
     // Check if origin/destination changed relative to stored session → invalidate downstream state
@@ -126,7 +128,8 @@ export class RailwaySearchOrchestrator {
     // Transition: SEARCHING_TRAINS
     this.commitSession({
       origin, originName, destination, destinationName,
-      date, preferredClass, preferredTime,
+      // P-2: a search filter is never written back as a saved preference (only an explicit remember instruction is)
+      date,
       passengersCount: passengersCount ?? this.getSession().passengersCount,
       bookingState: BookingState.SEARCHING_TRAINS,
       lastToolActivity: 'SEARCH_TRAINS',

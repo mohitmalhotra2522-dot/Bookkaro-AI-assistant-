@@ -113,11 +113,13 @@ describe('G3 — multi-slot, corrections, invalidation', () => {
     const sid = newSid();
     const r1 = await say(sid, 'Amritsar se Delhi kal jaana hai, 2 log hain, AC chahiye');
     expect(rail.searches).toEqual([{ origin: 'ASR', destination: 'NDLS', date: KAL }]);
-    expect(S(sid)).toMatchObject({ passengersCount: 2, preferredClass: 'AC', bookingState: BookingState.SHOWING_TRAINS });
+    expect(S(sid)).toMatchObject({ passengersCount: 2, bookingState: BookingState.SHOWING_TRAINS });
+    expect(S(sid).preferredClass ?? null).toBeNull();   // P-2 (authorized change): "AC chahiye" is a current request, not a saved preference
     const set1 = r1.turnLog.resultSetId;
     expect(set1).toBeTruthy();
     const r2 = await say(sid, 'Actually Delhi nahi Ludhiana');
-    expect(S(sid)).toMatchObject({ origin: 'ASR', destination: 'LDH', date: KAL, passengersCount: 2, preferredClass: 'AC' });
+    expect(S(sid)).toMatchObject({ origin: 'ASR', destination: 'LDH', date: KAL, passengersCount: 2 });
+    expect(S(sid).preferredClass ?? null).toBeNull();   // P-2 (authorized change): still no saved preference after the correction
     expect(r2.turnLog.contextChanges).toEqual([expect.objectContaining({ field: 'destination', kind: 'CORRECTION', value: 'LDH', previous: 'NDLS' })]);
     expect(r2.turnLog.resultSetId).not.toBe(set1);
     const n = S(sid).searchResults.trains.length;

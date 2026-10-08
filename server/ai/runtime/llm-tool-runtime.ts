@@ -1256,9 +1256,9 @@ export class BoundToolRuntime {
         // passenger count — only a count grounded in the user's words this turn (same rule as update_booking_session)
         const pax = groundedSearchPassengers(vt.arguments.passengersCount, this.userText);
         if (pax !== undefined) patch.passengersCount = pax;
-        if (vt.arguments.preferredClass) patch.preferredClass = vt.arguments.preferredClass;
+        // P-2: SEARCH_TRAINS preferredClass / preferredTime are filters of THIS search only — never a saved preference.
+        // Saved preferences are written only by an explicit remember instruction (update_booking_session → turn-applier 7b).
         if (vt.arguments.requestedClass) patch.requestedClass = vt.arguments.requestedClass;   // P42.7 (validated class code)
-        if (vt.arguments.preferredTime) patch.preferredTime = vt.arguments.preferredTime;
         this.commitSession(patch);
         H.emit?.('SEARCH_COMPLETED', { origin: vt.arguments.origin, destination: vt.arguments.destination, date: vt.arguments.date, count: trains.length, searchResultsVersion: version, resultId });
         break;

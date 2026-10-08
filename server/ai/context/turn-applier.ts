@@ -42,6 +42,7 @@ import type { ConversationStateManager } from '../state/conversation-state';
 import { STATE_ORDER } from '../state/state-transition-validator';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
 import { ContextPatchValidator, classPreferenceFamily, type PatchReview } from '../conversation/context-patch';
+import { explicitPreferenceSaveRequested, PREFERENCE_NOT_EXPLICIT } from './preference-save-grounding';
 import type { ContextPatch, RejectedPatch } from '@shared/conversation-context';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { TrainReferenceResolver, currentResults, type ResultTrain } from './train-reference-resolver';
@@ -404,7 +405,16 @@ export class ContextualTurnApplier {
       out.applied.push(...r.applied);
     }
 
-    // 7b) Prompt 16 — class / time PREFERENCE before a train is chosen ("AC chahiye") — stored, never a selection
+    // 7b) Prompt 16 — class / time PREFERENCE — stored, never a selection.
+    //     P-2: a SAVED preference is written ONLY when the user's own words this turn explicitly ask to remember / save it
+    //     ("AC prefer hai, yaad rakhna"); an ordinary class / time request ("AC chahiye", "shaam ki trains") is not saved.
+    if ((e.preferredClassRaw || e.preferredTimeRaw) && !explicitPreferenceSaveRequested(ctx.rawText || '')) {
+      for (const [field, raw] of [['preferredClass', e.preferredClassRaw], ['preferredTime', e.preferredTimeRaw]] as const) {
+        if (raw) ctx.rejectedPatches?.push({ field, proposed: String(raw), code: 'UNGROUNDED_VALUE', reason: `${PREFERENCE_NOT_EXPLICIT}: no remember / save instruction in the user's words` });
+      }
+      emit('CONTEXT_PATCH_REJECTED', { code: PREFERENCE_NOT_EXPLICIT, fields: [e.preferredClassRaw ? 'preferredClass' : null, e.preferredTimeRaw ? 'preferredTime' : null].filter(Boolean) });
+      delete e.preferredClassRaw; delete e.preferredTimeRaw;
+    }
     if (e.preferredClassRaw || e.preferredTimeRaw) {
       const s = S();
       const fam = e.preferredClassRaw ? classPreferenceFamily(String(e.preferredClassRaw)) : null;

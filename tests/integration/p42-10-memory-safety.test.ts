@@ -47,9 +47,13 @@ describe('P42.10 G2 — BookKaro Memory safety', () => {
   it('[1][2] a harmless preference is stored in session memory and retrieved into the next turn context (text + voice share it)', async () => {
     const h = stack({
       'Mujhe subah ki trains pasand hain, AC chahiye': [{ calls: [U('UPDATE_PASSENGERS', 'UPDATE_PASSENGERS', { preferredClassRaw: 'AC', preferredTimeRaw: 'MORNING' })] }, { content: 'Theek hai, subah aur AC yaad rakhunga. Kahan jaana hai?' }],
+      'Mujhe subah ki trains pasand hain, AC chahiye, yaad rakhna': [{ calls: [U('UPDATE_PASSENGERS', 'UPDATE_PASSENGERS', { preferredClassRaw: 'AC', preferredTimeRaw: 'MORNING' })] }, { content: 'Theek hai, subah aur AC yaad rakhunga. Kahan jaana hai?' }],
       'Kal Amritsar se Delhi': [{ content: 'Theek hai.' }]
     });
     await h.say('Mujhe subah ki trains pasand hain, AC chahiye');
+    expect(h.s().preferredClass ?? null).toBeNull();                                                    // P-2 (authorized change): no remember instruction → not saved
+    expect(h.s().preferredTime ?? null).toBeNull();
+    await h.say('Mujhe subah ki trains pasand hain, AC chahiye, yaad rakhna');                           // explicit remember instruction → saved
     expect(h.s()).toMatchObject({ preferredClass: 'AC', preferredTime: 'MORNING' });
     await h.say('Kal Amritsar se Delhi', 'VOICE');                                                       // same session memory in voice
     const ctx = ctxOf(h, 'Kal Amritsar se Delhi');
@@ -61,6 +65,7 @@ describe('P42.10 G2 — BookKaro Memory safety', () => {
     const spy = vi.spyOn(MockRailwayProvider.prototype as any, 'checkAvailability');
     const h = stack({
       'AC chahiye': [{ calls: [U('UPDATE_PASSENGERS', 'UPDATE_PASSENGERS', { preferredClassRaw: 'AC' })] }, { content: 'Theek hai.' }],
+      'AC chahiye, yaad rakhna': [{ calls: [U('UPDATE_PASSENGERS', 'UPDATE_PASSENGERS', { preferredClassRaw: 'AC' })] }, { content: 'Theek hai.' }],
       'search': [{ calls: [SEARCH()] }, { content: 'Trains mil gayi.' }],
       '12497 SL wali': [{ calls: [U('BOOK_TRAIN', 'SELECT_TRAIN', { trainRef: { kind: 'TRAIN_NUMBER', value: '12497' }, classRaw: 'SL', selectionPurpose: 'BOOKING' })] }, { content: 'Theek hai.' }],
       '12497 mein SL availability check karo': [{ calls: [{ name: 'CHECK_AVAILABILITY', args: { trainNumber: '12497', travelClass: 'SL', date: D1 } }] }, { content: 'Theek hai.' }]
@@ -68,6 +73,8 @@ describe('P42.10 G2 — BookKaro Memory safety', () => {
     // search first (the mock provider — unlike the live adapters — narrows classes by a session class preference, Prompt 16)
     await h.say('search');
     await h.say('AC chahiye');
+    expect(h.s().preferredClass ?? null).toBeNull();                                                    // P-2 (authorized change): an ordinary request is not saved
+    await h.say('AC chahiye, yaad rakhna');                                                             // explicit remember instruction → saved
     expect(h.s().preferredClass).toBe('AC');
     await h.say('12497 SL wali');
     expect(h.s().selectedClass).toBe('SL');                                                             // the explicit class, not the remembered family
