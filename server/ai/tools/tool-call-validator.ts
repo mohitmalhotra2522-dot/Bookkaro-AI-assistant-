@@ -21,7 +21,7 @@ import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import { SameTrainErrorCode } from '@shared/same-train-alternatives';
 import { resolveSameTrainProviders, isSameTrainResultStale, findSameTrainResult } from '../../railway/same-train/same-train-service';
 import { sessionShortageEvidence, museTriggerReason } from '../../railway/same-train/shortage-trigger';
-import { SAME_TRAIN_NOT_NEEDED } from '@shared/same-train-shortage';
+import { SAME_TRAIN_NOT_NEEDED, evaluateSeatShortage } from '@shared/same-train-shortage';
 
 /** P42.7: IRCTC class codes a user may name (SEARCH_TRAINS.requestedClass). */
 export const REQUESTED_CLASS_CODES = new Set(['1A', '2A', '3A', '3E', 'SL', 'CC', 'EC', '2S', 'FC', 'EA', 'EV']);
@@ -144,13 +144,17 @@ export class ToolCallValidator {
     ]);
     const typed = !!g && [...String(g.userText || '').matchAll(/(?<!\d)(\d{5})(?!\d)/g)].some(m => m[1] === train);
     if (!known.has(train) && !typed) return E('AUTHORITATIVE_DATA_REQUIRED', 'Same train alternative ke liye train identify nahi hui.', { missingField: 'TRAIN' });
-    // P42.7: requested class = argument → selected class → the class the user named at search (no selection required)
-    const travelClass = String(args.travelClass || s.selectedClass || s.requestedClass || '').toUpperCase();
-    if (!travelClass) return E(SameTrainErrorCode.NOT_READY, 'Kaunsi class ke liye check karna hai? (jaise CC, 3A, SL)', { missing: 'travelClass' });
     const row = ((s.searchResults?.trains || []) as any[]).find(t => String(t.trainNumber || t.number) === train);
     // P42.2: classes come from the authoritative train data (result row, else the selected train) — never invented
     const selRow = !row && sel && String(sel.number || sel.trainNumber) === train ? sel : null;
     const src = row || selRow;
+    // P42.7: requested class = argument → selected class → the class the user named at search (no selection required).
+    // F1: still none → the background discovery rule (same-train-session): the first class of this train's authoritative
+    // row whose OWN search status shows a meaningful shortage for this party seeds the search. Tool-execution only — never
+    // written to selectedClass / requestedClass / preferences. No shortage class on the row → the class is still asked.
+    const travelClass = String(args.travelClass || s.selectedClass || s.requestedClass || '').toUpperCase()
+      || firstShortageClass(src, args.passengersCount !== undefined ? Number(args.passengersCount) : Number(s.passengersCount || 1));
+    if (!travelClass) return E(SameTrainErrorCode.NOT_READY, 'Kaunsi class ke liye check karna hai? (jaise CC, 3A, SL)', { missing: 'travelClass' });
     const rowClasses: string[] = src ? [...(src.classes || []).map((c: any) => String(c.code || c).toUpperCase()), ...(src.availableClasses || []).map((c: any) => String(c).toUpperCase())] : [];
     if (rowClasses.length && !rowClasses.includes(travelClass)) return E('INVALID_TOOL_CALL', `${train} mein ${travelClass} class nahi hai (${rowClasses.join(', ')}).`);
     // P42.7 all-class matrix: only classes the train's authoritative row lists (unsupported → rejected, never invented)
@@ -476,4 +480,21 @@ export class ToolCallValidator {
     if (date) a.date = date;
     return { ok:true as const, v: { name: def.name, callId, arguments: a, tool: def } };
   }
+}
+
+/**
+ * F1 — the class that seeds a same-train search when none was given / selected / named: exactly the background discovery
+ * rule (same-train-session): the FIRST class of the authoritative train row (provider order) whose own search status is a
+ * meaningful shortage for this party (WAITLIST / NOT_AVAILABLE / REGRET / too few seats; RAC, UNKNOWN, sufficient seats
+ * and TRAIN_CANCELLED never seed). '' when there is none. Pure — reads the row only, never touches the session.
+ */
+export function firstShortageClass(row: any, passengers: number): string {
+  const pax = Number.isInteger(passengers) && passengers > 0 ? passengers : 1;
+  for (const c of ((row?.classes || []) as any[])) {
+    const code = String(c?.code ?? '').toUpperCase();
+    if (!/^[A-Z0-9]{1,4}$/.test(code)) continue;
+    const a = evaluateSeatShortage({ status: c?.availability ?? null, requestedPassengerCount: pax });
+    if (a.shortage && a.triggerReason && a.triggerReason !== 'TRAIN_CANCELLED') return code;
+  }
+  return '';
 }

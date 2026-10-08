@@ -8,7 +8,7 @@
  *   - sameTrainFallbackText: deterministic one-liner used ONLY when no grounded Muse wording survives.
  */
 import type { SameTrainAlternative, SameTrainAlternativesResult } from '@shared/same-train-alternatives';
-import { SAME_TRAIN_ALL_FAILED_MESSAGE, toSameTrainRecoveryResults } from '@shared/same-train-alternatives';
+import { SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_PROVIDER_BUSY_MESSAGE, toSameTrainRecoveryResults } from '@shared/same-train-alternatives';
 import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 
 const evidenceLine = (a: SameTrainAlternative) => a.evidence
@@ -94,7 +94,8 @@ const label = (a: SameTrainAlternative) => `${a.ticketOriginName || a.ticketOrig
 
 /** Deterministic, fact-only one-liner (Hinglish) — used only when Muse's wording is missing / rejected. */
 export function sameTrainFallbackText(r: SameTrainAlternativesResult | null, errorCode?: string): string {
-  if (!r) return errorCode === 'INVALID_TRAIN_ROUTE' ? 'Is train ka route verify nahi ho paaya, isliye same train alternative check nahi hua.' : SAME_TRAIN_ALL_FAILED_MESSAGE;
+  if (!r) return errorCode === 'INVALID_TRAIN_ROUTE' ? 'Is train ka route verify nahi ho paaya, isliye same train alternative check nahi hua.'
+    : errorCode === 'RATE_LIMITED' || errorCode === 'PROVIDER_UNAVAILABLE' ? SAME_TRAIN_PROVIDER_BUSY_MESSAGE : SAME_TRAIN_ALL_FAILED_MESSAGE;
   // P42.2: only options with seats for the whole party (or RAC); no card is shown when there is none
   const good = r.alternatives.filter(isVerifiedSameTrainAlternative);
   const checked = `${r.trainNumber} ${r.travelClass} ke ${r.candidateCount} station pairs check kiye.`;

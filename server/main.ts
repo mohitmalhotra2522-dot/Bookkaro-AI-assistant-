@@ -38,6 +38,7 @@ import { sameTrainAlternativesEnabledFromEnv } from './ai/tools/tool-registry';
 import { revalidateSameTrainAlternative, sameTrainSelectionKey } from './railway/same-train/same-train-service';
 import { discoverSameTrainForDisplay, applySameTrainSelection, findAnySameTrainResult } from './railway/same-train/same-train-session';
 import { sameTrainCardData } from './railway/same-train/same-train-view';
+import { buildTrainAlternatives } from './railway/alternatives/train-alternatives';
 
 // Initialize layers — LLM provider is pluggable (default: deterministic MockLLMProvider).
 // Prompt 21: LLM_PROVIDER=openai-compatible + LLM_API_KEY + LLM_MODEL (server env only) enables a real LLM;
@@ -261,6 +262,22 @@ server.post('/api/session/:id/same-train-alternative/discover', async (request, 
     { log: f => console.log(JSON.stringify(f)) });
   if (!out.ok || !out.result) return reply.send({ ok: false, code: out.code, ...(out.budget ? { budget: out.budget } : {}) });
   return reply.send({ ok: true, code: 'OK', card: sameTrainCardData(out.result, { stale: false }) });
+});
+
+/**
+ * P42-13 — inline train alternatives under a qualifying (shortage) card. READ-ONLY projection of the CURRENT search
+ * result set: no provider call, no CHECK, no LLM, no chat turn, no session mutation. Bound to searchResultsVersion +
+ * journey (stale → RESULTS_STALE). Metadata-only log.
+ */
+server.post('/api/session/:id/train-alternatives', async (request, reply) => {
+  const { id } = request.params as any;
+  if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
+  const t0 = Date.now();
+  const body = (request.body || {}) as any;
+  const out = buildTrainAlternatives(stateManager.getSession(id), { trainNumber: body.trainNumber, searchResultsVersion: body.searchResultsVersion });
+  console.log(JSON.stringify({ event: 'TRAIN_ALTERNATIVES', trainNumber: out.trainNumber, code: out.code, total: out.total,
+    searchResultsVersion: out.searchResultsVersion, latencyMs: Date.now() - t0 }));
+  return reply.send(out);
 });
 
 server.post('/api/session/:id/interrupt', async (request, reply) => {

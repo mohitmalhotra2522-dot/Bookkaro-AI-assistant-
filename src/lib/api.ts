@@ -277,3 +277,30 @@ export async function discoverSameTrainAlternative(sessionId: string, body: { tr
     return { ok: false, code: 'NETWORK' };
   }
 }
+
+/**
+ * P42-13 — inline train alternatives for one qualifying (shortage) card: a READ-ONLY projection of the current search
+ * result set (no provider call, no chat turn). Never throws; any failure → { ok: false } and the UI shows nothing.
+ */
+export interface TrainAlternativeClassView { code: string; status: string | null; available: boolean | null; source: 'CHECK' | 'PRESERVED_CHECK' | 'SEARCH_RESULT' | null }
+export interface TrainAlternativeView {
+  trainNumber: string; trainName: string; origin: string; destination: string; departure: string; arrival: string; duration: string;
+  searchPosition: number; classes: TrainAlternativeClassView[];
+}
+export interface TrainAlternativesResult {
+  ok: boolean; code: string; trainNumber?: string; alternatives: TrainAlternativeView[]; total: number;
+  searchResultsVersion: number | null; journeyVersion: number | null; evidenceKey?: string;
+}
+export async function fetchTrainAlternatives(sessionId: string, body: { trainNumber: string; searchResultsVersion: number }): Promise<TrainAlternativesResult> {
+  const none = (code: string): TrainAlternativesResult => ({ ok: false, code, alternatives: [], total: 0, searchResultsVersion: null, journeyVersion: null });
+  try {
+    const r = await fetch(`/api/session/${encodeURIComponent(sessionId)}/train-alternatives`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const j = await r.json().catch(() => null);
+    if (j && typeof j.code === 'string' && Array.isArray(j.alternatives)) return j as TrainAlternativesResult;
+    return none(r.status === 404 ? 'UNKNOWN_SESSION' : 'NETWORK');
+  } catch {
+    return none('NETWORK');
+  }
+}

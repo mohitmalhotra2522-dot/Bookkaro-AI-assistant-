@@ -174,6 +174,8 @@ export function statusKey(status: string): string {
 }
 
 const TIMEOUT_CODES = new Set(['PROVIDER_TIMEOUT', 'TIMEOUT', 'TOOL_TIMEOUT', 'ALTERNATIVE_SEARCH_TIMEOUT']);
+/** F2: the provider ANSWERED and the route is not there / not usable — the only route failures that are INVALID_TRAIN_ROUTE */
+const ROUTE_VERDICT_CODES: ReadonlySet<string> = new Set(['NOT_FOUND', 'TRAIN_NOT_FOUND', 'NO_RESULTS', 'PROVIDER_DATA_INVALID']);
 /** P42.9: same set as provider-fallback FALLBACK_ELIGIBLE_CODES (kept local — the engine stays free of registry imports). */
 export const SAME_TRAIN_FALLBACK_ELIGIBLE = new Set(['RATE_LIMITED', 'PROVIDER_UNAVAILABLE', 'TIMEOUT', 'TOOL_TIMEOUT', 'PROVIDER_TIMEOUT']);
 const normDate = (v: unknown) => String(v ?? '').slice(0, 10);
@@ -396,8 +398,16 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const rv: any = routeResp.value;
   if (!rv || rv.ok !== true) {
     const code = String(rv?.error?.code || '');
-    return { ok: false, code: TIMEOUT_CODES.has(code) ? E.SEARCH_TIMEOUT : E.INVALID_TRAIN_ROUTE,
-      errorClass: TIMEOUT_CODES.has(code) ? SameTrainErrorClass.TOOL_TIMEOUT : (code === 'RATE_LIMITED' || code === 'PROVIDER_UNAVAILABLE') ? SameTrainErrorClass.PROVIDER_UNAVAILABLE : SameTrainErrorClass.INVALID_TRAIN_ROUTE, message: `Train ${req.trainNumber} ka route ${routeProvider.label || routeProvider.id} se verify nahi ho paaya.` };
+    // F2: keep the real failure reason — a rate limit (provider 429 or the local pacer refusing before any request) or a
+    // provider outage is NOT a route verdict; INVALID_TRAIN_ROUTE only when the provider answered without a usable route
+    if (TIMEOUT_CODES.has(code)) return { ok: false, code: E.SEARCH_TIMEOUT, errorClass: SameTrainErrorClass.TOOL_TIMEOUT, message: `Train ${req.trainNumber} ka route ${routeProvider.label || routeProvider.id} se verify nahi ho paaya.` };
+    if (code === 'RATE_LIMITED' || code === 'PROVIDER_UNAVAILABLE') {
+      return { ok: false, code: code === 'RATE_LIMITED' ? E.RATE_LIMITED : E.PROVIDER_UNAVAILABLE, errorClass: SameTrainErrorClass.PROVIDER_UNAVAILABLE,
+        message: `${routeProvider.label || routeProvider.id} abhi busy / unavailable hai — train ${req.trainNumber} ka route nahi mil paaya.` };
+    }
+    if (ROUTE_VERDICT_CODES.has(code)) return { ok: false, code: E.INVALID_TRAIN_ROUTE, errorClass: SameTrainErrorClass.INVALID_TRAIN_ROUTE, message: `Train ${req.trainNumber} ka route ${routeProvider.label || routeProvider.id} se verify nahi ho paaya.` };
+    // any other fault (auth / not configured / unsupported / unknown) is a failed search — never a route verdict
+    return { ok: false, code: E.SEARCH_FAILED, errorClass: SameTrainErrorClass.PROVIDER_UNAVAILABLE, message: `Train ${req.trainNumber} ka route ${routeProvider.label || routeProvider.id} se nahi mil paaya.` };
   }
   const route = normalizeRoute(rv.data);
   if (!route.ok) return { ok: false, code: route.code, message: route.message, errorClass: SameTrainErrorClass.INVALID_TRAIN_ROUTE };

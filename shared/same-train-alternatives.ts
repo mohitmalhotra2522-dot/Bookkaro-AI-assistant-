@@ -31,6 +31,9 @@ export const SameTrainErrorCode = Object.freeze({
   INVALID_STATION_PAIR: 'INVALID_STATION_PAIR',
   SEARCH_FAILED: 'ALTERNATIVE_SEARCH_FAILED',
   SEARCH_TIMEOUT: 'ALTERNATIVE_SEARCH_TIMEOUT',
+  /** F2: the route / search could not be fetched because the provider (or the local pacer) refused — never a route verdict */
+  RATE_LIMITED: 'RATE_LIMITED',
+  PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   PROVIDER_DATA_CONFLICT: 'PROVIDER_DATA_CONFLICT',
   RESULT_STALE: 'ALTERNATIVE_RESULT_STALE',
   STALE_RESULT: 'STALE_ALTERNATIVE_RESULT',
@@ -43,6 +46,8 @@ export type SameTrainErrorCode = typeof SameTrainErrorCode[keyof typeof SameTrai
 
 /** Pinned user-facing line when every provider failed (spec). */
 export const SAME_TRAIN_ALL_FAILED_MESSAGE = 'Same train alternative abhi verify nahi ho paayi.';
+/** F2: provider busy / unavailable (rate limit, local pacer, outage) — the route itself was NOT judged invalid. */
+export const SAME_TRAIN_PROVIDER_BUSY_MESSAGE = 'Railway provider abhi busy hai, isliye same train alternative check nahi ho paaya. Thodi der baad dobara try karein.';
 
 export type CandidatePriority = 'P0' | 'P1' | 'P2' | 'P3';
 /** P0 requested pair · P1 upstream origin → requested destination · P2 requested origin → downstream destination · P3 both. */

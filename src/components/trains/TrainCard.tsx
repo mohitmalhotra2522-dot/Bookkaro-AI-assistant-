@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { SameTrainInline, needsSameTrainDiscovery } from './SameTrainInline';
+import { TrainAlternativesInline } from './TrainAlternativesInline';
 import type { NormalizedTrain, ClassOption } from '../../../server/railway/types/railway-types';
 import { IconAlert, IconCheck, IconChevronDown, IconClock, IconInfo } from '../icons/Icons';
 import { availabilityTone, formatClock, inr } from '../../lib/format';
@@ -108,6 +109,11 @@ export const TrainCard: React.FC<Props> = ({ train, isSelected, onSelectTrain, o
           travelClass={reqListed ? String(autoSameTrain.requestedClass).toUpperCase() : undefined}
           searchResultsVersion={autoSameTrain.searchResultsVersion} visible={visible.seen} disabled={disabled}
           onHandoff={autoSameTrain.onHandoff} onFallback={onSameTrain ? () => onSameTrain(train.trainNumber, reqListed ? String(autoSameTrain.requestedClass).toUpperCase() : undefined) : undefined} />
+      )}
+      {/* P42-13: other trains of the same search result set (search order, read-only) — Select uses the normal selection flow */}
+      {recovery && autoSameTrain && (
+        <TrainAlternativesInline key="alt" sessionId={autoSameTrain.sessionId} trainNumber={train.trainNumber}
+          searchResultsVersion={autoSameTrain.searchResultsVersion} visible={visible.seen} disabled={disabled} onSelectTrain={onSelectTrain} />
       )}
     </article>
   );
