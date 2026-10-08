@@ -33,6 +33,8 @@ import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { resolveStationToken } from '../../railway/resolvers/route-resolver';
 import { normalizePnrInput, pnrsInText } from '../../booking/post-booking/pnr-validator';
 import type { ToolGrounding } from '../../booking/post-booking/post-booking-service';
+import { namedResultRow } from '../tool-runtime/tool-argument-normalizer';
+import { retainedInfoAvailability } from '../response/availability-authority';
 
 export interface ValidatedToolCall {
   name: RegisteredToolName;
@@ -118,7 +120,7 @@ export class ToolCallValidator {
       case 'SEARCH_TRAINS': return this.validateSearch(call.callId, def, args, session);
       case 'GET_TRAIN_INFO': return this.validateTrainInfo(call.callId, def, args, session, ground, turn);
       case 'GET_TIMETABLE': return this.validateTimetable(call.callId, def, args, session, ground, turn);
-      case 'CHECK_AVAILABILITY': return this.validateAvailability(call.callId, def, args, session);
+      case 'CHECK_AVAILABILITY': return this.validateAvailability(call.callId, def, args, session, ground, turn);
       case 'GET_FARE': return this.validateFare(call.callId, def, args, session);
       case 'TRACK_TRAIN': return this.validateTrack(call.callId, def, args, session, ground);
       case 'CHECK_PNR': return this.validatePnr(call.callId, def, args, session, ground);
@@ -453,7 +455,7 @@ export class ToolCallValidator {
     return session.selectedTrain || null;
   }
 
-  private validateAvailability(callId: string, def: ToolDefinition, args: Record<string,any>, session: BookingSession) {
+  private validateAvailability(callId: string, def: ToolDefinition, args: Record<string,any>, session: BookingSession, g?: ToolGrounding, turn?: ToolTurnContext) {
     const sel: any = session.selectedTrain;
     const selNum = sel ? String(sel.number || sel.trainNumber) : null;
     const hasRef = !!args.trainRef && typeof args.trainRef === 'object';
@@ -476,6 +478,12 @@ export class ToolCallValidator {
     //    INVALID_ACTION_FOR_STATE. The result never becomes the booking selection (see the runtime commit).
     const info = this.resolveInformationTrain(args, session, argNum, hasRef, selNum);
     if (!info.ok) return info;
+    // CHECK_AVAILABILITY grounding fix: being a row of the current results is NOT a user reference — a train other than the
+    // selected one needs the user's own reference (see availabilityTrainGrounded); ungrounded → rejected before any provider call
+    if (info.trainNumber !== selNum && !this.availabilityTrainGrounded(info.trainNumber, args, hasRef, session, g, turn)) {
+      return { ok:false as const, error:{ code:'AUTHORITATIVE_DATA_REQUIRED' as any, message:'Availability ke liye train identify nahi hui.',
+        details: { missingField: 'TRAIN', reason: 'TRAIN_NOT_GROUNDED' } } };
+    }
     const t = info.train;
     const listed: string[] = ((t.availableClasses && t.availableClasses.length) ? t.availableClasses : (t.classes || []).map((c: any) => c?.code ?? c))
       .map((c: any) => String(c).toUpperCase()).filter(Boolean);
@@ -493,6 +501,34 @@ export class ToolCallValidator {
     if (info.resultDate && date !== info.resultDate) return { ok:false as const, error:{ code:'CONTEXT_CONFLICT' as const,
       message: `${info.trainNumber} ${info.resultDate} ki current list se hai — ${date} ke liye pehle us date ki search chahiye.` } };
     return { ok:true as const, v: { name: def.name, callId, arguments: { trainNumber: info.trainNumber, travelClass, date }, tool: def } };
+  }
+
+  /**
+   * CHECK_AVAILABILITY grounding fix — a non-selected train `n` (already resolved by TrainReferenceResolver against the CURRENT,
+   * non-stale result set) is grounded only by the user's own reference, never by merely being listed:
+   *   - the user typed the number in this turn (TRACK_TRAIN's own-words check);
+   *   - the user named the row in this turn (P42.12 `namedResultRow`: one distinctive name word → exactly one current row);
+   *   - an earlier (grounded) enquiry of this train in the CURRENT journey + result set — the P42-12 F3 evidence record
+   *     (`retainedInfoAvailability`: exact train / date / route / result set; any new search or date / route change drops
+   *     it) — so "abhi dobara check karo" / "aur 3A mein?" after "12497 SL availability" stays a fresh provider call;
+   *   - a trainRef other than TRAIN_NUMBER (the LLM's reading of "doosri wali" / "evening wali" / "ye wali" / "pichli wali" /
+   *     a train name — resolved deterministically by the backend; THIS / PREVIOUS only to a focus / previous train that is a
+   *     row of the current list) — only against a result set the user has already SEEN (not produced in this turn: a
+   *     position / time / demonstrative cannot refer to a list nobody has been shown yet).
+   * A plain trainNumber (or trainRef TRAIN_NUMBER) the LLM took from the list — or from an earlier focus — is the LLM's
+   * mapping, not the user's words (P42.12 [4]: "a position mapped to a number by the LLM is unverifiable") → false.
+   */
+  private availabilityTrainGrounded(n: string, args: Record<string, any>, hasRef: boolean, session: BookingSession, g?: ToolGrounding, turn?: ToolTurnContext): boolean {
+    const userText = g?.userText ?? turn?.userText ?? '';
+    if (userTypedTrain(userText, n)) return true;
+    if (namedResultRow(session, userText) === n) return true;
+    if (Object.values(retainedInfoAvailability(session)).some(r => String(r.trainNumber) === n)) return true;
+    const sr: any = session.searchResults;
+    const rs = resultSetOf(session);
+    const producedThisTurn = !!turn?.turnId && !!sr?.sourceTurnId && sr.sourceTurnId === turn.turnId;
+    const shownCurrent = !!rs && rs.current && !producedThisTurn;
+    if (!shownCurrent) return false;
+    return hasRef && String(args.trainRef?.kind) !== 'TRAIN_NUMBER';
   }
 
   /** Post-P42.10 F3: the train of an information availability check — selected train, or a unique current-result match. */

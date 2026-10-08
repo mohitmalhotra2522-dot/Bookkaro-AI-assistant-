@@ -64,11 +64,11 @@ describe('Post-P42.10 G3 (F3) — availability before explicit train selection',
 
   it('[2] "kaunsi train mein CC available hai?" before selection → Muse checks listed trains directly, no SELECT_TRAIN, grounded answer', async () => {
     const h = stack({ ...SEARCH_TURN,
-      'Kaunsi train mein CC available hai?': [{ calls: [AV({ trainNumber: '12014', travelClass: 'CC' }), AV({ trainNumber: '12497', travelClass: 'CC' })] },
+      '12014 aur 12497 mein se kisme CC available hai?': [{ calls: [AV({ trainNumber: '12014', travelClass: 'CC' }), AV({ trainNumber: '12497', travelClass: 'CC' })] },
         { content: '12014 mein CC available hai. 12497 mein CC RAC 4 hai.' }] });
     await h.say('Kal Amritsar se Delhi ki trains dikhao');
     const n0 = availSpy.mock.calls.length;
-    const r = await h.say('Kaunsi train mein CC available hai?');
+    const r = await h.say('12014 aur 12497 mein se kisme CC available hai?');
     expect(av(r)).toEqual([['SUCCEEDED', null], ['SUCCEEDED', null]]);
     expect(execsOf(r).some(x => x.tool === 'update_booking_session')).toBe(false);
     expect(availSpy.mock.calls.length - n0).toBe(2);
@@ -212,9 +212,9 @@ describe('Post-P42.10 G3 (F3) — availability before explicit train selection',
     const trains = [{ trainNumber: '12014', trainName: 'Amritsar Shatabdi Express', departure: '04:55', classes: [{ code: 'CC' }, { code: '2S' }], displayIndex: 1 },
       { trainNumber: '12497', trainName: 'Shan-e-Punjab Express', departure: '06:35', classes: [{ code: '3A' }, { code: 'SL' }], displayIndex: 2 }];
     const s: any = { origin: 'ASR', destination: 'NDLS', date: D1, searchResultsVersion: 1, searchResults: { trains, date: D1, origin: 'ASR', destination: 'NDLS' } };
-    expect(v.validate({ callId: 'a', name: 'CHECK_AVAILABILITY', arguments: { trainNumber: '12497', travelClass: 'SL' } } as any, s)).toMatchObject({ ok: true, v: { arguments: { trainNumber: '12497', travelClass: 'SL', date: D1 } } });
+    expect(v.validate({ callId: 'a', name: 'CHECK_AVAILABILITY', arguments: { trainNumber: '12497', travelClass: 'SL' } } as any, s, undefined, { userText: '12497 SL availability' })).toMatchObject({ ok: true, v: { arguments: { trainNumber: '12497', travelClass: 'SL', date: D1 } } });
     expect(v.validate({ callId: 'b', name: 'CHECK_AVAILABILITY', arguments: { trainRef: { kind: 'DISPLAY_INDEX', value: 2, searchResultsVersion: 0 }, travelClass: 'SL' } } as any, s)).toMatchObject({ ok: false, error: { code: 'INVALID_TRAIN_REFERENCE' } });   // stale version
-    expect(v.validate({ callId: 'c', name: 'CHECK_AVAILABILITY', arguments: { trainNumber: '12497', travelClass: 'SL', date: ist(3) } } as any, s)).toMatchObject({ ok: false, error: { code: 'CONTEXT_CONFLICT' } });          // other date than the list
+    expect(v.validate({ callId: 'c', name: 'CHECK_AVAILABILITY', arguments: { trainNumber: '12497', travelClass: 'SL', date: ist(3) } } as any, s, undefined, { userText: '12497 SL availability' })).toMatchObject({ ok: false, error: { code: 'CONTEXT_CONFLICT' } });          // other date than the list
     const stale = { ...s, date: ist(2) };                                                                                                                                   // list belongs to another journey date
     expect(v.validate({ callId: 'd', name: 'CHECK_AVAILABILITY', arguments: { trainNumber: '12497', travelClass: 'SL' } } as any, stale)).toMatchObject({ ok: false, error: { code: 'INVALID_ACTION_FOR_STATE' } });
     // GET_FARE keeps the selection contract (fare feeds the booking review)

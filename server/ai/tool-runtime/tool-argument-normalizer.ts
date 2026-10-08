@@ -168,7 +168,7 @@ const GENERIC_NAME_WORDS = new Set(['express', 'mail', 'superfast', 'special', '
  * distinctive name word the user said ("Vande Bharat wali", "Shan-e-Punjab ki"). Generic words and the journey's own
  * station names never identify a train; a word shared by several rows identifies none (→ null, the caller asks).
  */
-function namedResultRow(session: any, userText: string): string | null {
+export function namedResultRow(session: any, userText: string): string | null {
   const sr = session?.searchResults;
   if (!sr || !Array.isArray(sr.trains) || !userText) return null;
   const same = (a: unknown, b: unknown) => a === undefined || a === null || a === '' || b === undefined || b === null || b === ''

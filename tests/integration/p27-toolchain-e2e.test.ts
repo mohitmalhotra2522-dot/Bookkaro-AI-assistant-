@@ -272,7 +272,7 @@ describe('P27 G3 — general knowledge, mixed, corrections, failures, limits', (
     const plan: Record<string, any[]> = {
       'Kal Amritsar se Delhi jaana hai': [{ calls: [SEARCH('kal')] }, { content: 'Kal ke liye 3 trainein mili hain. Kaunsi chahiye?' }],
       '12497 3A': [{ calls: [U('SELECT_TRAIN', 'SELECT_TRAIN', { trainRef: { kind: 'TRAIN_NUMBER', value: '12497' }, classRaw: '3A', selectionPurpose: 'INFORMATION' })] }, { calls: [AV] }, { content: '12497 mein 3A available hai.' }],
-      'Kal nahi parso, usi train ki availability dobara check karo.': [
+      'Kal nahi parso, 12497 ki availability dobara check karo.': [
         { calls: [U('UPDATE_DATE', 'UPDATE_DATE', { dateRaw: 'parso', correctionTarget: 'date', correctionValueRaw: 'parso' })] },
         { calls: [AV] },                         // stale list → rejected on the OLD state
         { calls: [SEARCH('parso')] },            // fresh search for the new date
@@ -284,7 +284,7 @@ describe('P27 G3 — general knowledge, mixed, corrections, failures, limits', (
     const h = wire(sel.provider);
     await h.say('Kal Amritsar se Delhi jaana hai'); await h.say('12497 3A');
     const d0 = h.s().date; const n0 = { ...rail.n };
-    const r = await h.say('Kal nahi parso, usi train ki availability dobara check karo.');
+    const r = await h.say('Kal nahi parso, 12497 ki availability dobara check karo.');
     const reasons = chain(r).steps.map((x: any) => `${x.toolName}:${x.decisionReason}`);
     expect(reasons).not.toContain('CHECK_AVAILABILITY:REJECTED:INVALID_REPEATED_CALL');
     expect(reasons).toEqual(['CHECK_AVAILABILITY:REJECTED:INVALID_ACTION_FOR_STATE', 'SEARCH_TRAINS:LLM_TOOL_CALL', 'CHECK_AVAILABILITY:LLM_TOOL_CALL']);
