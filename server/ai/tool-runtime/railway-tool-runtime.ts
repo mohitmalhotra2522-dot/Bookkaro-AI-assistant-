@@ -26,7 +26,7 @@ import { sameTrainLimitsFromEnv } from '../../railway/same-train/same-train-engi
 /** P42: runtime timeout for the composite search = engine total budget + one provider call + 3 s margin. */
 function sameTrainToolTimeoutMs(): number { const l = sameTrainLimitsFromEnv(); return l.totalTimeoutMs + l.perCallTimeoutMs + 3000; }
 import { normalizeToolArguments } from './tool-argument-normalizer';
-import { normalizeToolErrorCode, statusForError, safeErrorMessage, SAFE_ERROR_MESSAGE } from './tool-error-normalizer';
+import { normalizeToolErrorCode, statusForError, safeErrorMessage, SAFE_ERROR_MESSAGE, userSafeToolError } from './tool-error-normalizer';
 import { syncJourneyVersion, journeyKeyOf } from './journey-version';
 import { maskPnr } from '../../booking/post-booking/pnr-validator';
 import { v4 as uuidv4 } from '../orchestrator/utils';
@@ -151,6 +151,8 @@ export class ToolTurn {
   readonly retryStats = { llmRetries: 0, repeatedFailed: 0 };
   /** Prompt 27: provider failures of VALIDATED calls this turn (same tool + validated args + journey) → bounded LLM retry. */
   private readonly failedSigs = new Map<string, { code: string; count: number }>();
+  /** Bug-fix pass (Bug 2): raw loop signatures of LLM calls that SUCCEEDED this turn (a verified result exists for them). */
+  private readonly okLoopSigs = new Set<string>();
   private parallelGroup = 0;
   readonly timeoutMs: number;
   readonly maxCalls: number;
@@ -503,6 +505,7 @@ export class ToolTurn {
         if (!p.ok) { h.onRejected(p); continue; }
         const x = executed[k++];
         byIndex.set(i, x);
+        if (h.fromLLM && x.success && !x.stale) this.okLoopSigs.add(this.loopSignature(p.tc));
         // Prompt 27: remember a provider failure of this validated call (bounded LLM retry, see prepare)
         if (h.fromLLM && p.failSig && !x.success && !x.stale) {
           const prev = this.failedSigs.get(p.failSig);
@@ -526,6 +529,14 @@ export class ToolTurn {
    * Per-turn budget + loop admission for an LLM-requested call (counted BEFORE caller de-duplication,
    * so an accidental repeat still advances the loop detector). Returns a rejection or null.
    */
+  private loopMessage(sig: string): string {
+    if (this.okLoopSigs.has(sig)) return SAFE_ERROR_MESSAGE.TOOL_LOOP_DETECTED;
+    const inv = this.invalidSigs.get(sig);
+    if (inv?.clarify) return inv.clarify;
+    if (inv) { const m = userSafeToolError(inv); if (m && !/\b(LLM|tool call|argument|Correct it|ask the user)\b/i.test(m)) return m; }
+    return SAFE_ERROR_MESSAGE.UNKNOWN;
+  }
+
   admit(tc: ToolCall): Extract<PreparedCall, { ok: false }> | null {
     this.llmCalls++;
     if (this.llmCalls > this.maxCalls) return this.reject(tc, this.newRecord(tc), 'TOOL_CALL_LIMIT_EXCEEDED', SAFE_ERROR_MESSAGE.TOOL_CALL_LIMIT_EXCEEDED, true) as any;
@@ -533,7 +544,9 @@ export class ToolTurn {
     const n = (this.sigCounts.get(sig) || 0) + 1;
     this.sigCounts.set(sig, n);
     // Prompt 25: a loop of INVALID calls ends with a clarification for the user (there is no verified result to keep)
-    if (n >= this.loopThreshold) return this.reject(tc, this.newRecord(tc), 'TOOL_LOOP_DETECTED', this.invalidSigs.get(sig)?.clarify || SAFE_ERROR_MESSAGE.TOOL_LOOP_DETECTED, true) as any;
+    // Bug-fix pass (Bug 2): "the verified result above is current" ONLY when this exact call really succeeded this turn —
+    // a loop of rejected / failed calls gets the clarification, the validator's user-facing reason or the honest UNKNOWN
+    if (n >= this.loopThreshold) return this.reject(tc, this.newRecord(tc), 'TOOL_LOOP_DETECTED', this.loopMessage(sig), true) as any;
     return null;
   }
 

@@ -160,7 +160,9 @@ export const UNVERIFIED_FACT_OWNERS: Readonly<Record<string, readonly Registered
   TIMING: ['GET_TIMETABLE', 'GET_TRAIN_INFO', 'SEARCH_TRAINS'],
   LIVE_STATUS: ['TRACK_TRAIN'],
   PNR_STATUS: ['CHECK_PNR'],
-  CANCELLATION: ['TRACK_TRAIN']
+  CANCELLATION: ['TRACK_TRAIN'],
+  // Bug-fix pass (Bug 3): runs between / stops at / station order / origin / terminus of a train
+  ROUTE: ['GET_TIMETABLE', 'GET_TRAIN_INFO']
 });
 
 /** Guard rejection code (e.g. `FARE:650`, `PUNCTUALITY_CLAIM`) → fact kind. Unknown codes → null. */
@@ -174,6 +176,7 @@ export function factKindOf(rejection: string): keyof typeof UNVERIFIED_FACT_OWNE
     case 'PUNCTUALITY_CLAIM': return 'LIVE_STATUS';
     case 'PNR': case 'PNR_STATUS_CLAIM': return 'PNR_STATUS';
     case 'CANCELLATION_CLAIM': return 'CANCELLATION';
+    case 'ROUTE_CLAIM': return 'ROUTE';
     default: return null;
   }
 }

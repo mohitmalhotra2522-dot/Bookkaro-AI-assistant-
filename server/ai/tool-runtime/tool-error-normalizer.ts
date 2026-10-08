@@ -73,3 +73,21 @@ export function safeErrorMessage(code: ToolErrorCode, raw?: string): string {
   if (!m || m.length > 280 || /\n\s+at\s|Error:|https?:\/\/|api[_-]?key|token|secret|\{".*"\}/i.test(m)) return SAFE_ERROR_MESSAGE[code];
   return m;
 }
+
+/**
+ * Bug-fix pass (Bug 1): the user-facing text of a rejected / failed tool call. Validation and runtime-guard errors carry
+ * an LLM-directed instruction in `message` ("Invalid argument … Correct it or ask the user.", "Identical … call was
+ * already rejected …") — that text is for the model only and never reaches the screen or TTS. The user gets the
+ * argument's fact-only clarification (details.clarify) or the code's short safe message. Every other error keeps its
+ * own (already user-facing, sanitized) message.
+ */
+const LLM_DIRECTED_ERRORS: ReadonlySet<string> = new Set(['INVALID_ARGUMENT', 'INVALID_REPEATED_CALL', 'REPEATED_FAILED_CALL']);
+export function userSafeToolError(err: { code?: string; message?: string; details?: any; clarify?: string } | null | undefined): string {
+  if (!err) return '';
+  const code = String(err.code || '');
+  if (LLM_DIRECTED_ERRORS.has(code)) {
+    const c = typeof err.details?.clarify === 'string' && err.details.clarify ? err.details.clarify : (typeof err.clarify === 'string' ? err.clarify : '');
+    return c || SAFE_ERROR_MESSAGE[code as ToolErrorCode];
+  }
+  return String(err.message || '');
+}

@@ -5,6 +5,7 @@
  */
 import type { BookingSession } from '@shared/entities';
 import { currentResults, type ResultTrain } from './train-reference-resolver';
+import { userSafeToolError } from '../tool-runtime/tool-error-normalizer';
 
 const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 export function humanDate(iso?: string): string {
@@ -75,11 +76,15 @@ export const LIVE_TOOLS: ReadonlySet<string> = new Set(['CHECK_PNR', 'TRACK_TRAI
  * results phrased strictly from provider data; rejected / failed calls use the validated error
  * message (INVALID_PNR, PNR_NOT_AVAILABLE, PNR_STATUS_UNAVAILABLE …). Never LLM wording.
  */
-export function liveToolMessage(steps: Array<{ status: string; result: { toolName: string; data?: any; error?: { code: string; message: string } } }>, mode: 'TEXT' | 'VOICE'): string {
+export function liveToolMessage(steps: Array<{ status: string; result: { toolName: string; data?: any; error?: { code: string; message: string; details?: any } } }>, mode: 'TEXT' | 'VOICE'): string {
   const out: string[] = [];
   for (const st of steps) {
     if (st.status === 'ok') { const f = factFromTool(st.result.toolName, st.result.data, mode); if (f) out.push(f); }
-    else if (st.result.error?.message && !out.includes(st.result.error.message)) out.push(st.result.error.message);
+    else {
+      // Bug-fix pass (Bug 1): validation / runtime-guard text is LLM-directed — the user gets the fact-only clarification
+      const m = userSafeToolError(st.result.error);
+      if (m && !out.includes(m)) out.push(m);
+    }
   }
   return out.join(' ');
 }

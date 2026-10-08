@@ -16,6 +16,7 @@
 import type { BookingSession } from '@shared/entities';
 import { isClassEnumeration, type AvailabilityEvidence } from './availability-authority';
 import { claimedDate } from './claim-dates';
+import { STATION_ALIASES } from '@shared/constants';
 
 export type ClaimType =
   | 'GENERAL_KNOWLEDGE' | 'RAILWAY_LIVE_FACT' | 'SESSION_FACT' | 'TOOL_DERIVED_FACT'
@@ -170,7 +171,10 @@ export function judgeTimes(t: string, idx: FactIndex, strict = false): TimeVerdi
   const mentioned = trainsIn(t, idx);
   const arrOnly = ARR_VERB.test(t) && !DEP_VERB.test(t);
   const depOnly = DEP_VERB.test(t) && !ARR_VERB.test(t);
-  const timetableish = strict || mentioned.length > 0 || TIMETABLE_HINT.test(t) || ARR_VERB.test(t) || DEP_VERB.test(t);
+  // Bug-fix pass (Bug 4): a clock time in a general explanation (no train, station, train movement or live context —
+  // e.g. when Tatkal booking opens) is general knowledge, even if the explanation says "train" generically
+  const generalCtx = !strict && !mentioned.length && isGeneralTimeContext(t, idx);
+  const timetableish = strict || mentioned.length > 0 || (!generalCtx && (TIMETABLE_HINT.test(t) || ARR_VERB.test(t) || DEP_VERB.test(t)));
   const all = new Set(idx.trains.flatMap(f => [f.dep, f.arr]).filter(Boolean) as string[]);
   for (const x of times) {
     if (mentioned.length) {
@@ -336,4 +340,32 @@ export function classifyClaim(t: string, idx: FactIndex, hits: { time?: TimeVerd
   if (OPINION_RE.test(t) && !EXPLAIN_RE.test(t)) return prov('OPINION_OR_EXPLANATION');
   if (general || isGeneralKnowledgeClaim(t, idx)) return prov('GENERAL_KNOWLEDGE');
   return prov('OPINION_OR_EXPLANATION');
+}
+
+// ---- Bug-fix pass (Bug 4): general clock times vs railway timing facts ----
+/** Specific train services (a named service is a specific-train claim, unlike the generic noun "train"). */
+const NAMED_SERVICE_RE = /\b(shatabdi|rajdhani|duronto|vande bharat|garib rath|humsafar|tejas|intercity|express|mail|superfast|passenger train|memu|demu|local)\b/i;
+/** A train MOVING at that time (departure / arrival / running) — the time is then a timetable or live fact. */
+const MOTION_RE = /\b(pahunch\w*|pahuch\w*|arriv\w*|reach\w*|aati hai|aayegi|aata hai|aayega|nikal\w*|chal(ti|ta|egi|ega|te|ti hain)\b|depart\w*|leav\w*|chhoot\w*|chhut\w*|chut(ti|ta|egi)\b|rawana|ruk(ti|ta|egi|ega)\b|halt\w*|stop(s|ped)?\b)/i;
+/** Live running context. */
+const LIVE_CTX_RE = /\b(platform|late|delay\w*|der se|eta|expected|running|live|abhi kahan)\b/i;
+/** Date nouns built on a movement word ("departure date", "journey date") name a DATE, not a train movement. */
+const DATE_NOUN_RE = /\b(departure|journey|boarding|travel|yatra|safar)\s+(date|din|tareekh|tarikh|tithi|se ek din|ke din)\b/gi;
+const stationWordRe = (() => {
+  const keys = Object.keys(STATION_ALIASES).filter(k => k.length >= 4).sort((a, b) => b.length - a.length).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return keys.length ? new RegExp(`\\b(${keys.join('|')})\\b`, 'i') : null;
+})();
+
+/**
+ * true when the clock times of sentence `t` belong to a GENERAL explanation ("Tatkal booking AC ke liye 10:00 baje khulti
+ * hai") rather than a railway timing fact. Never true when the sentence names a specific train (number, known name,
+ * named service, "is train"), a station, a train movement (departs / arrives / runs / halts) or a live-running context
+ * (platform / late / delay / ETA) — those timing claims stay protected by the timetable / live guards.
+ */
+export function isGeneralTimeContext(t: string, idx: FactIndex): boolean {
+  if (/\b\d{4,5}\b/.test(t) || trainsIn(t, idx).length) return false;
+  if (NAMED_SERVICE_RE.test(t) || LIVE_CTX_RE.test(t)) return false;
+  if (MOTION_RE.test(t.replace(DATE_NOUN_RE, ' '))) return false;
+  if (stationWordRe && stationWordRe.test(t)) return false;
+  return isGeneralKnowledgeClaim(t, idx);
 }

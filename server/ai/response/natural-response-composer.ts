@@ -573,9 +573,10 @@ export class NaturalResponseComposer {
       if (hits.classList) { const c = judgeClassList(t, idx); if (c) return c; }
       { const f = judgeFareScope(t, idx); if (f.reason) return f.reason; if (f.fact) hits.fare = f.fact; }
       // a train number the USER said, inside a negative statement ("14542 is list mein nahi hai"), is not a fact claim
-      let probe = NEGATION_RE.test(t) ? t.replace(/\b\d{5}\b/g, m => userTrainNums.has(m) && !knownTrainNums.has(m) ? 'woh train' : m) : t;
-      // times already judged as general knowledge (e.g. when Tatkal opens) are not timetable claims
-      for (const g of hits.time?.general || []) probe = probe.split(g).join('—');
+      const probe = NEGATION_RE.test(t) ? t.replace(/\b\d{5}\b/g, m => userTrainNums.has(m) && !knownTrainNums.has(m) ? 'woh train' : m) : t;
+      // Bug-fix pass (Bug 4): general clock times (e.g. when Tatkal opens) are exempted by the SAME rule inside the
+      // grounding validator (isGeneralTimeContext) that the screen reply and the fact-authority recovery use — no private
+      // masking here, so the spoken / displayed reply can never keep a time the strict guard rejects (or vice versa)
       const g = railwayResponseGrounding.validate(probe, { session: s, steps: i.steps, records: (i.records || []) as any, userText: i.userText });
       if (g.rejected.length) return `GROUNDING:${g.rejected[0]}`;
       // P42.9 (D2): LAST gate, in EVERY turn (a "general" turn never exempts a dated railway fact): a train count /

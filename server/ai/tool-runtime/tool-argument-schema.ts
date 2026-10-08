@@ -42,8 +42,13 @@ const CLARIFY: Record<string, string> = {
   passengersCount: 'Passengers ki sankhya 1 se 6 ke beech honi chahiye.',
   date: 'Journey date clear nahi hai.',
   origin: 'Origin station clear nahi hai.',
-  destination: 'Destination station clear nahi hai.'
+  destination: 'Destination station clear nahi hai.',
+  pnr: 'PNR sahi format mein nahi mila (10 digit ka number chahiye).'
 };
+
+/** A PNR sent as a JSON number is accepted only when the conversion is LOSSLESS: a safe integer of exactly 10 digits
+ *  (a number cannot carry a leading zero, so the digits are exactly the 10-digit PNR). Anything else is malformed. */
+const PNR_FORMAT = /^\d{10}$/;
 
 function fail(tool: string, issue: ArgumentIssue): SchemaCheck {
   return {
@@ -84,6 +89,7 @@ export function validateToolArgumentShape(tool: string, raw: Record<string, any>
     if (spec.type === 'string' && typeof v !== 'string') {
       // ids / codes may arrive as JSON numbers; anything else (objects, booleans) is malformed
       if (typeof v === 'number' && Number.isFinite(v) && k !== 'pnr') { args[k] = String(v); coerced.push(`${k}:number→string`); }
+      else if (k === 'pnr' && typeof v === 'number' && Number.isSafeInteger(v) && PNR_FORMAT.test(String(v))) { args[k] = String(v); coerced.push('pnr:number→string'); }
       else return fail(tool, { argument: k, expected: 'a string', received: k === 'pnr' ? `<${typeof v}>` : show(v) });
     }
     if (spec.type === 'number' && typeof v !== 'number') {
