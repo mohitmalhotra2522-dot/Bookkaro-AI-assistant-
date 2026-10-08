@@ -39,6 +39,8 @@ export const SameTrainErrorClass = Object.freeze({
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   INVALID_TOOL_RESULT: 'INVALID_TOOL_RESULT',
   INVALID_TRAIN_ROUTE: 'INVALID_TRAIN_ROUTE',
+  /** P42-13: the provider's route data does not contain / order the requested pair — a data limitation, not a railway fact */
+  ROUTE_DATA_UNVERIFIED: 'ROUTE_DATA_UNVERIFIED',
   STALE: 'STALE_SAME_TRAIN_ALTERNATIVE',
   BUDGET: 'TOOL_BUDGET_EXCEEDED'
 } as const);

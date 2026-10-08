@@ -23,6 +23,7 @@ import { providerToolCatalog } from '../../server/ai/tools/provider-tools';
 import { registerMockProviderConnectors, MOCK_CONNECTOR_CAPS, type MockProviderConnector } from '../../server/railway/providers/mock/mock-provider-connectors';
 import { todayInIndia } from '../../server/ai/providers/openai-compatible-llm';
 import { FakeOpenAI, type TurnView, type FakeReply } from '../helpers/fake-openai-server';
+import { SAME_TRAIN_ROUTE_DATA_UNVERIFIED_MESSAGE } from '../../shared/same-train-alternatives';
 
 const KEY = 'sk-live-P4213-FIX-SECRET-1313';
 const TOMORROW = (() => { const d = new Date(`${todayInIndia().date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + 1); return d.toISOString().slice(0, 10); })();
@@ -37,13 +38,15 @@ const ASK = '12414 ka same train alternative dikhao';
 
 let rc: MockProviderConnector, rr: MockProviderConnector, dispose: () => void;
 let routeFault: string | null = null;
+let routeData: any[] = ROUTE;
+let museAfterAlt = '';   // empty wording → backend fallback text
 function harness(state = new ConversationStateManager()) {
   const results: Record<string, any> = {};
   const fake = new FakeOpenAI((v: TurnView) => {
     if (v.user === Q) return v.step === 0 ? { calls: [SEARCH] } : { content: '12414 mein SL WL 1 hai.' };
     if (v.user === ASK) {
       const r = v.results.find(x => x.name === 'SEARCH_SAME_TRAIN_ALTERNATIVES'); if (r) results.alt = r.content;
-      return v.step === 0 ? { calls: [ALT_NO_CLASS] } as FakeReply : { content: '' };   // empty wording → backend fallback text
+      return v.step === 0 ? { calls: [ALT_NO_CLASS] } as FakeReply : { content: museAfterAlt };
     }
     return { content: 'Theek hai.' };
   });
@@ -65,9 +68,9 @@ beforeAll(() => {
 });
 afterAll(() => dispose());
 beforeEach(() => {
-  rc.reset(); rr.reset(); routeFault = null;
+  rc.reset(); rr.reset(); routeFault = null; routeData = ROUTE; museAfterAlt = '';
   for (const c of [rc, rr]) {
-    (c as any).getTimetable = async (req: any) => { c.calls.push(['timetable' as any, req]); return routeFault ? { ok: false, error: { code: routeFault, message: 'mock fault' } } : { ok: true, data: ROUTE, meta: { source: 'mock' } }; };
+    (c as any).getTimetable = async (req: any) => { c.calls.push(['timetable' as any, req]); return routeFault ? { ok: false, error: { code: routeFault, message: 'mock fault' } } : { ok: true, data: routeData, meta: { source: 'mock' } }; };
     (c as any).searchTrains = async (req: any) => { c.calls.push(['search', req]); return { ok: true, data: { journey: { origin: req.origin, destination: req.destination, date: req.date }, trains: [train('12414', ROW)], totalCount: 1 }, meta: { source: 'mock', providerId: c.mockProviderId } }; };
     (c as any).checkAvailability = async (req: any) => { c.calls.push(['availability', req]); return { ok: true, data: { trainNumber: req.trainNumber, travelClass: req.travelClass, date: req.date, status: req.origin === 'JUC' ? 'AVAILABLE-0004' : 'GNWL 5' }, meta: { source: 'mock' } }; };
   }
@@ -105,5 +108,25 @@ describe('P42-13 Part 1 — E2E (mock connectors, fake Muse)', () => {
     expect(JSON.stringify(h.results.alt || {})).toMatch(/RATE_LIMITED/);
     expect(JSON.stringify(h.results.alt || {})).not.toMatch(/INVALID_TRAIN_ROUTE/);
     expect(shown(r)).not.toMatch(/route verify nahi/i);
+  }, 30000);
+
+  it('[16] route data lacks ASR (observed 12498 shape): TEXT and VOICE never assert "ASR is route par nahi hai" — the truthful limitation is shown; no card, no RailRadar route', async () => {
+    routeData = ['DDL', 'RPJ', 'UMB', 'NDLS'].map(station => ({ station, stationName: station }));
+    museAfterAlt = 'Railway data ke according is train ka origin Dhandari Kalan DDL hai aur yeh NDLS tak jaati hai, ASR is route par nahi hai.';
+    const out: string[] = [];
+    for (const mode of ['TEXT', 'VOICE'] as const) {
+      const h = harness();
+      await h.say(Q, mode);
+      rc.calls.length = 0; rr.calls.length = 0;
+      const r = await h.say(ASK, mode);
+      expect(JSON.stringify(h.results.alt || {})).toMatch(/INVALID_STATION_PAIR/);              // deterministic code preserved
+      expect(shown(r)).not.toMatch(/ASR is route par nahi hai|route par nahi hai/i);
+      expect(shown(r)).toContain(SAME_TRAIN_ROUTE_DATA_UNVERIFIED_MESSAGE);
+      expect((r.cards || []).filter((c: any) => c.type === 'same_train_alternatives')).toEqual([]);   // nothing invented
+      expect(rr.calls.filter(c => c[0] === ('timetable' as any))).toEqual([]);                    // no RailRadar route
+      expect(rc.calls.filter(c => c[0] === 'availability')).toEqual([]);
+      out.push(String(r.responseMessage ?? ''));
+    }
+    expect(out[0]).toBe(out[1]);
   }, 30000);
 });

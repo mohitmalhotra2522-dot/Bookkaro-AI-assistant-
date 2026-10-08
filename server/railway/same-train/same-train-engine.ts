@@ -118,9 +118,13 @@ export function planCandidates(stations: RouteStation[], duplicates: Set<string>
   const d = String(input.destination || '').toUpperCase();
   const oi = stations.findIndex(s => s.code === o);
   const di = stations.findIndex(s => s.code === d);
-  if (oi < 0 || di < 0) return { ok: false, code: E.INVALID_STATION_PAIR, message: `${oi < 0 ? o : d} is train ke route par nahi mila.` };
+  // P42-13: the provider's route data may be incomplete — the message states what the DATA shows, never a railway fact
+  if (oi < 0 || di < 0) {
+    const missing = [oi < 0 ? o : '', di < 0 ? d : ''].filter(Boolean).join(', ');
+    return { ok: false, code: E.INVALID_STATION_PAIR, message: `Provider ke current route data mein ${missing} nahi mila — yeh route data adhoora ho sakta hai, isliye ${o} → ${d} ke liye same train alternative verify nahi ho paaya (iska matlab yeh nahi ki train ${missing} se nahi guzarti).` };
+  }
   if (duplicates.has(o) || duplicates.has(d)) return { ok: false, code: E.INVALID_TRAIN_ROUTE, message: 'Route mein station do baar aata hai — order verify nahi ho sakta.' };
-  if (oi >= di) return { ok: false, code: E.INVALID_STATION_PAIR, message: `${o} → ${d} is train ki direction mein nahi hai.` };
+  if (oi >= di) return { ok: false, code: E.INVALID_STATION_PAIR, message: `Provider ke current route data mein ${o} → ${d} is train ki direction mein nahi dikh raha, isliye yeh station pair verify nahi ho paaya.` };
   const terminal = stations.length - 1;
 
   // origin sweep: train origin … requested origin (inclusive of the requested origin = P0), bounded, never a duplicate station
@@ -412,7 +416,9 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const route = normalizeRoute(rv.data);
   if (!route.ok) return { ok: false, code: route.code, message: route.message, errorClass: SameTrainErrorClass.INVALID_TRAIN_ROUTE };
   const planned = planCandidates(route.stations, route.duplicates, req, L);
-  if (!planned.ok) return { ok: false, code: planned.code, message: planned.message };
+  // P42-13: INVALID_STATION_PAIR is kept as the deterministic code; its class marks it as a route-DATA limitation
+  // (distinct from INVALID_TRAIN_ROUTE, which stays a genuine unusable-route verdict)
+  if (!planned.ok) return { ok: false, code: planned.code, message: planned.message, ...(planned.code === E.INVALID_STATION_PAIR ? { errorClass: SameTrainErrorClass.ROUTE_DATA_UNVERIFIED } : {}) };
   const plan = planned.plan;
   const routeFetchedAt = new Date(now()).toISOString();
 

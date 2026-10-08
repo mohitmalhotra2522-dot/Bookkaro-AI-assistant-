@@ -47,6 +47,8 @@ export type SameTrainErrorCode = typeof SameTrainErrorCode[keyof typeof SameTrai
 /** Pinned user-facing line when every provider failed (spec). */
 export const SAME_TRAIN_ALL_FAILED_MESSAGE = 'Same train alternative abhi verify nahi ho paayi.';
 /** F2: provider busy / unavailable (rate limit, local pacer, outage) — the route itself was NOT judged invalid. */
+/** P42-13: the provider's route data could not verify the requested station pair — never "the station is not on the route". */
+export const SAME_TRAIN_ROUTE_DATA_UNVERIFIED_MESSAGE = 'Is train ka current route data is station pair ko verify nahi kar pa raha, isliye main is station pair ke liye same train alternative confirm nahi kar sakta.';
 export const SAME_TRAIN_PROVIDER_BUSY_MESSAGE = 'Railway provider abhi busy hai, isliye same train alternative check nahi ho paaya. Thodi der baad dobara try karein.';
 
 export type CandidatePriority = 'P0' | 'P1' | 'P2' | 'P3';
