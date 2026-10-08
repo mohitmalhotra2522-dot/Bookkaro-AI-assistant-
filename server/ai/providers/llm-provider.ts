@@ -1,3 +1,4 @@
+import type { FactAuthorityInput } from '../intelligence/fact-authority-recovery';
 import type { ToolResultIdentity } from '../tool-runtime/tool-result-identity';
 import type { AgentDecision } from '../decisions/agent-decision';
 import type { BookingSession } from '@shared/entities';
@@ -82,6 +83,11 @@ export interface LLMTurnInput {
    * after an answer without it, for a hard-eligible availability fact of this turn. Structured; Muse writes the reply.
    */
   safetyNet?: { origin: 'BACKEND_SAFETY_NET'; outcome: 'EXECUTED' | 'BFE_SKIPPED_TOOL_BUDGET'; instruction: string; results: Array<Record<string, unknown>>; skipped?: Array<Record<string, unknown>> };
+  /**
+   * General Agent Intelligence: the agent's previous draft (no tool used this turn) stated provider facts nothing
+   * supports. Structured kinds + owning capabilities; the agent decides again (tool, question, or general answer).
+   */
+  factAuthority?: FactAuthorityInput;
 }
 
 /** Prompt 23: the backend's validated outcome of one update_booking_session proposal (never raw user secrets). */

@@ -18,6 +18,7 @@ import type { AgentDecision } from '../decisions/agent-decision';
 import { providerToolCatalog, providerStatusOf } from '../tools/provider-tools';
 import { BOOKING_AGENT_SYSTEM_PROMPT, MULTI_TURN_CONTEXT_PROMPT, ACKNOWLEDGEMENT_PROMPT, VOICE_RESPONSE_STYLE_PROMPT, VOICE_BRIEF_PROMPT, nativeAgentSystemPrompt } from '../prompts/system-prompt';
 import { sameTrainAlternativesEnabledFromEnv } from '../tools/tool-registry';
+import { capabilityToolNote } from '../intelligence/capability-catalog';
 import type { AgentTranscriptStep } from './llm-provider';
 import { v4 as uuid } from '../orchestrator/utils';
 import { detectLanguageStyle } from '@shared/voice/language-style';
@@ -304,7 +305,8 @@ export function nativeToolDefs(input: Pick<LLMTurnInput, 'tools'>): any[] {
       props[k] = k === 'trainRef' ? { ...trainRef, description } : { type: p.type, description, ...(p.enum ? { enum: p.enum } : {}) };
       if (p.required && canonicalToolOf(t.name) === 'SEARCH_TRAINS') required.push(k);
     }
-    return { type: 'function', function: { name: t.name, description: t.description, parameters: { type: 'object', properties: props, required } } };
+    // General Agent Intelligence: the capability's intent definition + authority (generated from the catalog, never phrases)
+    return { type: 'function', function: { name: t.name, description: `${t.description}${capabilityToolNote(canonicalToolOf(t.name))}`, parameters: { type: 'object', properties: props, required } } };
   });
   const session = { type: 'function', function: { name: SESSION_UPDATE_TOOL,
     description: 'Propose a change to the booking session (select train/class, change route/date, passengers, remember a travel preference — preferredClassRaw / preferredTimeRaw, review, confirmation, new booking, cancel flow). The backend validates it and returns the outcome (applied / error); nothing is booked or paid. Nothing is stored without this call.',
@@ -415,6 +417,8 @@ export function buildNativeMessages(input: LLMTurnInput): any[] {
   // Prompt 27: the backend stopped the chain — a structured stop reason; the next message must be the answer
   // P42.5: the backend safety-net result (structured, labelled as backend-originated — never a fake assistant tool call)
   if (input.safetyNet) messages.push({ role: 'system', content: `BACKEND_SAFETY_NET ${clip(JSON.stringify({ origin: input.safetyNet.origin, outcome: input.safetyNet.outcome, results: input.safetyNet.results, ...(input.safetyNet.skipped ? { skipped: input.safetyNet.skipped } : {}) }), MAX_SAME_TRAIN_RESULT_CHARS)}\n${input.safetyNet.instruction}` });
+  // General Agent Intelligence: the previous draft stated unverified provider facts (structured kinds + owning capabilities)
+  if (input.factAuthority) messages.push({ role: 'system', content: `BACKEND_FACT_AUTHORITY ${JSON.stringify({ origin: input.factAuthority.origin, unverified: input.factAuthority.unverified })}\n${input.factAuthority.instruction}` });
   if (input.chainStop) messages.push({ role: 'system', content: `CHAIN_STOP ${JSON.stringify({ reason: input.chainStop.reason, code: input.chainStop.code })}: ${input.chainStop.instruction}` });
   return messages;
 }

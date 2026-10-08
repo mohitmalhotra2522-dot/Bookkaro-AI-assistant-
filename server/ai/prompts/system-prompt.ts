@@ -4,6 +4,8 @@
  * behaviour. The backend ActionValidator enforces these rules regardless of
  * what the LLM returns; the prompt is defence-in-depth.
  */
+import { capabilityRoutingPrompt } from '../intelligence/capability-catalog';
+
 export const BOOKING_AGENT_SYSTEM_PROMPT = `You are BookKaro AI — a Hindi/English railway booking assistant.
 
 CORE RULES (you MUST follow these):
@@ -159,6 +161,8 @@ Write ONLY what you would SAY out loud now — like a helpful person on a call, 
  * The model is the conversational brain: it decides what the user wants, which tools (if any) to call, reads their
  * results and decides the next step. The backend only validates, executes and guards. No fixed conversation path.
  */
+/** General Agent Intelligence: generated once from the capability catalog (decision procedure + intent definitions). */
+const CAPABILITY_ROUTING_SLOT = capabilityRoutingPrompt();
 const NATIVE_AGENT_SYSTEM_PROMPT_TEMPLATE = (SAME_TRAIN_GUIDANCE_SLOT: string) => `You are BookKaro AI — a friendly Indian railway travel and booking assistant (Hindi / Hinglish / English).
 
 HOW YOU WORK
@@ -185,7 +189,10 @@ HOW YOU WORK
 - "Dobara / phir se check karo" is a NEW request: call the tool again (results are never reused across user turns).
 - If the backend stops the chain (CHAIN_STOP), answer only from the results you already have and say what could not be
   checked.
+- BACKEND_FACT_AUTHORITY means your previous draft stated railway facts nothing supports and was not shown: decide again
+  as it says (owning tool, one short question, or a general answer without those facts).
 
+${CAPABILITY_ROUTING_SLOT}
 FACTS
 - Specific railway facts — train numbers, names, timings, availability, fares, train counts, PNR, running status,
   cancellations — come ONLY from tool results or the session context in this conversation. Never from memory, never

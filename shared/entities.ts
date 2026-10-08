@@ -410,6 +410,8 @@ export type BookingEventType =
   | 'TOOL_CALL_DEDUPLICATED'
   // Prompt 27: the backend stopped a multi-step chain (step budget / repeated-call guard)
   | 'TOOL_CHAIN_STOPPED'
+  // General Agent Intelligence: the agent's tool-less draft stated unverified provider facts → one structured retry
+  | 'FACT_AUTHORITY_RECOVERY'
   | 'STALE_RESULT_REJECTED'
   | 'CORRECTION_APPLIED'
   // ---- Prompt 9: booking preparation ----

@@ -37,6 +37,7 @@ import type { AgentDecision, OrchestratorError, TurnRecord } from '../decisions/
 import type { ToolCall, ToolDefinition } from '../tools/tool-registry';
 import { REGISTERED_TOOLS, sameTrainAlternativesEnabledFromEnv } from '../tools/tool-registry';
 import { providerToolCatalog } from '../tools/provider-tools';
+import { factAuthorityRecovery, type FactAuthorityInput } from '../intelligence/fact-authority-recovery';
 
 /** P37: the tool list the LLM sees — provider-level tools when connectors are registered, else the canonical set. */
 export function exposedTools(): ToolDefinition[] {
@@ -377,6 +378,10 @@ export class BoundToolRuntime {
     let safetyNetChecked = false;
     let safetyNet: BfeSafetyNetInput | undefined;
     let safetyNetDraft: string | null = null;
+    // General Agent Intelligence: at most one fact-authority recovery per turn
+    let factAuthorityChecked = false;
+    let factAuthority: FactAuthorityInput | undefined;
+    let factAuthorityDraft: string | null = null;
     this.bfeFacts = [];
     let llmLatencyMs = 0;
     let llmCalls = 0;
@@ -492,6 +497,8 @@ export class BoundToolRuntime {
       // Prompt 22: an LLM failure never hands the turn to a deterministic parser — the turn ends with the safe
       // LLM_UNAVAILABLE reply; results already verified in this turn (if any) are kept, nothing else changes.
       let decision: AgentDecision;
+      // General Agent Intelligence: the fact-authority message belongs to exactly ONE retry call (consumed here)
+      const faNow = factAuthority; factAuthority = undefined;
       llmCalls++;
       try {
       decision = (await this.llm.generateStructuredDecision({
@@ -505,7 +512,8 @@ export class BoundToolRuntime {
         context: H.buildContext?.(),
         currentTurnToolResults: [...turnResults],
         agentTranscript: transcript.map(st => ({ ...st, toolCalls: [...st.toolCalls], results: [...st.results] })),
-        ...(safetyNet ? { safetyNet } : {})
+        ...(safetyNet ? { safetyNet } : {}),
+        ...(faNow ? { factAuthority: faNow } : {})
       })).decision;
       } catch (e: any) {
         llmLatencyMs += Date.now() - t0;
@@ -513,9 +521,12 @@ export class BoundToolRuntime {
         // P42.5: Muse already answered this turn before the safety-net ran — its own answer stands (the verified
         // same-train cards are attached by the normal result path); nothing is fabricated
         if (safetyNet && safetyNetDraft !== null && !H.isStale?.()) return done(safetyNetDraft, 'final');
+        // General Agent Intelligence: the retry failed → the first draft goes through the unchanged guards (as before)
+        if (faNow && factAuthorityDraft !== null && !H.isStale?.()) return done(factAuthorityDraft, 'final');
         return done('', 'error', { code: 'LLM_UNAVAILABLE', message: LLM_UNAVAILABLE_MESSAGE, details: { reason: isLLMProviderError(e) ? e.code : 'LLM_ERROR', iteration: iter } } as any);
       }
       if (!decision || typeof decision !== 'object') {
+        if (faNow && factAuthorityDraft !== null && !H.isStale?.()) return done(factAuthorityDraft, 'final');
         return done('', 'error', { code: 'LLM_UNAVAILABLE', message: LLM_UNAVAILABLE_MESSAGE, details: { reason: 'LLM_BAD_RESPONSE', iteration: iter } } as any);
       }
       llmLatencyMs += Date.now() - t0;
@@ -567,6 +578,19 @@ export class BoundToolRuntime {
         // Prompt 23: a native agent that proposed a session update waits for its validated outcome → ask it again
         if (decision.continueAfterApply) continue;
         const msg = decision.finalMessage || decision.clarification || '';
+        // General Agent Intelligence — fact-authority recovery (NOT an intent router; reads only our own draft with the
+        // existing grounding validator): a native agent answered without any railway tool this turn and its draft states
+        // provider facts nothing supports → it is not shown; the agent decides once more (owning tool / one question /
+        // general answer). The next answer meets the same guards; there is no second recovery.
+        if (!factAuthorityChecked) {
+          factAuthorityChecked = true;
+          const fa = this.factAuthorityFor(msg, steps, userText, iter);
+          if (fa) {
+            factAuthority = fa; factAuthorityDraft = msg;
+            H.emit?.('FACT_AUTHORITY_RECOVERY', { kinds: fa.unverified.map(u => u.kind), capabilities: [...new Set(fa.unverified.flatMap(u => u.capabilities))], iteration: iter });
+            continue;
+          }
+        }
         // P42.5 — BFE safety-net (NOT an intent router): Muse answered without SEARCH_SAME_TRAIN_ALTERNATIVES although a
         // fresh availability fact of THIS turn is hard-eligible → the existing tool runs once through the same validator
         // → runtime → orchestrator → provider path, and Muse gets one more call to present it (Muse decides the wording).
@@ -911,6 +935,21 @@ export class BoundToolRuntime {
    * the existing validator → runtime → orchestrator → provider path (budget counted like any call); it never chooses,
    * ranks, selects or changes the session. Budget exhausted → Muse is told BFE_SKIPPED_TOOL_BUDGET (no fake results).
    */
+
+  /**
+   * General Agent Intelligence: structured recovery input for a tool-less native draft that states unverified provider
+   * facts, else undefined. Only for native agents (they word their own replies), only when no railway tool ran this turn,
+   * only with an iteration left, and never when the session holds booking records (post-booking answers keep their path).
+   */
+  private factAuthorityFor(draft: string, steps: ToolCallStep[], userText: string, iter: number): FactAuthorityInput | undefined {
+    if (!(this.llm as any).agentAuthoredReplies || steps.length > 0 || iter >= this.maxIterations - 1) return undefined;
+    if ((this.hooks.grounding?.(userText)?.bookings || []).length) return undefined;
+    const exposed = new Set(exposedTools().map(t => {
+      const r = providerToolCatalog.resolve(t.name);
+      return r && r.kind === 'PROVIDER_TOOL' ? String(r.canonical) : String(t.name);
+    }));
+    return factAuthorityRecovery(draft, { session: this.getSession(), steps: steps as any, userText, exposed }) || undefined;
+  }
   private async bfeSafetyNet(steps: ToolCallStep[], turnResults: TurnToolResultView[], localHistory: HistoryMsg[], iter: number, llmRoundLeft: boolean)
     : Promise<{ input?: BfeSafetyNetInput; stale?: boolean }> {
     const H = this.hooks;
