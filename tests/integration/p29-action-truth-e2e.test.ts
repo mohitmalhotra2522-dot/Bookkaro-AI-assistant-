@@ -136,13 +136,13 @@ describe('P29 G3 — search and date change: describe only what ran', () => {
   it('[C] "Parso wali mein 3A availability aur fare bhi check karo" → the LLM calls both; the claims are valid because those calls executed (parso, 12497, 3A)', async () => {
     const h = native({ ...START,
       'Kal nahi parso': [{ calls: [UPDATE_PARSO] }, { calls: [SRCH('parso')] }, { content: 'Parso ki fresh trains mil gayi hain. Availability aur fare bhi check karun?' }],
-      'Parso wali mein 3A availability aur fare bhi check karo.': [{ calls: [SEL('12497', '3A')] }, { calls: [CAV('12497', '3A'), CFARE('12497', '3A')] },
+      'Parso wali 12497 mein 3A availability aur fare bhi check karo.': [{ calls: [SEL('12497', '3A')] }, { calls: [CAV('12497', '3A'), CFARE('12497', '3A')] },
         { content: 'Parso 12497 ki 3A availability aur fare check kar liye. 3A mein seats available hain, fare ₹650 per passenger.' }] });
     await h.say('Kal Amritsar se Delhi jaana hai');
     const b = await h.say('Kal nahi parso');
     expect(b.voice.assistantText).toMatch(/check karun\?/);                 // an offer is not a claim — kept
     const n0 = { ...rail.n };
-    const r = await h.say('Parso wali mein 3A availability aur fare bhi check karo.');
+    const r = await h.say('Parso wali 12497 mein 3A availability aur fare bhi check karo.');
     expect(delta(n0)).toMatchObject({ avail: 1, fare: 1 });
     expect(rail.calls.filter(c => c[0] === 'avail').at(-1)).toEqual(['avail', '12497', '3A', PARSO]);
     expect(r.voice.assistantText).toMatch(/check kar liye/);
@@ -191,12 +191,12 @@ describe('P29 G3 — stale progress, entities, general knowledge', () => {
     const h = native({ ...START,
       '12497 3A availability': [{ calls: [SEL('12497', '3A')] }, { content: 'Ek second, 12497 ki 3A availability check karta hoon.', calls: [CAV('12497', '3A')] }, { content: '12497 mein 3A available hai.' }],
       // the LLM re-selects in-loop (its own choice), so its final text is what the user gets — and is judged
-      'Kal nahi parso': [{ calls: [UPDATE_PARSO] }, { calls: [SRCH('parso')] }, { calls: [SEL('12497', '3A')] },
+      'Kal nahi parso, 12497 3A hi': [{ calls: [UPDATE_PARSO] }, { calls: [SRCH('parso')] }, { calls: [SEL('12497', '3A')] },
         { content: 'Parso ki trains mil gayi hain. 12497 ki 3A availability check kar raha hoon. Kal ki availability check ho gayi thi.' }] });
     await h.say('Kal Amritsar se Delhi jaana hai');
     await h.say('12497 3A availability', 'VOICE');
     const n0 = { ...rail.n };
-    const r = await h.say('Kal nahi parso', 'VOICE');
+    const r = await h.say('Kal nahi parso, 12497 3A hi', 'VOICE');
     expect(delta(n0)).toEqual({ search: 1, avail: 0, fare: 0 });
     for (const t of shown(r)) { expect(t).not.toMatch(/availability check kar raha/i); expect(t).not.toMatch(/check ho gayi/i); }
     expect(r.voice.assistantText).toMatch(/Parso ki trains mil gayi hain/);

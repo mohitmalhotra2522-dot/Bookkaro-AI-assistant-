@@ -340,14 +340,14 @@ describe('P28 G2 — correction, date change, natural response', () => {
     const h = nativeStack({
       'Kal Amritsar se Delhi jaana hai': [{ calls: [SEARCH('kal')] }, { content: 'Kal ke liye 3 trainein mili hain.' }],
       '12497 3A availability aur fare': [{ calls: [SEL('12497', '3A')] }, { calls: [AV3, FR3] }, { content: '12497 mein 3A available hai, fare ₹650 per passenger.' }],
-      'Kal nahi parso': [{ calls: [U('UPDATE_DATE', 'UPDATE_DATE', { dateRaw: 'parso', correctionTarget: 'date', correctionValueRaw: 'parso' })] }, { calls: [SEARCH('parso')] },
+      'Kal nahi parso, 12497 3A hi': [{ calls: [U('UPDATE_DATE', 'UPDATE_DATE', { dateRaw: 'parso', correctionTarget: 'date', correctionValueRaw: 'parso' })] }, { calls: [SEARCH('parso')] },
         { calls: [SEL('12497', '3A')] }, { calls: [AV3, FR3] }, { content: 'Parso bhi 12497 mein 3A available hai, fare ₹650 per passenger.' }]
     });
     await h.say('Kal Amritsar se Delhi jaana hai'); await h.say('12497 3A availability aur fare');
     const n0 = { ...rail.n };
-    const r = await h.say('Kal nahi parso');
+    const r = await h.say('Kal nahi parso, 12497 3A hi');
     expect(delta(n0)).toEqual({ search: 1, avail: 1, fare: 1 });
-    const v = h.views.filter(x => x.user === 'Kal nahi parso');
+    const v = h.views.filter(x => x.user === 'Kal nahi parso, 12497 3A hi');
     const searchMsg = v[2].results.at(-1)!.content;
     expect(searchMsg).toMatchObject({ tool: 'SEARCH_TRAINS', entity: { date: PARSO }, followUp: { previousSelection: { trainNumber: '12497', travelClass: '3A' }, inFreshResults: true, classListed: true, selectionKept: false } });
     expect(rail.calls.filter(c => c[0] === 'avail').at(-1)).toEqual(['avail', '12497', '3A', PARSO]);

@@ -94,6 +94,8 @@ export interface ReferenceResolutionRecord {
   /** provenance of the result set the entity came from (P28 diagnostics convention: tool / toolResultId / turnId);
    *  null when the entity is not from the current result set */
   source: { tool: 'SEARCH_TRAINS'; toolResultId: string | null; turnId: string | null; resultSetVersion: number; date: string | null; route: string | null } | null;
+  /** Train-selection grounding outcome (SELECTION records): how the user's reference established the train, or why not. */
+  grounding?: string;
 }
 
 function resolutionTypeOf(ref: TrainReference): ResolutionType {

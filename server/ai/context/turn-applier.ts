@@ -47,6 +47,7 @@ import type { ContextPatch, RejectedPatch } from '@shared/conversation-context';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { TrainReferenceResolver, currentResults, type ResultTrain } from './train-reference-resolver';
 import { recordTrainReference, type ReferenceResolutionRecord } from './reference-context';
+import { selectionGrounding, TRAIN_NOT_GROUNDED_MESSAGE, STALE_RESULT_SET_MESSAGE } from './train-selection-grounding';
 import { ClassReferenceResolver } from './class-reference-resolver';
 import { passengerCollection, passengerLabel } from '../../booking/passenger-collection';
 import { derivePendingInteraction, questionFor } from './pending-interaction';
@@ -431,6 +432,19 @@ export class ContextualTurnApplier {
       const res = this.trainRefs.resolve(e.trainRef, S());
       (out.references ||= []).push(recordTrainReference(e.trainRef, res, S()));
       if (!res.ok) return fail(res.code, res.message, res.code === 'AMBIGUOUS_REFERENCE' ? { type: 'TRAIN_SELECTION_REQUIRED', data: { candidates: (res.candidates || []).map(c => c.trainNumber) } } : undefined);
+      // Train-selection grounding: a resolvable row is not yet the user's choice — the user's own reference must establish
+      // it (see train-selection-grounding). Rejected → nothing selected, no focus change, this decision's tools do not run.
+      const g = selectionGrounding(e.trainRef, res.train.trainNumber, S(), ctx.rawText);
+      if (!g.ok) {
+        const recs = out.references!;
+        recs[recs.length - 1] = { ...recs[recs.length - 1], status: g.reason === 'STALE_RESULT_SET' ? 'STALE' : 'INVALID', resolvedTrainNumber: null, displayIndex: null, grounding: g.reason };
+        ctx.rejectedPatches?.push({ field: 'selectedTrain', proposed: res.train.trainNumber, code: 'UNGROUNDED_VALUE', reason: `${g.reason}: ${e.trainRef.kind}` });
+        emit('CONTEXT_PATCH_REJECTED', { code: g.reason, fields: ['selectedTrain'] });
+        return g.reason === 'STALE_RESULT_SET'
+          ? fail('STALE_SEARCH_REFERENCE', STALE_RESULT_SET_MESSAGE, undefined, { missingField: 'TRAIN', reason: g.reason })
+          : fail('INVALID_TRAIN_REFERENCE', TRAIN_NOT_GROUNDED_MESSAGE, { type: 'TRAIN_SELECTION_REQUIRED', data: { reason: g.reason } } as any, { missingField: 'TRAIN', reason: g.reason });
+      }
+      out.references![out.references!.length - 1].grounding = g.via;
       const r = this.applyTrainSelection(sessionId, res.train, ctx, emit);
       out.notes.push(...r.notes);
       out.applied.push(...r.applied);

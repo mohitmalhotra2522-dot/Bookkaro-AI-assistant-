@@ -183,15 +183,15 @@ describe('P28 G3 — no cross-train / cross-class / cross-date facts', () => {
   it('[H] "kal nahi parso" → fresh search for parso, re-selection by the LLM (followUp is information only), fresh dependent checks for parso', async () => {
     const h = native({ ...START,
       '12497 3A availability aur fare': [{ calls: [SEL('12497', '3A')] }, { calls: [AV('12497', '3A'), FARE('12497', '3A')] }, { content: '12497 mein 3A available hai, fare ₹650 per passenger.' }],
-      'Kal nahi parso': [{ calls: [U('UPDATE_DATE', 'UPDATE_DATE', { dateRaw: 'parso', correctionTarget: 'date', correctionValueRaw: 'parso' })] }, { calls: [SEARCH('parso')] },
+      'Kal nahi parso, 12497 3A hi': [{ calls: [U('UPDATE_DATE', 'UPDATE_DATE', { dateRaw: 'parso', correctionTarget: 'date', correctionValueRaw: 'parso' })] }, { calls: [SEARCH('parso')] },
         { calls: [SEL('12497', '3A')] }, { calls: [AV('12497', '3A'), FARE('12497', '3A')] }, { content: 'Parso bhi 12497 mein 3A available hai, fare ₹650 per passenger.' }] });
     await h.say('Kal Amritsar se Delhi jaana hai'); await h.say('12497 3A availability aur fare');
     const n0 = { ...rail.n };
-    const r = await h.say('Kal nahi parso');
+    const r = await h.say('Kal nahi parso, 12497 3A hi');
     expect(delta(n0)).toMatchObject({ search: 1, avail: 1, fare: 1 });
     expect(rail.calls.slice(-3).map(c => c[0])).toEqual(expect.arrayContaining(['avail', 'fare']));
     expect(rail.calls.filter(c => c[0] === 'avail').at(-1)).toEqual(['avail', '12497', '3A', PARSO]);
-    const searchMsg = h.views.filter(v => v.user === 'Kal nahi parso')[2].results.at(-1)!.content;
+    const searchMsg = h.views.filter(v => v.user === 'Kal nahi parso, 12497 3A hi')[2].results.at(-1)!.content;
     expect(searchMsg.followUp).toMatchObject({ inFreshResults: true, classListed: true, selectionKept: false });
     expect(h.s()).toMatchObject({ date: PARSO, selectedClass: '3A' });
     expect(Object.values(h.s().availability || {}).every((a: any) => a.date === PARSO)).toBe(true);
