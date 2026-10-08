@@ -5,7 +5,7 @@
  * Test data only — fetch is stubbed, no network, no key.
  */
 import { describe, it, expect } from 'vitest';
-import { RailRadarProvider, classifyRailRadarError } from '../../server/railway/providers/live/railradar-provider';
+import { RailRadarProvider, classifyRailRadarError, RAILRADAR_CLASS_NOT_AVAILABLE_MESSAGE } from '../../server/railway/providers/live/railradar-provider';
 import { runSameTrainSearch, type SameTrainDeps, type ProviderRef } from '../../server/railway/same-train/same-train-engine';
 import { SAME_TRAIN_DEFAULT_LIMITS } from '../../shared/same-train-alternatives';
 
@@ -47,6 +47,23 @@ describe('RailRadar Phase 1 — error mapping', () => {
     // other 400 validation problems keep INVALID_REQUEST
     expect(await provider({ status: 400, body: { error: { code: 'VALIDATION', message: 'journeyDate must be YYYY-MM-DD' } } }).p.checkAvailability({ ...AVQ, travelClass: '3A' }))
       .toMatchObject({ ok: false, error: { code: 'INVALID_REQUEST' } });
+  });
+  it('[J2] invalid class: user-facing message is CLASS-unavailable, never the generic provider-unavailable line (code unchanged)', async () => {
+    const PROVIDER_DOWN = /provider abhi uplabdh nahi|provider (is )?unavailable|unavailable hai/i;
+    const av: any = await provider({ status: 404, body: INVALID_CLASS }).p.checkAvailability(AVQ);
+    expect(av).toMatchObject({ ok: false, error: { code: 'CLASS_NOT_AVAILABLE', httpStatus: 404, retryable: false } });
+    expect(av.error.message).toBe(RAILRADAR_CLASS_NOT_AVAILABLE_MESSAGE);
+    expect(av.error.message).toMatch(/class/i);
+    expect(av.error.message).not.toMatch(PROVIDER_DOWN);
+    // the pre-existing seats 404 → CLASS_NOT_AVAILABLE mapping gets the same (message-only) correction
+    const seats404: any = await provider({ status: 404, body: { error: { code: 'NOT_FOUND', message: 'No data' } } }).p.checkAvailability({ ...AVQ, travelClass: '3A' });
+    expect(seats404).toMatchObject({ ok: false, error: { code: 'CLASS_NOT_AVAILABLE', message: RAILRADAR_CLASS_NOT_AVAILABLE_MESSAGE } });
+    // other codes keep their existing messages (classification + taxonomy untouched)
+    const down: any = await provider({ status: 503, body: {} }).p.checkAvailability({ ...AVQ, travelClass: '3A' });
+    expect(down.error.code).toBe('PROVIDER_UNAVAILABLE');
+    expect(down.error.message).toBe('Railway provider abhi uplabdh nahi hai.');
+    const nf: any = await provider({ status: 404, body: TRAIN_NOT_FOUND }).p.getTimetable({ trainNumber: '99999' } as any);
+    expect(nf.error).toMatchObject({ code: 'NOT_FOUND', message: 'Provider ke paas is request ka koi record nahi mila.' });
   });
   it('[K] real outage → PROVIDER_UNAVAILABLE (5xx / 503 PRS maintenance / network error) — even if the body mentions a train', async () => {
     for (const status of [500, 502, 503]) {

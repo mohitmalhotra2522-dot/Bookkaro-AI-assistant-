@@ -29,6 +29,9 @@ export function classifyRailRadarError(httpStatus: number | null | undefined, js
   return null;
 }
 
+/** User-facing text for RailRadar CLASS_NOT_AVAILABLE (provider-data relative; never "provider unavailable"). */
+export const RAILRADAR_CLASS_NOT_AVAILABLE_MESSAGE = 'Yeh class is train ke is route ke liye railway provider ke data mein uplabdh nahi hai.';
+
 const envelope = (json: any): any => {
   if (!json || json.success !== true || json.data === undefined || json.data === null) throw new MalformedProviderData('envelope');
   return json.data;
@@ -49,8 +52,11 @@ export class RailRadarProvider extends LiveRailwayProvider {
   /** RailRadar Phase 1: body-meaning classification first (see classifyRailRadarError), then the shared status mapping. */
   protected httpFail<T>(r: Extract<LiveHttpResult, { ok: false }>, t0: number, notFoundCode: RailwayErrorCode = 'NOT_FOUND'): RailwayResponse<T> {
     const domain = r.localThrottle ? null : classifyRailRadarError(r.error.httpStatus, r.json);
-    if (domain) return this.fail<T>(domain, t0, { httpStatus: r.error.httpStatus, retryable: false });
-    return super.httpFail<T>(r, t0, notFoundCode);
+    const out = domain ? this.fail<T>(domain, t0, { httpStatus: r.error.httpStatus, retryable: false }) : super.httpFail<T>(r, t0, notFoundCode);
+    // message only — the code / classification above is unchanged; the shared default text for an unmapped code is the
+    // generic provider-unavailable line, which must never describe a class that is simply not offered
+    if (!out.ok && out.error?.code === 'CLASS_NOT_AVAILABLE') return { ...out, error: { ...out.error, message: RAILRADAR_CLASS_NOT_AVAILABLE_MESSAGE } };
+    return out;
   }
 
   searchTrains(req: SearchTrainsRequest): Promise<RailwayResponse<TrainSearchResultData>> {
