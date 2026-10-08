@@ -40,7 +40,14 @@ class SpyRailway extends MockRailwayProvider {
     if (m === 'malformed') return { ok: true, data: { weird: true }, meta: pmeta() };
     return null;
   }
-  async searchTrains(r: any): Promise<any> { await this.b('search', r); return this.fault('search') ?? super.searchTrains(r); }
+  /** P42.12: search rows WITHOUT per-class availability (live RailCore shape: availability null, UNKNOWN). */
+  listedOnly = false;
+  async searchTrains(r: any): Promise<any> {
+    await this.b('search', r);
+    const res: any = this.fault('search') ?? await super.searchTrains(r);
+    if (this.listedOnly && res?.data?.trains) res.data.trains = res.data.trains.map((t: any) => ({ ...t, classes: (t.classes || []).map((c: any) => ({ ...c, availability: null, availabilityStatus: 'UNKNOWN' })) }));
+    return res;
+  }
   async checkAvailability(r: any): Promise<any> { await this.b('avail', r); return this.fault('avail') ?? super.checkAvailability(r); }
   async getFare(r: any): Promise<any> { await this.b('fare', r); return this.fault('fare') ?? super.getFare(r); }
 }
@@ -159,7 +166,7 @@ const realFetch = globalThis.fetch.bind(globalThis);
 let fetchSpy: any, handoffSpy: any;
 beforeEach(() => {
   railwayRegistry.setActive('p34-spy');
-  rail.n = {}; rail.mode = {}; rail.calls = []; rail.gate = null;
+  rail.n = {}; rail.mode = {}; rail.calls = []; rail.gate = null; rail.listedOnly = false;
   fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(((u: any, i: any) => {
     if (String(u).startsWith('http://127.0.0.1:')) return realFetch(u, i);
     throw new Error(`NO NETWORK IN TESTS: ${u}`);
@@ -288,6 +295,7 @@ describe('P34 G3 — mode switching, references, corrections (G–M)', () => {
 describe('P34 G3 — fact authority + truthful failures (N–T)', () => {
   it('[N/O] no spoken railway fact without its tool: no-tool and wrong-train availability claims are removed; GET_FARE facts may be spoken', async () => {
     const h = native();
+    rail.listedOnly = true;                                                       // P42.12: rows list classes only (no availability value)
     await h.say(START);
     const a = await h.say('12497 3A mein seat hai?', 'VOICE');
     expect(shown(a)).not.toMatch(/999|available hai/);

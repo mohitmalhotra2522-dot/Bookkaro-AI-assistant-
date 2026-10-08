@@ -23,7 +23,14 @@ const ENV = { LLM_PROVIDER: 'openai-compatible', LLM_API_KEY: KEY, LLM_MODEL: 'f
 class SpyRailway extends MockRailwayProvider {
   n: Record<string, number> = {};
   private b(k: string) { this.n[k] = (this.n[k] || 0) + 1; }
-  async searchTrains(r: any): Promise<any> { this.b('search'); return super.searchTrains(r); }
+  /** P42.12: search rows WITHOUT per-class availability (live RailCore shape: availability null, UNKNOWN). */
+  listedOnly = false;
+  async searchTrains(r: any): Promise<any> {
+    this.b('search');
+    const res: any = await super.searchTrains(r);
+    if (this.listedOnly && res?.data?.trains) res.data.trains = res.data.trains.map((t: any) => ({ ...t, classes: (t.classes || []).map((c: any) => ({ ...c, availability: null, availabilityStatus: 'UNKNOWN' })) }));
+    return res;
+  }
   async getTrainInfo(r: any): Promise<any> { this.b('info'); return super.getTrainInfo(r); }
   async checkAvailability(r: any): Promise<any> { this.b('avail'); return super.checkAvailability(r); }
   async getFare(r: any): Promise<any> { this.b('fare'); return super.getFare(r); }
@@ -83,6 +90,7 @@ const envBefore = process.env.REAL_IRCTC_ENABLED;
 beforeEach(() => {
   railwayRegistry.setActive('p25-spy');
   rail.n = {};
+  rail.listedOnly = false;
   outputs.length = 0;
   fetchSpy = vi.spyOn(globalThis, 'fetch' as any).mockImplementation(((url: any, init: any) => {
     if (String(url).startsWith('http://127.0.0.1:')) return realFetch(url, init);
@@ -135,6 +143,7 @@ describe('P25 G3 — facts survive when they are true (A–E)', () => {
   });
 
   it('[C] class list CC / 2S survives as a class list (not availability); markdown list leaves no orphan numbering', async () => {
+    rail.listedOnly = true;                                                   // P42.12: rows list classes only (no availability value)
     const h = mk({ 'Kal Amritsar se Delhi ki trains dikhao': [{ calls: [SEARCH] }, { content: 'Kal ke liye 3 trainein mili hain:\n1. 12014 Amritsar Shatabdi – 04:55 se 10:50, CC aur 2S available.\n2. 12497 Shan-e-Punjab – 06:35 se 13:50, fare ₹9999.\n3. 18238 – 19:35 par nikalti hai.\nKaunsi chahiye?' }] });
     const r = await h.say('Kal Amritsar se Delhi ki trains dikhao');
     expect(execs(r)).toEqual([['SEARCH_TRAINS', 'SUCCEEDED', null]]);
