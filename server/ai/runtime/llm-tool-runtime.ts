@@ -1,3 +1,4 @@
+import { groundSearchFilterArgs } from '../context/search-filter-grounding';
 import { groundPassengerProposals } from '../context/passenger-proposal-grounding';
 import { countMentioned } from '../conversation/grounding';
 import { getWebResearchService } from '../../research/web-research-service';
@@ -328,7 +329,19 @@ export class BoundToolRuntime {
       requestId: hooks.requestId,
       get userText() { return ctx.userText; },
       getSession: () => self.getSession(),
-      validate: (tc: ToolCall, s: BookingSession) => self.validator.validate(tc, s, self.hooks.grounding?.(ctx.userText)) as any,
+      validate: (tc: ToolCall, s: BookingSession) => {
+        const r: any = self.validator.validate(tc, s, self.hooks.grounding?.(ctx.userText));
+        // P-3 follow-up: SEARCH_TRAINS class / time filters only when the CURRENT user turn asks for them (same principle
+        // as the passenger count) — a saved preference in Muse's context is never copied into a plain search.
+        if (r?.ok && r.v?.tool?.name === 'SEARCH_TRAINS') {
+          const g = groundSearchFilterArgs(r.v.arguments || {}, ctx.userText);
+          if (g.stripped.length) {
+            self.hooks.emit?.('CONTEXT_PATCH_REJECTED', { code: 'SEARCH_FILTER_NOT_GROUNDED', fields: g.stripped, source: 'TOOL_ARGUMENTS' });
+            return { ...r, v: { ...r.v, arguments: g.args } };
+          }
+        }
+        return r;
+      },
       allowedTools: () => self.allowedTools,
       isStale: () => !!self.hooks.isStale?.(),
       forceFresh: !!hooks.forceFresh,
