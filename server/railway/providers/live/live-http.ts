@@ -20,7 +20,8 @@ export type FetchLike = (url: string, init: { method: 'GET'; headers: Record<str
 export interface LiveHttpError { code: RailwayErrorCode; message: string; retryable: boolean; httpStatus: number | null }
 export type LiveHttpResult =
   | { ok: true; httpStatus: number; json: any; latencyMs: number; rate?: RateHeaders }
-  | { ok: false; error: LiveHttpError; json?: any; latencyMs: number; rate?: RateHeaders; /** P42.9: refused by the local pacer — no provider request was made */ localThrottle?: true };
+  | { ok: false; error: LiveHttpError; json?: any; latencyMs: number; rate?: RateHeaders; /** P42.9: refused by the local pacer — no provider request was made */ localThrottle?: true;
+    /** 2026-10-09: refused by the LOCAL monthly quota estimate (RailKit) — no provider request was made */ localQuota?: true };
 
 export interface LiveGetOptions {
   timeoutMs: number;

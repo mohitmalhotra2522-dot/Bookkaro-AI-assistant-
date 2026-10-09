@@ -15,6 +15,7 @@ import type {
 import { liveGet, liveError, type FetchLike, type LiveHttpResult } from './live-http';
 import { rateLimiterFor, currentRateWait, pacingApplies, consumeHeldSlot } from './provider-rate-limiter';
 import { providerSupports, type LiveProviderId, type RailwayCapability } from './provider-capabilities';
+import type { MonthlyRequestQuota } from './monthly-quota';
 
 export interface LiveProviderConfig {
   apiKey?: string;
@@ -51,20 +52,33 @@ export abstract class LiveRailwayProvider implements RailwayProvider {
     return { source: this.source, providerId: this.providerId, requestTimestamp: new Date(t0).toISOString(), responseTimestamp: now,
       latencyMs: Date.now() - t0, cache: 'disabled', ...(freshness ? { freshness } : {}) };
   }
-  protected fail<T>(code: RailwayErrorCode, t0: number, extra: { httpStatus?: number | null; retryable?: boolean; message?: string; localThrottle?: boolean } = {}): RailwayResponse<T> {
+  protected fail<T>(code: RailwayErrorCode, t0: number, extra: { httpStatus?: number | null; retryable?: boolean; message?: string; localThrottle?: boolean; localQuota?: boolean } = {}): RailwayResponse<T> {
     const e = liveError(code, extra.httpStatus ?? null, extra.retryable);
-    const rl = code === 'RATE_LIMITED' && extra.localThrottle !== undefined ? { rateLimit: { local: extra.localThrottle } } : {};
+    const rl = code === 'RATE_LIMITED' && extra.localThrottle !== undefined
+      ? { rateLimit: { local: extra.localThrottle, ...(extra.localQuota ? { reason: 'LOCAL_MONTHLY_QUOTA' as const } : {}) } } : {};
     return { ok: false, error: { code, message: extra.message || e.message, retryable: e.retryable, httpStatus: e.httpStatus }, meta: { ...this.meta(t0), ...rl } };
   }
   protected httpFail<T>(r: Extract<LiveHttpResult, { ok: false }>, t0: number, notFoundCode: RailwayErrorCode = 'NOT_FOUND'): RailwayResponse<T> {
     const code = r.error.code === 'NOT_FOUND' ? notFoundCode : r.error.code;
-    return this.fail<T>(code, t0, { httpStatus: r.error.httpStatus, retryable: r.error.retryable, ...(code === 'RATE_LIMITED' ? { localThrottle: !!r.localThrottle } : {}) });
+    return this.fail<T>(code, t0, { httpStatus: r.error.httpStatus, retryable: r.error.retryable, ...(code === 'RATE_LIMITED' ? { localThrottle: !!r.localThrottle, ...(r.localQuota ? { localQuota: true } : {}) } : {}) });
   }
   protected get(path: string, query: Record<string, string | undefined> = {}, isNotFound?: (status: number, json: any) => boolean): Promise<LiveHttpResult> {
     const qs = Object.entries(query).filter(([, v]) => v !== undefined && v !== '').map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`).join('&');
     const url = `${this.cfg.baseUrl.replace(/\/+$/, '')}${path}${qs ? `?${qs}` : ''}`;
-    return this.paced(() => liveGet(url, this.authHeaders(), { timeoutMs: this.cfg.timeoutMs, fetchImpl: this.cfg.fetchImpl, isNotFound }));
+    const send = () => liveGet(url, this.authHeaders(), { timeoutMs: this.cfg.timeoutMs, fetchImpl: this.cfg.fetchImpl, isNotFound });
+    const quota = this.monthlyQuota();
+    if (!quota) return this.paced(send);
+    // 2026-10-09: reserve BEFORE the pacer / dispatch; count exactly when the HTTP request is sent; release if never sent
+    const res = quota.reserve();
+    if (!res.ok) {
+      try { console.warn(JSON.stringify({ event: 'provider_local_monthly_quota', provider: this.providerId, month: res.month, used: res.used, effectiveLimit: res.effectiveLimit, source: 'LOCAL_ESTIMATE' })); } catch { /* never throws */ }
+      return Promise.resolve({ ok: false, error: { ...liveError('RATE_LIMITED', null, false) }, latencyMs: 0, localThrottle: true, localQuota: true });
+    }
+    return this.paced(() => { quota.commit(res); return send(); }).finally(() => quota.release(res));
   }
+
+  /** 2026-10-09: local monthly request accounting (RailKit only); null = none. */
+  protected monthlyQuota(): MonthlyRequestQuota | null { return null; }
 
   /**
    * P42.9: every provider request goes through the per-provider pacer (shared by all callers). No slot within the wait

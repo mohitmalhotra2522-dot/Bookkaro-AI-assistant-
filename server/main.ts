@@ -23,6 +23,7 @@ import { bookingExecutionView } from './booking/provider/booking-provider-execut
 import { ConversationTurnEngine } from './ai/turn-engine/conversation-turn-engine';
 import { sanitizeTranscriptInfo, VoiceTranscriptRejectedError } from '@shared/voice/transcript';
 import { liveProviderStatus } from './railway/providers/live/live-config';
+import { railKitMonthlyQuota } from './railway/providers/live/monthly-quota';
 import { webResearchStatus } from './research/web-research-service';
 import { createServerSTT, createServerTTS, voiceProviderStatus } from './voice/live/openai-compatible-voice';
 import { registerVoiceRoutes } from './voice/live/voice-routes';
@@ -512,6 +513,9 @@ server.get('/api/health', async (_, reply) => {
     bookingProvider: bookingProviderView(),
     // Prompt 35: provider chain + per-provider configured flag (NEVER key values) and WEB_EXTERNAL gate
     railwayProviders: liveProviderStatus(),
+    // 2026-10-09: RailKit monthly requests — LOCAL ESTIMATE of this process only, NOT authoritative (no quota headers)
+    railwayProviderQuota: liveProviderStatus().some(p => p.provider === 'RAILKIT' && p.configured && (p.priority || p.availabilityPriority))
+      ? { railkit: railKitMonthlyQuota()?.snapshot() ?? { source: 'LOCAL_ESTIMATE', enabled: false } } : {},
     webResearch: webResearchStatus(),
     voice: voiceProviderStatus(process.env, batchStt),
     // P42: Same Train Alternative tool exposed to the LLM (feature flag only)
@@ -531,6 +535,7 @@ console.log(`Active LLM provider: ${llmSelection.info.providerId}${llmSelection.
 if (llmSelection.info.fallback) console.log(`LLM fallback model: ${llmSelection.info.fallback.model} (used only when the primary times out / errors; cooldown ${Math.round(llmSelection.info.fallback.cooldownMs / 1000)}s)`);
 console.log(`Booking provider: ${bookingProviderView().effective} (available=${bookingProviderView().capabilities.available}, health=${bookingProviderView().capabilities.health})`);
 console.log(`Railway provider chain (RAILWAY_PROVIDER=live): ${liveProviderStatus().filter(p => p.priority).sort((a, b) => a.priority! - b.priority!).map(p => `${p.provider}${p.configured ? '' : '(no key)'}`).join(' → ')}`);
+if (liveProviderStatus().some(p => p.availabilityPriority)) console.log(`Railway availability/fare chain (RAILWAY_AVAILABILITY_PROVIDERS): ${liveProviderStatus().filter(p => p.availabilityPriority).sort((a, b) => a.availabilityPriority! - b.availabilityPriority!).map(p => `${p.provider}${p.configured ? '' : '(no key)'}`).join(' → ')}`);
 console.log(`Voice STT (batch): elevenlabs/${batchStt.model} — ${batchStt.configured() ? 'configured' : 'not configured (browser speech fallback)'} · language=${batchStt.languageMode} · keyterms=${batchStt.keytermSet}`);
 console.log(`Same Train Alternative (P42): ${sameTrainAlternativesEnabledFromEnv() ? 'enabled (LLM-chosen tool)' : 'disabled (SAME_TRAIN_ALTERNATIVES_ENABLED not set)'}`);
 console.log(`Booking execution: ${executionCapability().effectiveExecutor} (${executionCapability().reason}) — real booking is NOT possible in this build`);

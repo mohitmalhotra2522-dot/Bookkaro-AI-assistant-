@@ -54,7 +54,7 @@ export interface RailwayMeta {
   /** P42.9 (additive): why the backend fell back (primary's error code: RATE_LIMITED / TIMEOUT / PROVIDER_UNAVAILABLE). */
   fallbackReason?: string;
   /** P42.9 (additive): RATE_LIMITED produced by the local pacer (no provider request spent) vs by the provider (429). */
-  rateLimit?: { local: boolean };
+  rateLimit?: { local: boolean; /** 2026-10-09: local monthly request estimate reached (no provider request made) */ reason?: 'LOCAL_MONTHLY_QUOTA' };
 }
 
 /** Prompt 35 — one provider attempt inside a failover chain (observability; never contains keys or raw bodies). */

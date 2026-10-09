@@ -11,6 +11,7 @@ import type {
 } from '../../types/railway-types';
 import { LiveRailwayProvider, need, MalformedProviderData } from './live-provider-base';
 import { str, num, hhmm, toDMY, canonicalAvailability } from './live-http';
+import { railKitMonthlyQuota } from './monthly-quota';
 
 const envelope = (json: any): any => {
   if (!json || json.success !== true || json.data === undefined || json.data === null) throw new MalformedProviderData('envelope');
@@ -47,6 +48,8 @@ export class RailKitProvider extends LiveRailwayProvider {
   readonly providerId = 'railkit' as const;
   readonly label = 'RailKit (live)';
   protected authHeaders() { return { 'x-api-key': String(this.cfg.apiKey || '') }; }
+  /** 2026-10-09: LOCAL monthly estimate of the Advance plan's 10,000 requests (not authoritative — no quota headers). */
+  protected monthlyQuota() { return railKitMonthlyQuota(); }
 
   searchTrains(req: SearchTrainsRequest): Promise<RailwayResponse<TrainSearchResultData>> {
     return this.run('SEARCH_TRAINS', async t0 => {
