@@ -101,3 +101,25 @@ export function stationCodesNamedInText(text: string): Set<string> {
   for (const m of raw.matchAll(/\b[A-Z][A-Z0-9]{2,5}\b/g)) if (c.byCode.has(m[0])) out.add(m[0]);
   return out;
 }
+
+/**
+ * Station names the user's OWN words contain that several stations share ("katra" → KEA / MK / SVDK): shown candidates
+ * (≤ 6) + every code sharing / containing the name (for membership checks). Word-bounded, names of ≥ 4 letters;
+ * `skip` = names an existing dictionary already decides. Used only to check an LLM-proposed code that is not grounded.
+ */
+export function ambiguousStationNamesInText(text: string, skip: (name: string) => boolean = () => false)
+  : Array<{ name: string; candidates: ReadonlyArray<{ code: string; name: string }>; allCodes: ReadonlySet<string> }> {
+  const c = load();
+  const t = ` ${String(text || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+  const out: Array<{ name: string; candidates: ReadonlyArray<{ code: string; name: string }>; allCodes: ReadonlySet<string> }> = [];
+  if (!t.trim()) return out;
+  for (const key of c.byName.keys()) {
+    if (key.length < 4 || !t.includes(` ${key} `) || skip(key)) continue;
+    const m = byName(key);
+    if (m?.kind !== 'AMBIGUOUS') continue;
+    const re = new RegExp(`(^| )${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}( |$)`);
+    const all = new Set<string>([...(c.byName.get(key) || []), ...c.names.filter(n => !n.infra && re.test(n.norm)).map(n => n.code)]);
+    out.push({ name: key, candidates: m.candidates, allCodes: all });
+  }
+  return out;
+}

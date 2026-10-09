@@ -71,4 +71,38 @@ describe('station catalog', () => {
     expect(c.message).toMatch(/Shri Mata Vaishno Devi Katra \(SVDK\)/);
     expect(c.details.candidates.map((x: any) => x.code)).toEqual(expect.arrayContaining(['KEA', 'SVDK']));
   });
+  it('[C10] LLM code contradicting the station the user TYPED in full → corrected to the typed station (live: "KTR" for SVDK)', () => {
+    const s: any = { origin: null, destination: null };
+    const a: any = normalizeToolArguments('SEARCH_TRAINS', { origin: 'LDH', destination: 'KTR', date: '2026-10-20' }, s, 'Ludhiana se Shri Mata Vaishno Devi Katra 20 October ki trains dikhao');
+    expect(a.ok).toBe(true);
+    expect(a.arguments.destination).toBe('SVDK');
+    expect(a.corrections.join(' ')).toMatch(/destination: KTR → SVDK \(user named the station\)/);
+  });
+  it('[C11] shared name typed ("Katra") + a code outside its stations → AMBIGUOUS_STATION with the real candidates', () => {
+    const s: any = { origin: null, destination: null };
+    const a: any = normalizeToolArguments('SEARCH_TRAINS', { origin: 'LDH', destination: 'KTR', date: '2026-10-20' }, s, 'Katra jaana hai Ludhiana se 20 October');
+    expect(a.ok).toBe(false);
+    expect(a.code).toBe('AMBIGUOUS_STATION');
+    expect(a.details.candidates.map((x: any) => x.code)).toEqual(expect.arrayContaining(['KEA', 'MK', 'SVDK']));
+    // a code among the real Katra stations is the LLM's semantic pick → kept
+    const b: any = normalizeToolArguments('SEARCH_TRAINS', { origin: 'LDH', destination: 'SVDK', date: '2026-10-20' }, s, 'Katra jaana hai Ludhiana se 20 October');
+    expect(b.ok).toBe(true);
+    expect(b.arguments.destination).toBe('SVDK');
+  });
+  it('[C12] LLM semantic mappings without a typed official name stay untouched (Jammu → JAT, Bombay → BCT, Delhi se Mumbai)', () => {
+    const s: any = { origin: null, destination: null };
+    const cases: Array<[string, string, string]> = [['LDH', 'JAT', 'Ludhiana se Jammu 20 October'], ['LDH', 'BCT', 'Ludhiana se Bombay 20 October'],
+      ['NDLS', 'CSMT', 'Delhi se Mumbai 20 October'], ['DEC', 'SVDK', 'Delhi Cantt se Katra 20 October'], ['LDH', 'NDLS', 'ludhiana se delhi kal']];
+    for (const [o, d, text] of cases) {
+      const r: any = normalizeToolArguments('SEARCH_TRAINS', { origin: o, destination: d, date: '2026-10-20' }, s, text);
+      expect(r.ok, text).toBe(true);
+      expect([r.arguments.origin, r.arguments.destination], text).toEqual([o, d]);
+    }
+  });
+  it('[C13] other scripts keep the LLM semantic authority (no Latin name scan)', () => {
+    const s: any = { origin: null, destination: null };
+    const r: any = normalizeToolArguments('SEARCH_TRAINS', { origin: 'LDH', destination: 'SVDK', date: '2026-10-20' }, s, 'लुधियाना से कटरा 20 अक्टूबर');
+    expect(r.ok).toBe(true);
+    expect(r.arguments.destination).toBe('SVDK');
+  });
 });

@@ -14,6 +14,9 @@
 import type { BookingSession } from '@shared/entities';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { resolveStationToken, resolveStationArgumentDetailed, stationCandidatesText } from '../../railway/resolvers/route-resolver';
+import { stationCodesMentioned } from '../conversation/grounding';
+import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
+import { stationCodesNamedInText, ambiguousStationNamesInText } from '../../railway/resolvers/station-catalog';
 import { extractDateExpression } from '../conversation/grounding';
 import { validateToolArgumentShape } from './tool-argument-schema';
 
@@ -80,6 +83,33 @@ function resolveStationArg(v: any): { code: string } | null {
   return r ? { code: r.code } : null;
 }
 
+function groundStationArgs(args: Record<string, any>, session: BookingSession, userText: string, corrections: string[]): ArgRejection | null {
+  const text = String(userText || '');
+  if (!text.trim() || /[^\u0000-\u024F\s]/.test(text)) return null;        // other scripts: LLM semantic authority
+  const lower = ` ${text.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+  const mentioned = stationCodesMentioned(text);
+  const grounded = (code: string, f: 'origin' | 'destination') =>
+    mentioned.has(code) || lower.includes(` ${code.toLowerCase()} `) || (session as any)[f] === code;
+  for (const f of ['origin', 'destination'] as const) {
+    const code = typeof args[f] === 'string' ? args[f] : '';
+    if (!code || grounded(code, f)) continue;
+    const other = f === 'origin' ? args.destination : args.origin;
+    const free = [...stationCodesNamedInText(text)].filter(c => c !== other);
+    if (free.length === 1) {
+      corrections.push(`${f}: ${code} → ${free[0]} (user named the station)`);
+      args[f] = free[0];
+      continue;
+    }
+    const amb = ambiguousStationNamesInText(text, n => !!STATION_ALIASES[n] || !!AMBIGUOUS_STATION_NAMES[n])
+      .find(a => !a.allCodes.has(code) && !(other && a.allCodes.has(other)));
+    if (amb) {
+      return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${amb.name}" naam ke ek se zyada stations hain — ${stationCandidatesText(amb.candidates)}. Kaunsa station?`,
+        details: { field: f, missingField: 'STATION', candidates: amb.candidates.map(c => ({ code: c.code, name: c.name })) } } as any;
+    }
+  }
+  return null;
+}
+
 /** 2026-10-09: an unresolved station value → the honest reason (several stations share the name → list them). */
 function stationArgRejection(v: any, f: string): ArgRejection {
   const d = typeof v === 'string' ? resolveStationArgumentDetailed(v.trim()) : { kind: 'UNKNOWN' as const };
@@ -135,6 +165,12 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
       if (r.code !== args[f]) corrections.push(`${f}: "${args[f]}" → ${r.code} (RouteResolver)`);
       args[f] = r.code;
     }
+    // 2026-10-09: an LLM station code that contradicts the station the user's OWN (Latin-script) words name is never
+    // used silently — full official name typed → that station; a shared name typed ("Katra") with a code outside its
+    // stations → ask with the real candidates. A code the user's words ground (alias / name / code) is untouched, and
+    // without a typed station name the LLM's semantic mapping stays (Jammu → JAT, Bombay → CSMT …).
+    const g = groundStationArgs(args, session, userText, corrections);
+    if (g) return g;
   }
 
   // ---- Quotes: optional journey args must match the authoritative session journey (Parts 9, 37) ----
