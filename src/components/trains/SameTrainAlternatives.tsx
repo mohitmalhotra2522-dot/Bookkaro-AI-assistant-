@@ -4,6 +4,7 @@ import { IconAlert, IconArrowRight, IconCheck, IconInfo, IconRefresh, IconRoute,
 import { formatClock, formatDate, inr } from '../../lib/format';
 import { selectSameTrainAlternative } from '../../lib/api';
 import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
+import { PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL, isFreshnessUnverifiable } from '@shared/provider-freshness';
 import { SameTrainOptionList } from './SameTrainInline';
 
 /**
@@ -173,6 +174,7 @@ const OptionCard: React.FC<{ d: any; a: Alt; highlight?: boolean; hideUse?: bool
           : <div className="bk-sta-row bk-sta-row--warn"><span className="bk-sta-k">VERIFY</span><span className="bk-sta-v">{reqD} par utarne ka rule verify nahi hua</span></div>}
         {a.extensionStations > 0 && <div className="bk-sta-note">Ticket {reqD} se {a.extensionStations} station{a.extensionStations > 1 ? 's' : ''} aage tak</div>}
       </div>
+      {isFreshnessUnverifiable(a.freshness) && <div className="bk-sta-note" data-testid="same-train-freshness-unverified">{PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL}</div>}
       {a.seatSufficiency === 'INSUFFICIENT' && <div className="bk-sta-note bk-sta-note--bad">Sirf {a.availableSeatCount} seat{a.availableSeatCount === 1 ? '' : 's'} — {pax} passengers ke liye kaafi nahi</div>}
       {a.seatSufficiency === 'COUNT_NOT_PROVIDED' && <div className="bk-sta-note">Provider ne seat count nahi diya — {pax} passengers ke liye pakka nahi</div>}
       {a.conflict && <div className="bk-sta-note bk-sta-note--bad">{a.conflict.values.map((v: any) => `${v.provider}: ${v.status}`).join(' · ')} — koi value pakki nahi maani gayi</div>}

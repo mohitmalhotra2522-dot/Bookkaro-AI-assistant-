@@ -13,6 +13,7 @@ import { providerToolCatalog, inProviderScope } from '../../ai/tools/provider-to
 import { railwayRegistry } from '../registry/provider-registry';
 import { RailwayToolService } from '../tools/railway-tool-service';
 import { WEB_PROVIDER_IDS } from '../providers/web/web-providers';
+import { PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL, isFreshnessUnverifiable } from '@shared/provider-freshness';
 import { fallbackChainFor, fallbackProviderFor, isFallbackEligible, primaryProviderId, providerFallbackEnabled } from '../providers/provider-fallback';
 import { withRateWait } from '../providers/live/provider-rate-limiter';
 import { sameTrainSchedulerFor } from './same-train-scheduler';
@@ -287,6 +288,7 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
   }));
   const ok = answers.filter(a => a.ev.outcome === 'SUCCESS' && a.ev.availability);
   const fresh = ok.map(a => ({ provider: a.p.id, status: a.ev.availability!.status, category: a.ev.availability!.category, fetchedAt: new Date().toISOString(),
+    ...(a.ev.availability!.freshness ? { freshness: a.ev.availability!.freshness } : {}),
     ...((a as any).fallbackFrom ? { fallbackUsed: true, fallbackReason: (a as any).fallbackReason, primaryProvider: (a as any).fallbackFrom } : {}) }));
   const view = { alternativeId: alt.alternativeId, trainNumber: alt.trainNumber, travelClass: alt.travelClass, date: alt.date, ticketOrigin: alt.ticketOrigin, ticketDestination: alt.ticketDestination,
     boardingStation: alt.boardingStation, alightingStation: alt.alightingStation, boardingRuleStatus: alt.boardingRuleStatus, alightingRuleStatus: alt.alightingRuleStatus, verificationStatus: alt.verificationStatus };
@@ -308,7 +310,10 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
   const handoffText = `Same Train Alternative chuna (${alt.alternativeId}): train ${alt.trainNumber}, ${alt.travelClass}, ${alt.date}, ticket ${alt.ticketOrigin} se ${alt.ticketDestination}. Isi ticket journey ke saath booking aage badhao.`;
   // 2026-10-09: an earlier-station ticket of the same run is dated for that station's departure — say so explicitly
   const shifted = alt.ticketDateShiftDays && alt.journeyDate ? ` Ticket date ${alt.date} hai — train ${alt.ticketOrigin} se isi run par chalti hai (${alt.requestedOrigin} ka date ${alt.journeyDate}).` : '';
-  return { ok: true, message: `Fresh check: ${ok[0].ev.availability!.status}.`, alternative: view, fresh, handoffText: handoffText + shifted };
+  // 2026-10-09: an undated provider answer is a NEW provider answer, but its data age is unknown → say so (never "fresh data")
+  const undated = ok.some(a => isFreshnessUnverifiable(a.ev.availability!.freshness));
+  return { ok: true, message: `Fresh check: ${ok[0].ev.availability!.status}.${undated ? ` ${PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL}` : ''}`, alternative: view, fresh,
+    handoffText: handoffText + shifted, ...(undated ? { freshnessUnverified: true } : {}) };
 }
 
 /**

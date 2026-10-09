@@ -16,6 +16,7 @@
  * status is UNVERIFIED and the UI / reply must say so.
  */
 
+import type { ProviderFreshness } from './provider-freshness';
 import type { NormalizedAvailabilityState, SeatSufficiency, ShortageTriggerReason, SeatShortageAssessment, SameTrainOutcome } from './same-train-shortage';
 import { isVerifiedSameTrainAlternative } from './same-train-shortage';
 
@@ -98,7 +99,8 @@ export interface ProviderEvidence {
   date: string;
   passengersCount: number;
   /** provider answer (only when outcome SUCCESS) */
-  availability?: { category: AvailabilityCategory; status: string; statusText?: string; quota?: string; providerUpdatedAt?: string };
+  availability?: { category: AvailabilityCategory; status: string; statusText?: string; quota?: string; providerUpdatedAt?: string;
+    /** 2026-10-09: freshness from the provider's own timestamp only (TIMESTAMP_UNAVAILABLE when it sent none) */ freshness?: ProviderFreshness };
   /** 2026-10-09: outcome FAILED / STALE_PROVIDER_DATA — the provider's old snapshot (kept for honesty, never a verdict) */
   staleSnapshot?: { status: string; providerUpdatedAt: string; ageMinutes: number };
   fare?: { total?: number; perPassenger?: number; currency?: string; fetchedAt: string };
@@ -200,6 +202,9 @@ export interface SameTrainAlternative {
   /** Phase 2: the provider answered only with a too-old snapshot (no verdict). Shown with ⚠ + age; Select = fresh re-check
    *  first (the re-check decides; a stale snapshot is never applied) */
   staleSnapshot?: { provider: string; status: string; category: AvailabilityCategory; providerUpdatedAt: string; ageMinutes: number };
+  /** 2026-10-09: freshness of the provider answer behind `availability` (separate from verificationStatus, which is the
+   *  train / class / date / pair + rule binding). TIMESTAMP_UNAVAILABLE → shown with PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL. */
+  freshness?: ProviderFreshness;
   /** Phase 2 "better WL": a FRESH waitlist from an earlier station lower than the train's direct waitlist (still WL — not confirmed) */
   betterWaitlist?: { waitlist: number; directWaitlist: number };
   fetchedAt: string;

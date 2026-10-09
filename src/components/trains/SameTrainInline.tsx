@@ -3,6 +3,7 @@ import { IconRoute } from '../icons/Icons';
 import { inr } from '../../lib/format';
 import { discoverSameTrainAlternative, selectSameTrainAlternative, type SameTrainDiscoverResult, type SameTrainDiscoverProgress } from '../../lib/api';
 import { evaluateSeatShortage, isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
+import { PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL, isFreshnessUnverifiable } from '@shared/provider-freshness';
 
 /**
  * P42.7 — ONE automatic same-train recovery section per train card ("Same train · pehle station se board karo"):
@@ -483,6 +484,7 @@ const PairOption: React.FC<{ d: any; g: RecoveryPairGroup; sessionId: string | n
       {staleOptionLine(a) && <div className="bk-sti__note bk-sti__stale" data-testid="same-train-stale-option">{staleOptionLine(a)}</div>}
       {!ruleOk(a.boardingRuleStatus) && <div className="bk-sti__note">{reqO} se boarding ka rule verify nahi hua</div>}
       {!ruleOk(a.alightingRuleStatus) && <div className="bk-sti__note">{reqD} par utarne ka rule verify nahi hua</div>}
+      {isFreshnessUnverifiable(a.freshness) && <div className="bk-sti__note bk-sti__stale" data-testid="same-train-freshness-unverified">{PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL}</div>}
       {confirm && (
         <div className="bk-sta-confirm" role="group" aria-label="Confirm unverified rule">
           <p>Boarding / deboarding rule verify nahi hua. Ticket stations ({stn(a.ticketOrigin, a.ticketOriginName)} → {stn(a.ticketDestination, a.ticketDestinationName)}, {a.travelClass}) se hi travel maan kar aage badhein?</p>

@@ -7,6 +7,7 @@
  *   - sameTrainCardData: the screen payload (evidence summarised, never raw).
  *   - sameTrainFallbackText: deterministic one-liner used ONLY when no grounded Muse wording survives.
  */
+import { PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL, isFreshnessUnverifiable } from '@shared/provider-freshness';
 import type { SameTrainAlternative, SameTrainAlternativesResult } from '@shared/same-train-alternatives';
 import { BETTER_WAITLIST_LABEL, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_PROVIDER_BUSY_MESSAGE, SAME_TRAIN_ROUTE_DATA_UNVERIFIED_MESSAGE, toSameTrainRecoveryResults } from '@shared/same-train-alternatives';
 import type { SameTrainStaleCheck } from '@shared/same-train-alternatives';
@@ -16,6 +17,10 @@ const evidenceLine = (a: SameTrainAlternative) => a.evidence
   .map(e => `${e.provider}:${e.outcome === 'SUCCESS' ? e.availability?.status : e.outcome === 'REJECTED' ? `REJECTED(${e.rejectedReason})` : e.outcome}`)
   .join(', ');
 
+/** The LLM adapter clips a same-train tool result at 14,000 chars (MAX_SAME_TRAIN_RESULT_CHARS); envelope keys need room. */
+const SAME_TRAIN_TRANSCRIPT_BUDGET = 14000;
+const SAME_TRAIN_VIEW_ENVELOPE_RESERVE = 300;
+
 export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string, unknown> {
   // compact per-option entries (the transcript has a size budget): station names once at the top, rule status only
   // when a rule matters, travel stations only when they differ from the ticket (VERIFIED rule)
@@ -23,6 +28,10 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
   // P42.7 all-class matrix: requested-class entries in full; another class only when VERIFIED for the party (AVL / RAC) —
   // the rest of the other-class matrix is a count (transcript budget). Each entry names its own class when it differs.
   let otherClassNotVerified = 0;
+  // MOCK results are development data (isMock) — never live / fresh — so the freshness note is for live answers only
+  const answered = r.isMock ? [] : r.alternatives.filter(a => a.freshness);
+  const undatedCount = answered.filter(a => isFreshnessUnverifiable(a.freshness)).length;
+  const mixedFreshness = undatedCount > 0 && undatedCount < answered.length;
   for (const a of r.alternatives) {
     if (a.travelClass !== r.travelClass && !isVerifiedSameTrainAlternative(a)) { otherClassNotVerified++; continue; }
     const travel = `${a.boardingStation}→${a.alightingStation}`;
@@ -39,6 +48,9 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
       ...(a.seatSufficiency === 'INSUFFICIENT' ? { availableSeatCount: a.availableSeatCount, seatSufficiency: 'INSUFFICIENT' } : {}),
       ...(a.seatSufficiency === 'COUNT_NOT_PROVIDED' ? { seatSufficiency: 'COUNT_NOT_PROVIDED' } : {}),
       verificationStatus: a.verificationStatus,
+      // 2026-10-09: freshness is separate from verificationStatus — no provider timestamp → freshness cannot be verified
+      // (transcript budget: per entry only when the result MIXES dated and undated answers; all undated → one top-level note)
+      ...(mixedFreshness && isFreshnessUnverifiable(a.freshness) ? { freshness: 'TIMESTAMP_UNAVAILABLE' } : {}),
       ...(a.boardingRuleStatus !== 'NOT_REQUIRED' ? { boardingRuleStatus: a.boardingRuleStatus } : {}),
       ...(a.alightingRuleStatus !== 'NOT_REQUIRED' ? { alightingRuleStatus: a.alightingRuleStatus } : {}),
       ...(travel !== ticket ? { travelOn: travel } : {}),
@@ -50,7 +62,7 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
   }
   const stationNames: Record<string, string> = {};
   for (const st of r.route.stations) if (st.name) stationNames[st.code] = st.name;
-  return {
+  const view: Record<string, unknown> = {
     alternativeSearchId: r.alternativeSearchId, searchRef: r.alternativeSearchId,
     status: r.status, errors: r.errors, isMock: r.isMock,
     // P42.2: outcome code (Muse phrases it), completeness, trigger (party size = passengersCount; requested pair = its
@@ -75,6 +87,14 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
     alternatives,
     rules: 'AVAILABLE without seatSufficiency = enough seats for passengersCount; INSUFFICIENT → say the exact count. searchComplete false → not all checked. Ticket stations ≠ travel stations (travel = ticket unless travelOn is given). boardingRuleStatus/alightingRuleStatus UNVERIFIED → never say the user can board/deboard at the requested station; say it must be verified. UNKNOWN/TIMEOUT is not "no seats". CONFLICTING = providers disagree, state no value. You rank; PRESENT_SAME_TRAIN_ALTERNATIVES records your best match for the screen.'
   };
+  // 2026-10-09: exact wording for answers whose provider sent no data timestamp — once (transcript budget). Added only when
+  // it fits the same-train transcript clip with room for the envelope, so it can never push options / rules out of the clip;
+  // the screen (every option) and the fresh re-check before Select always carry the label.
+  if (undatedCount) {
+    const note = `${mixedFreshness ? 'Entries with freshness TIMESTAMP_UNAVAILABLE' : 'All answers'}: ${PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL}`;
+    if (JSON.stringify(view).length + note.length + 20 + SAME_TRAIN_VIEW_ENVELOPE_RESERVE <= SAME_TRAIN_TRANSCRIPT_BUDGET) view.freshnessNote = note;
+  }
+  return view;
 }
 
 /** Screen payload: the result with evidence summarised (provider / outcome / status / time) — never raw bodies. */
@@ -131,5 +151,6 @@ export function sameTrainFallbackText(r: SameTrainAlternativesResult | null, err
   const first = good[0];
   const rule = first.boardingRuleStatus === 'UNVERIFIED' ? ` ${r.requestedOriginName || r.requestedOrigin} se boarding ka rule verify karna zaroori hai.`
     : first.alightingRuleStatus === 'UNVERIFIED' ? ` ${r.requestedDestinationName || r.requestedDestination} par utarne ka rule verify karna zaroori hai.` : '';
-  return `${checked} ${good.length} option${good.length > 1 ? 's' : ''} mein availability mili, jaise ${label(first)}${first.travelClass !== r.travelClass ? ` (${first.travelClass})` : ''}: ${first.availabilityStatusText || first.availability}.${rule} Details screen par hain.`;
+  const fr = isFreshnessUnverifiable(first.freshness) ? ` ${PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL}` : '';
+  return `${checked} ${good.length} option${good.length > 1 ? 's' : ''} mein availability mili, jaise ${label(first)}${first.travelClass !== r.travelClass ? ` (${first.travelClass})` : ''}: ${first.availabilityStatusText || first.availability}.${fr}${rule} Details screen par hain.`;
 }

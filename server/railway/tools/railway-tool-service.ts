@@ -4,6 +4,23 @@ import type {
   TrackData, PNRData, RailwayResponse, TrainSearchResultData
 } from '../types/railway-types';
 import { railwayRegistry } from '../registry/provider-registry';
+import { providerFreshnessOf, type ProviderFreshness } from '@shared/provider-freshness';
+import { SAME_TRAIN_DEFAULT_LIMITS } from '@shared/same-train-alternatives';
+
+/** 2026-10-09: freshness limit = the existing same-train snapshot limit (SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN, default 120; 0 = off). */
+export function providerFreshnessMaxAgeMs(env: Record<string, string | undefined> = process.env): number {
+  const v = env.SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN;
+  const n = v !== undefined && String(v).trim() !== '' ? Number(v) : NaN;
+  const min = Number.isFinite(n) ? Math.min(Math.max(0, n), 24 * 60) : Math.round((SAME_TRAIN_DEFAULT_LIMITS.maxSnapshotAgeMs ?? 7_200_000) / 60_000);
+  return min * 60_000;
+}
+
+/** Adds `freshness` (from the provider's own providerUpdatedAt only — never invented) to a successful answer. */
+function withFreshness<T extends object>(r: RailwayResponse<T>): RailwayResponse<T & { freshness: ProviderFreshness }> {
+  if (!r || !r.ok || !r.data || typeof r.data !== 'object') return r as RailwayResponse<T & { freshness: ProviderFreshness }>;
+  const freshness = providerFreshnessOf((r.data as any).providerUpdatedAt, { maxAgeMs: providerFreshnessMaxAgeMs() });
+  return { ...r, data: { ...r.data, freshness } };
+}
 
 /**
  * Railway Tool Service: routes to the active RailwayProvider from the registry.
@@ -34,12 +51,13 @@ export class RailwayToolService {
     return this.provider.getTimetable({ trainNumber });
   }
 
-  async CHECK_AVAILABILITY(params: CheckAvailabilityParams): Promise<RailwayResponse<AvailabilityData>> {
-    return this.provider.checkAvailability(params);
+  // 2026-10-09: every provider (incl. one the LLM picked via a provider tool) gets the same freshness label here
+  async CHECK_AVAILABILITY(params: CheckAvailabilityParams): Promise<RailwayResponse<AvailabilityData & { freshness?: ProviderFreshness }>> {
+    return withFreshness(await this.provider.checkAvailability(params));
   }
 
-  async GET_FARE(params: GetFareParams): Promise<RailwayResponse<FareData>> {
-    return this.provider.getFare(params);
+  async GET_FARE(params: GetFareParams): Promise<RailwayResponse<FareData & { freshness?: ProviderFreshness }>> {
+    return withFreshness(await this.provider.getFare(params));
   }
 
   async TRACK_TRAIN(trainNumber: string): Promise<RailwayResponse<TrackData>> {

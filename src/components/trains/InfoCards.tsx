@@ -1,6 +1,7 @@
 import React from 'react';
 import { IconAlert, IconCheck, IconClock, IconInfo, IconLock, IconPin, IconTicket, IconTrain, IconWallet } from '../icons/Icons';
 import { availabilityTone, formatDate, inr, type Tone } from '../../lib/format';
+import { PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL, isFreshnessUnverifiable } from '@shared/provider-freshness';
 
 /**
  * Compact cards for backend card types. Each renders only the fields present in the card
@@ -38,7 +39,9 @@ export const AvailabilityNote: React.FC<{ d: any }> = ({ d }) => {
   return (
     <Note label="Seat availability" tone={tone} icon={toneIcon(tone)}
       title={<>Availability: {d.status ?? '—'}</>}
-      sub={[`${d.trainNumber ?? ''} ${d.travelClass ?? ''}`.trim(), formatDate(d.date), d.passengersCount ? `${d.passengersCount} passengers` : ''].filter(Boolean).join(' · ')}
+      sub={[`${d.trainNumber ?? ''} ${d.travelClass ?? ''}`.trim(), formatDate(d.date), d.passengersCount ? `${d.passengersCount} passengers` : '',
+        // 2026-10-09: the provider sent no data timestamp → freshness cannot be verified (exact label)
+        isFreshnessUnverifiable(d.freshness) ? PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL : ''].filter(Boolean).join(' · ')}
       end={<span className={`bk-tag bk-tag--${tone === 'neutral' ? 'navy' : tone}`}>{d.status ?? '—'}</span>} />
   );
 };
@@ -55,7 +58,7 @@ export const FareNote: React.FC<{ d: any }> = ({ d }) => {
   return (
     <Note label="Fare" icon={<IconWallet size={18} />}
       title={<>Fare · {`${d.trainNumber ?? ''} ${d.travelClass ?? ''}`.trim()}</>}
-      sub={parts.join(' · ') || undefined}
+      sub={[...parts, isFreshnessUnverifiable(d.freshness) ? PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL : ''].filter(Boolean).join(' · ') || undefined}
       end={d.total != null ? <span className="bk-note__amount">{inr(d.total)}</span> : undefined} />
   );
 };

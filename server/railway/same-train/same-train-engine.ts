@@ -21,6 +21,7 @@ import {
   SameTrainErrorCode as E, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_DEFAULT_LIMITS, DESTINATION_EXTENSION_MIN, DESTINATION_EXTENSION_MAX, MAX_EARLIER_STATIONS, MAX_AVAILABILITY_CHECKS,
   sameTrainJourneyKeyString, type SameTrainRouteCheck, type SameTrainRouteVerification
 } from '@shared/same-train-alternatives';
+import { providerFreshnessOf } from '@shared/provider-freshness';
 import {
   type ShortageTriggerReason, evaluateSeatShortage, normalizeAvailabilityState, isVerifiedSameTrainAlternative, SameTrainOutcome, SameTrainErrorClass, currentWaitlistNumber
 } from '@shared/same-train-shortage';
@@ -348,7 +349,9 @@ export function evaluateAvailabilityAnswer(resp: any, q: AvailabilityQuery, opts
   }
   return { outcome: 'SUCCESS', availability: { category: availabilityCategory(status), status,
     ...(d.statusText ? { statusText: String(d.statusText).slice(0, 80) } : {}), ...(d.quota ? { quota: String(d.quota).slice(0, 8) } : {}),
-    ...(d.providerUpdatedAt ? { providerUpdatedAt: String(d.providerUpdatedAt).slice(0, 40) } : {}) } };
+    ...(d.providerUpdatedAt ? { providerUpdatedAt: String(d.providerUpdatedAt).slice(0, 40) } : {}),
+    // 2026-10-09: freshness label from the provider's own timestamp only (undated → TIMESTAMP_UNAVAILABLE, never "fresh")
+    freshness: providerFreshnessOf(d.providerUpdatedAt, { maxAgeMs: maxAge, nowMs: opts.nowMs ?? Date.now() }) } };
 }
 
 /** Provider fare (never computed): total / perPassenger must be positive provider numbers for this train + class. */
@@ -415,6 +418,9 @@ export function mergeCandidate(pair: CandidatePair, evidence: ProviderEvidence[]
   let statusText: string | undefined;
   if (conflicting) availability = 'CONFLICTING';
   else if (ok.length) { availability = ok[0].availability!.category; statusText = ok[0].availability!.status; }
+  // 2026-10-09: the answer's freshness; with several agreeing providers the LEAST verifiable one is reported
+  const freshness = conflicting || !ok.length ? undefined
+    : (ok.map(e => e.availability!.freshness).find(f => f && !f.freshnessVerified) ?? ok[0].availability!.freshness);
 
   // fare: provider numbers only; disagreement → CONFLICTING (no fare shown)
   let fare: SameTrainAlternative['fare'] = { status: ctx.includeFare ? 'UNAVAILABLE' : 'NOT_REQUESTED' };
@@ -452,6 +458,7 @@ export function mergeCandidate(pair: CandidatePair, evidence: ProviderEvidence[]
     // P42.2: party-bound seat facts (exact provider count only; CONFLICTING / no answer → UNKNOWN, never a shortage)
     ...seatFactsOf(conflicting ? undefined : statusText, ctx.passengersCount),
     fare, verificationStatus, actionable: verificationStatus === 'VERIFIED',
+    ...(freshness ? { freshness } : {}),
     evidence, webEvidence: web, warnings,
     ...(conflicting ? { conflict: { providers: ok.map(e => e.provider), values: ok.map(e => ({ provider: e.provider, status: e.availability!.status })) } } : {}),
     // Phase 2: no fresh answer, only a too-old provider snapshot → kept for the screen (⚠ + age), never a verdict
