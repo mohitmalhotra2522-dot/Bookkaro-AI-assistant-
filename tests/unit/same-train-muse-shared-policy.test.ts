@@ -24,6 +24,7 @@ import { discoverSameTrainForDisplay } from '../../server/railway/same-train/sam
 import { revalidateSameTrainAlternative, scheduledSameTrainDeps } from '../../server/railway/same-train/same-train-service';
 import { resetSameTrainSchedulers } from '../../server/railway/same-train/same-train-scheduler';
 import { sameTrainLLMView } from '../../server/railway/same-train/same-train-view';
+import { factOnly } from '../../server/ai/response/backend-question-policy';
 import {
   acquireTrainSlot, sameTrainTrainSlotsForTests, applySameTrainPolicyToBfe, boardFromEarlierConfigFromEnv, musePolicyFromEnv,
   sharedSameTrainDeps, eligibleClassMatrix, rowClassesOf
@@ -264,6 +265,24 @@ describe('Phase 2 shared policy — freshness, lower WL, exact segment, no drift
     expect(m.calls[0]).toMatchObject({ origin: CODES[19], destination: D, travelClass: 'SL', date: DATE });
     expect(sel.ok).toBe(true);
     expect(sel.fresh![0].status).toBe('RAC 6');
+  });
+  it('[MP6b] every check too old → Muse gets STALE facts (pair, status, age), same staleChecks as the automatic display — not a provider error, not a verdict', async () => {
+    const ans = (q: Q) => ({ status: q.origin === O && q.destination === D ? 'WL 4' : 'GNWL 9', updated: old() });
+    const mu = fakeTools(ans), au = fakeTools(ans);
+    const { out } = await museRun(session([['SL', 'WL 4']]).s, mu.tools);
+    const st = session([['SL', 'WL 4']]);
+    const auto: any = await autoRun(st, au.tools, 'SL');
+    expect(auto).toMatchObject({ ok: false, code: 'SEARCH_FAILED' });
+    expect(auto.staleChecks.length).toBeGreaterThan(0);
+    expect(out).toMatchObject({ ok: false, error: { code: SameTrainErrorCode.SEARCH_FAILED, details: { reason: 'STALE_PROVIDER_DATA' } } });
+    const pairs = (l: any[]) => l.map(c => `${c.ticketOrigin}|${c.ticketDestination}|${c.travelClass}|${c.status}`).sort();
+    expect(pairs(out.error.details.staleChecks)).toEqual(pairs(auto.staleChecks));
+    const msg = String(out.error.message);
+    expect(msg.length).toBeLessThanOrEqual(300);
+    expect(factOnly(msg)).toBe(msg);
+    expect(msg).toMatch(new RegExp(`${O}→${D} SL: WL 4, provider snapshot \\d+ min old`));
+    expect(msg).toMatch(/fresh status not confirmed/);
+    expect(msg).not.toMatch(/not available|no seat|seat nahi/i);
   });
   it('[MP7] lower WL from an earlier station (nothing bookable) → "Waiting List — not confirmed", still WAITLIST, never VERIFIED', async () => {
     const m = fakeTools(q => (q.origin === CODES[18] && q.destination === D ? 'GNWL 20/WL 4' : 'GNWL 40/WL 17'));

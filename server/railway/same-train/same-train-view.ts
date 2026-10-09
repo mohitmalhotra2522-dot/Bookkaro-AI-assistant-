@@ -9,6 +9,7 @@
  */
 import type { SameTrainAlternative, SameTrainAlternativesResult } from '@shared/same-train-alternatives';
 import { BETTER_WAITLIST_LABEL, SAME_TRAIN_ALL_FAILED_MESSAGE, SAME_TRAIN_PROVIDER_BUSY_MESSAGE, SAME_TRAIN_ROUTE_DATA_UNVERIFIED_MESSAGE, toSameTrainRecoveryResults } from '@shared/same-train-alternatives';
+import type { SameTrainStaleCheck } from '@shared/same-train-alternatives';
 import { isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 
 const evidenceLine = (a: SameTrainAlternative) => a.evidence
@@ -100,6 +101,25 @@ export function sameTrainCardData(r: SameTrainAlternativesResult, opts: { stale?
 const label = (a: SameTrainAlternative) => `${a.ticketOriginName || a.ticketOrigin} se ${a.ticketDestinationName || a.ticketDestination}`;
 
 /** Deterministic, fact-only one-liner (Hinglish) — used only when Muse's wording is missing / rejected. */
+/**
+ * Muse shared policy (2026-10-09): an all-stale search (no check fresh enough) is reported to Muse as STALE provider data —
+ * which pairs, the provider status and its age — never as a plain provider error and never as a "no seat" verdict.
+ * Same wording as `staleChecksNotVerdict` on partial results. Facts only (passes factOnly), bounded for the 300-char clip.
+ */
+export function sameTrainStaleFailureFacts(stale: readonly SameTrainStaleCheck[] | undefined, maxChars = 300): { message: string; staleChecks: SameTrainStaleCheck[] } | null {
+  const list = (stale || []).filter(c => c && c.ticketOrigin && c.ticketDestination);
+  if (!list.length) return null;
+  let message = `${SAME_TRAIN_ALL_FAILED_MESSAGE} Provider data too old — fresh status not confirmed (not a verdict):`;
+  let n = 0;
+  for (const c of list) {
+    const part = ` ${c.ticketOrigin}→${c.ticketDestination} ${c.travelClass}: ${c.status ?? 'status unknown'}, provider snapshot ${Number(c.ageMinutes) || 0} min old;`;
+    if (message.length + part.length > maxChars) break;
+    message += part; n++;
+  }
+  if (n < list.length) { const more = ` +${list.length - n} more.`; if (message.length + more.length <= maxChars) message += more; }
+  return { message: message.replace(/;$/, '.'), staleChecks: list.map(c => ({ ...c })) };
+}
+
 export function sameTrainFallbackText(r: SameTrainAlternativesResult | null, errorCode?: string): string {
   if (!r) return errorCode === 'INVALID_TRAIN_ROUTE' ? 'Is train ka route verify nahi ho paaya, isliye same train alternative check nahi hua.'
     : errorCode === 'RATE_LIMITED' || errorCode === 'PROVIDER_UNAVAILABLE' ? SAME_TRAIN_PROVIDER_BUSY_MESSAGE

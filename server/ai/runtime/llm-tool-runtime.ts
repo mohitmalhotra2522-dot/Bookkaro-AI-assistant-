@@ -29,7 +29,7 @@ import { seatCheckFromSearch, seatCheckFromAvailability, seatCheckView, SameTrai
 import { sameTrainSearchesPerTurn } from '@shared/same-train-alternatives';
 import { evaluateBfeEligibility, bfeEligibilityCurrent, bfeKey, type BfeEligibility, type BfeBinding, recoveryEligibilityView } from '@shared/bfe-eligibility';
 import { MAX_TOOL_STEPS_PER_TURN as BFE_MAX_TOOL_STEPS } from '../tool-runtime/railway-tool-runtime';
-import { sameTrainLLMView } from '../../railway/same-train/same-train-view';
+import { sameTrainLLMView, sameTrainStaleFailureFacts } from '../../railway/same-train/same-train-view';
 import { musePolicyFromEnv, applySameTrainPolicyToBfe, sharedSearchShape, directStatusOf, rowClassesOf, acquireTrainSlot, sharedSameTrainDeps, museSearchBudgetMs } from '../../railway/same-train/same-train-policy';
 import { SameTrainErrorCode as STEC, SAME_TRAIN_PROVIDER_BUSY_MESSAGE } from '@shared/same-train-alternatives';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
@@ -878,7 +878,14 @@ export class BoundToolRuntime {
     }, deps).finally(() => release?.());
     const t1 = new Date().toISOString();
     const meta = { source: out.ok && out.result.isMock ? 'mock' : 'live', providerId: pr.providers.map(p => p.id).join('+'), requestTimestamp: new Date(t0).toISOString(), responseTimestamp: t1, latencyMs: Date.now() - t0, cache: 'disabled' };
-    if (!out.ok) return { ok: false, error: { code: out.code, message: out.message, ...(out.errorClass ? { details: { errorClass: out.errorClass } } : {}) }, meta };
+    if (!out.ok) {
+      // all checks too old (stale provider snapshots) → Muse gets the stale facts (pair, status, age) — distinct from a
+      // provider error, never a "no seat" verdict; same staleChecks the automatic display returns
+      const stale = sameTrainStaleFailureFacts((out as any).partial?.staleChecks);
+      if (stale) return { ok: false, error: { code: out.code, message: stale.message,
+        details: { ...(out.errorClass ? { errorClass: out.errorClass } : {}), reason: 'STALE_PROVIDER_DATA', staleChecks: stale.staleChecks } }, meta };
+      return { ok: false, error: { code: out.code, message: out.message, ...(out.errorClass ? { details: { errorClass: out.errorClass } } : {}) }, meta };
+    }
     return { ok: true, data: out.result, meta };
   }
 
