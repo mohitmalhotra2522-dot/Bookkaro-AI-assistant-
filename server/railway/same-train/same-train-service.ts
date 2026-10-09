@@ -264,7 +264,9 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
     return { ok: false, code: 'ALTERNATIVE_INSUFFICIENT_SEATS', message: `Fresh check: ${ok[0].ev.availability!.status} — ${alt.passengersCount} passengers ke liye seats kaafi nahi.`, alternative: view, fresh };
   }
   const handoffText = `Same Train Alternative chuna (${alt.alternativeId}): train ${alt.trainNumber}, ${alt.travelClass}, ${alt.date}, ticket ${alt.ticketOrigin} se ${alt.ticketDestination}. Isi ticket journey ke saath booking aage badhao.`;
-  return { ok: true, message: `Fresh check: ${ok[0].ev.availability!.status}.`, alternative: view, fresh, handoffText };
+  // 2026-10-09: an earlier-station ticket of the same run is dated for that station's departure — say so explicitly
+  const shifted = alt.ticketDateShiftDays && alt.journeyDate ? ` Ticket date ${alt.date} hai — train ${alt.ticketOrigin} se isi run par chalti hai (${alt.requestedOrigin} ka date ${alt.journeyDate}).` : '';
+  return { ok: true, message: `Fresh check: ${ok[0].ev.availability!.status}.`, alternative: view, fresh, handoffText: handoffText + shifted };
 }
 
 /**

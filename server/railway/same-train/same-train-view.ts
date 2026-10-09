@@ -28,6 +28,9 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
     const ticket = `${a.ticketOrigin}→${a.ticketDestination}`;
     alternatives[a.alternativeId] = {
       kind: a.kind, ticket, ...(a.travelClass !== r.travelClass ? { class: a.travelClass } : {}),
+      // 2026-10-09: the ticket of an earlier station on the SAME run is dated for its own departure (book on this date)
+      // (compact — transcript budget: present only when it differs from the result's journey `date`)
+      ...(a.ticketDateShiftDays ? { ticketDate: a.date } : {}),
       availability: a.availability, ...(a.availabilityStatusText ? { status: a.availabilityStatusText } : {}),
       // P42.2: REGRET / TRAIN_CANCELLED stay distinct; exact seat count + sufficiency for THIS party
       ...(a.availabilityStatus && a.availabilityStatus !== a.availability && a.availabilityStatus !== 'UNKNOWN' ? { availabilityStatus: a.availabilityStatus } : {}),

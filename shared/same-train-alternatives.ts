@@ -37,6 +37,8 @@ export const SameTrainErrorCode = Object.freeze({
   PROVIDER_DATA_CONFLICT: 'PROVIDER_DATA_CONFLICT',
   /** 2026-10-09: the provider answered with an availability snapshot older than the freshness limit — never a verdict */
   STALE_PROVIDER_DATA: 'STALE_PROVIDER_DATA',
+  /** 2026-10-09: the timetable has no day for an earlier station → the ticket date of that run is unknown (never guessed) */
+  TICKET_DATE_UNVERIFIED: 'TICKET_DATE_UNVERIFIED',
   RESULT_STALE: 'ALTERNATIVE_RESULT_STALE',
   STALE_RESULT: 'STALE_ALTERNATIVE_RESULT',
   NOT_FOUND: 'ALTERNATIVE_NOT_FOUND',
@@ -138,6 +140,14 @@ export interface WebRouteEvidence {
 
 export interface SameTrainAlternative {
   alternativeId: string;
+  /** 2026-10-09: `date` is the TICKET date. For a ticket from an earlier station the train leaves on another calendar day,
+   *  ticketDateShiftDays = date − journeyDate (e.g. −1) and journeyDate = the requested boarding date */
+  ticketDateShiftDays?: number;
+  journeyDate?: string;
+  /** departure time at the ticket origin from the provider timetable (display only) */
+  ticketOriginDeparture?: string;
+  /** the provider timetable had no day field → the ticket date could not be derived (journey date used, shown as unverified) */
+  ticketDateUnverified?: boolean;
   pairId: string;
   priority: CandidatePriority;
   kind: CandidateKind;

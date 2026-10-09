@@ -326,6 +326,16 @@ export function groupRecoveryByPair(d: any, requestedClass?: string | null): Rec
   return out;
 }
 
+/** 2026-10-09: an earlier-station ticket of the SAME run can carry another calendar date (12425: NDLS 19 Oct for an LDH 20 Oct boarding) */
+export function ticketDateLine(a: any, d?: any): string | null {
+  const shift = Number(a?.ticketDateShiftDays) || 0;
+  if (a?.ticketDateUnverified && a?.date) return `Ticket date verify nahi hua (timetable mein din ki jaankari nahi) — ${shortDate(a.date)} maan kar check kiya`;
+  if (!shift || !a?.date) return null;
+  const journey = a.journeyDate || d?.date;
+  const dep = a.ticketOriginDeparture ? ` ${String(a.ticketOriginDeparture).slice(0, 5)}` : '';
+  return `Ticket date ${shortDate(a.date)} — train ${a.ticketOrigin} se${dep} isi run par chalti hai${journey ? ` (aapki boarding ${shortDate(journey)})` : ''}`;
+}
+
 const shortDate = (iso?: string) => {
   const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return '';
@@ -401,6 +411,7 @@ const PairOption: React.FC<{ d: any; g: RecoveryPairGroup; sessionId: string | n
         <span className="bk-sti__pair"><b>BOOK</b> {stn(g.ticketOrigin, g.ticketOriginName)} → {stn(g.ticketDestination, g.ticketDestinationName)}</span>
         {a.fare?.status === 'PROVIDER' && (a.fare.total ?? a.fare.perPassenger) != null && <span className="bk-sti__fare">{inr(a.fare.total ?? a.fare.perPassenger)}</span>}
       </div>
+      {ticketDateLine(a, d) && <div className="bk-sti__meta bk-sti__tdate" data-testid="same-train-ticket-date">{ticketDateLine(a, d)}</div>}
       <div className="bk-sti__board"><b>BOARD</b> {stn(boardCode, boardCode === g.ticketOrigin ? g.ticketOriginName : nameOf(d, boardCode))}
         {boardStop?.departure && <span className="bk-sti__time">dep {boardStop.departure}</span>}</div>
       <div className="bk-sti__chips" role="group" aria-label="Classes">

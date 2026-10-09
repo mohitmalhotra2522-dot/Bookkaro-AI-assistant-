@@ -264,6 +264,8 @@ export function applySameTrainSelection(state: ConversationStateManager, session
   if (idx(prevState) > idx(BookingState.SHOWING_TRAINS)) state.tryTransition(sessionId, BookingState.SHOWING_TRAINS);
   s.origin = alt.ticketOrigin; s.originName = alt.ticketOriginName || (alt.ticketOrigin === stored.requestedOrigin ? stored.requestedOriginName : undefined);
   s.destination = alt.ticketDestination; s.destinationName = alt.ticketDestinationName || (alt.ticketDestination === stored.requestedDestination ? stored.requestedDestinationName : undefined);
+  // 2026-10-09: the ticket date of an earlier-station ticket (same run, e.g. NDLS one day before the LDH boarding date)
+  if (typeof alt.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(alt.date) && alt.date !== s.date) s.date = alt.date;
   s.selectedClass = undefined; s.fare = undefined; s.availability = undefined;
   s.reviewConfirmed = false; s.irctcHandoffReady = false; s.confirmedReviewVersion = undefined;
   if (s.review && s.review.valid) { s.review.valid = false; s.review.invalidatedReason = 'SAME_TRAIN_ALTERNATIVE_APPLIED'; }

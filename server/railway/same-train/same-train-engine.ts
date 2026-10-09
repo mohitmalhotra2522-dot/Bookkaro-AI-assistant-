@@ -351,6 +351,33 @@ export function evaluateFareAnswer(resp: any, q: AvailabilityQuery): { ok: true;
   return { ok: true, ...(total !== undefined ? { total } : {}), ...(perPassenger !== undefined ? { perPassenger } : {}), currency: String(d.currency || 'INR').slice(0, 3) };
 }
 
+// ------------------------------------------------------------------ ticket date (2026-10-09)
+
+/** ISO date + n days (UTC calendar arithmetic, no time zone drift). */
+export function addDaysIso(date: string, n: number): string {
+  const t = Date.parse(`${date}T00:00:00Z`);
+  if (!Number.isFinite(t)) return date;
+  return new Date(t + n * 86400000).toISOString().slice(0, 10);
+}
+
+/**
+ * The journey date of a ticket from `ticketOriginIndex` on the SAME run that leaves the requested origin on `journeyDate`:
+ * journeyDate + (day(ticket origin) − day(requested origin)) from the provider timetable. A ticket from an earlier
+ * station the train leaves on the previous calendar day (12425: NDLS day 1 20:40 → LDH day 2 00:38) is dated one day
+ * EARLIER — querying the journey date would check a different run. Unknown timetable day → null (never guessed).
+ */
+export function ticketDateFor(route: ReadonlyArray<{ day?: number }>, ticketOriginIndex: number, requestedOriginIndex: number, journeyDate: string)
+  : { date: string; shiftDays: number; dayUnknown?: true } | null {
+  if (ticketOriginIndex === requestedOriginIndex) return { date: journeyDate, shiftDays: 0 };
+  const a = route[ticketOriginIndex]?.day, b = route[requestedOriginIndex]?.day;
+  // a timetable WITHOUT any day field (none of the stops) → the journey date, flagged dayUnknown (shown as unverified);
+  // a timetable that has days but not for these stops is inconsistent → null (the pair is not checked)
+  if (!route.some(st => Number.isFinite(st?.day))) return { date: journeyDate, shiftDays: 0, dayUnknown: true };
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  const shiftDays = Number(a) - Number(b);
+  return { date: addDaysIso(journeyDate, shiftDays), shiftDays };
+}
+
 // ------------------------------------------------------------------ merging
 
 export interface MergeContext {
@@ -571,6 +598,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   if (!planned.ok) return { ok: false, code: planned.code, message: planned.message, ...(planned.code === E.INVALID_STATION_PAIR ? { errorClass: SameTrainErrorClass.ROUTE_DATA_UNVERIFIED } : {}) };
   const plan = planned.plan;
   const routeFetchedAt = new Date(now()).toISOString();
+  // 2026-10-09: every pair is checked on ITS ticket date (same run as the requested boarding) — never the journey date blindly
+  const ticketDate = (p: CandidatePair) => ticketDateFor(plan.route, p.originIndex, plan.originIndex, req.date);
 
   // 2) fresh provider calls per candidate × provider (bounded per provider)
   // P42.7: evidence is keyed per (pair × class); the requested class is searched over the whole window first, then the other
@@ -602,7 +631,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     // F3: scheduled → every unit is handed to the fair queue at once, in station order (the queue paces / orders them)
     const pool = scheduled ? Math.max(1, run.length) : L.maxParallel;
     await Promise.all(req.providers.map(provider => mapLimit(run.map((u, i) => ({ ...u, i })), pool, async ({ pair, cls, i }) => {
-      const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: cls, date: req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
+      const td = ticketDate(pair);
+      const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: cls, date: td ? td.date : req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
       const baseFor = (prov: ProviderRef) => ({ provider: prov.id, ...(prov.label ? { providerLabel: prov.label } : {}), level: prov.level,
         requestId: req.requestId || alternativeSearchId, toolExecutionId: `${alternativeSearchId}:${prov.id}:${pair.pairId}`,
         trainNumber: q.trainNumber, ticketOrigin: q.origin, ticketDestination: q.destination, travelClass: q.travelClass, date: q.date, passengersCount: q.passengersCount,
@@ -637,6 +667,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
       const s = now();
       let ev: ProviderEvidence;
       if (!current()) { skippedStale = true; stats.skipped++; ev = { ...baseFor(provider), fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.RESULT_STALE }; }
+      // 2026-10-09: the timetable has no day for this earlier station → its ticket date is unknown → not checked (never a verdict)
+      else if (!td) { stats.skipped++; ev = { ...baseFor(provider), fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.TICKET_DATE_UNVERIFIED }; }
       else if (s >= deadline) { stats.skipped++; ev = { ...baseFor(provider), fetchedAt: new Date(s).toISOString(), latencyMs: 0, outcome: 'SKIPPED', errorCode: E.SEARCH_TIMEOUT }; }
       else {
         let served = provider;
@@ -715,7 +747,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
       for (const wp of req.webProviders) {
         await mapLimit(targets, Math.min(3, L.maxParallel), async p => {
           if (!current() || now() >= deadline) return;
-          const r = await withTimeout(Promise.resolve().then(() => deps.webListsTrain!(wp, { trainNumber: req.trainNumber, origin: p.ticketOrigin, destination: p.ticketDestination, date: req.date })), L.perCallTimeoutMs);
+          const r = await withTimeout(Promise.resolve().then(() => deps.webListsTrain!(wp, { trainNumber: req.trainNumber, origin: p.ticketOrigin, destination: p.ticketDestination, date: ticketDate(p)?.date ?? req.date })), L.perCallTimeoutMs);
           const at = new Date(now()).toISOString();
           const w: WebRouteEvidence = r.timedOut ? { provider: wp.id, level: 'UNVERIFIED_WEB', ticketOrigin: p.ticketOrigin, ticketDestination: p.ticketDestination, listed: null, fetchedAt: at, errorCode: 'PROVIDER_TIMEOUT' }
             : (r.value as any).ok ? { provider: wp.id, level: 'UNVERIFIED_WEB', ticketOrigin: p.ticketOrigin, ticketDestination: p.ticketDestination, listed: !!(r.value as any).listed, fetchedAt: at }
@@ -742,12 +774,20 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const fetchedAt = new Date(now()).toISOString();
   // one alternative per (pair × class) that was actually checked — each carries its OWN travelClass (dedup: train + pair + class + date)
   for (const { pair: p, cls } of checkedUnits) {
-    const key = [req.trainNumber, p.ticketOrigin, p.ticketDestination, cls, req.date].join('|');
+    const td = ticketDate(p);
+    const key = [req.trainNumber, p.ticketOrigin, p.ticketDestination, cls, td?.date ?? req.date].join('|');
     const prev = merged.get(key);
     const ev = [...(prev?.evidence || []), ...(evidenceByPair.get(ek(p.pairId, cls)) || [])];
     const rules = { boarding: await ruleOf('BOARDING', p.ticketOrigin, ctx.requestedOrigin, cls), alighting: await ruleOf('ALIGHTING', p.ticketDestination, ctx.requestedDestination, cls) };
-    const m = mergeCandidate(p, ev, webByPair.get(p.pairId) || [], rules, { ...ctx, travelClass: cls }, fetchedAt);
+    const m = mergeCandidate(p, ev, webByPair.get(p.pairId) || [], rules, { ...ctx, travelClass: cls, date: td?.date ?? req.date }, fetchedAt);
     m.extensionStations = Math.max(0, p.destinationIndex - destIdx);
+    // 2026-10-09: the ticket is dated for the earlier station's departure on the same run (shown + used for booking)
+    if (td?.dayUnknown && !m.warnings.includes(E.TICKET_DATE_UNVERIFIED)) { m.warnings.push(E.TICKET_DATE_UNVERIFIED); m.ticketDateUnverified = true; }
+    if (td && td.shiftDays !== 0) {
+      m.ticketDateShiftDays = td.shiftDays; m.journeyDate = req.date;
+      const dep = plan.route[p.originIndex]?.departure;
+      if (dep) m.ticketOriginDeparture = String(dep).slice(0, 8);
+    }
     merged.set(key, m);
   }
   const all = [...merged.values()];
@@ -795,6 +835,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   if (anyFailure && apiEv.some(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT))) errors.push(E.SEARCH_TIMEOUT);
   if (alternatives.some(a => a.verificationStatus === 'CONFLICTING')) errors.push(E.PROVIDER_DATA_CONFLICT);
   if (staleChecks.length) errors.push(E.STALE_PROVIDER_DATA);
+  if (apiEv.some(e => e.outcome === 'SKIPPED' && e.errorCode === E.TICKET_DATE_UNVERIFIED)) errors.push(E.TICKET_DATE_UNVERIFIED);
   // P42.2: a verified alternative needs seats for the WHOLE party (AVAILABLE count ≥ passengers) or RAC
   const verifiedAlternativeCount = alternatives.filter(isVerifiedSameTrainAlternative).length;
   const foundAlternative = verifiedAlternativeCount > 0;
