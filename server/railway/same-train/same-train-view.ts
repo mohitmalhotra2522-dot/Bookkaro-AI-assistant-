@@ -55,6 +55,8 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
     verifiedAlternativeCount: r.verifiedAlternativeCount ?? r.alternatives.filter(isVerifiedSameTrainAlternative).length,
     ...(r.triggerReason ? { triggerReason: r.triggerReason } : {}),
     searchComplete: r.searchComplete ?? (!r.candidatesTruncated && r.status !== 'PARTIAL'),
+    // 2026-10-09: provider snapshot older than the freshness limit → NOT a verdict (not "no seat"); say it could not be confirmed
+    ...(r.staleChecks?.length ? { staleChecksNotVerdict: r.staleChecks.map(c => `${c.ticketOrigin}→${c.ticketDestination} ${c.travelClass}: provider snapshot ${c.ageMinutes} min old (${c.status}) — fresh status not confirmed`) } : {}),
     trainNumber: r.trainNumber, ...(r.trainName ? { trainName: r.trainName } : {}), date: r.date, travelClass: r.travelClass, passengersCount: r.passengersCount,
     requested: `${r.requestedOrigin}→${r.requestedDestination}`,
     ...(r.classesChecked && r.classesChecked.length > 1 ? { classesChecked: r.classesChecked.join(',') } : {}),

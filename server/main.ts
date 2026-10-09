@@ -267,7 +267,7 @@ server.post('/api/session/:id/same-train-alternative/discover', async (request, 
     ? await discoverSameTrainForDisplayAsync(stateManager, id, body, { log: f => console.log(JSON.stringify(f)) })
     : await discoverSameTrainForDisplay(stateManager, id, body, { log: f => console.log(JSON.stringify(f)) });
   if (out.ok && out.code === 'RUNNING') return reply.send({ ok: true, code: 'RUNNING', progress: out.progress ?? null });
-  if (!out.ok || !out.result) return reply.send({ ok: false, code: out.code, ...(out.budget ? { budget: out.budget } : {}) });
+  if (!out.ok || !out.result) return reply.send({ ok: false, code: out.code, ...(out.budget ? { budget: out.budget } : {}), ...(out.staleChecks?.length ? { staleChecks: out.staleChecks } : {}) });
   return reply.send({ ok: true, code: 'OK', card: sameTrainCardData(out.result, { stale: false }) });
 });
 

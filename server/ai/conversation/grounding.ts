@@ -10,7 +10,8 @@
  */
 import { parsePassengerCount } from '../../booking/preparation/passenger-count';
 import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
-import { resolveStationToken } from '../../railway/resolvers/route-resolver';
+import { resolveStationToken, resolveStationArgumentDetailed } from '../../railway/resolvers/route-resolver';
+import { stationCodesNamedInText } from '../../railway/resolvers/station-catalog';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
 import { normalizeDevanagariNumbers } from '@shared/devanagari-numbers';
 
@@ -25,6 +26,11 @@ export function resolveStationDetailed(raw: string): StationResolution {
   const key = lc(raw);
   if (!key) return { kind: 'UNKNOWN', raw };
   if (AMBIGUOUS_STATION_NAMES[key]) return { kind: 'AMBIGUOUS', raw, candidates: AMBIGUOUS_STATION_NAMES[key] };
+  // 2026-10-09: every station — dictionary alias, then the station catalog (official code in any case / full official
+  // name; a name several stations share is AMBIGUOUS), then the existing rules below
+  const cat = resolveStationArgumentDetailed(String(raw || '').trim());
+  if (cat.kind === 'RESOLVED') return { kind: 'RESOLVED', code: cat.code, name: cat.name };
+  if (cat.kind === 'AMBIGUOUS') return { kind: 'AMBIGUOUS', raw, candidates: cat.candidates };
   const one = resolveStationToken(key);
   if (one) return { kind: 'RESOLVED', code: one.code, name: one.name };
   // several dictionary entries share this name → ambiguous (deduplicated by station code)
@@ -40,6 +46,8 @@ export function stationCodesMentioned(text: string): Set<string> {
   const out = new Set<string>();
   for (const [k, v] of Object.entries(STATION_ALIASES)) if (t.includes(` ${k} `)) out.add(v.code);
   for (const [k, cands] of Object.entries(AMBIGUOUS_STATION_NAMES)) if (t.includes(` ${k} `)) for (const c of cands) out.add(c.code);
+  // 2026-10-09: full official station names / capitalised official codes in the user's words (catalog, all stations)
+  for (const c of stationCodesNamedInText(text)) out.add(c);
   return out;
 }
 

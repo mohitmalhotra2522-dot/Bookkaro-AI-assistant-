@@ -4,7 +4,7 @@ import type {
 import { BookingState } from '@shared/states';
 import type { BookingSession } from '@shared/entities';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
-import { resolveStationToken, resolveRoute } from '../../railway/resolvers/route-resolver';
+import { resolveStationToken, resolveStationArgument, resolveRoute } from '../../railway/resolvers/route-resolver';
 type NormalizedTrain = any;
 import { resolvePassengerAge, resolvePassengerGender } from './passenger-resolvers';
 
@@ -166,7 +166,7 @@ export class ActionValidator {
   }
 
   private resolveStation(raw: string): { code: string; name: string } | null {
-    const s = resolveStationToken(raw);
+    const s = resolveStationArgument(raw);   // 2026-10-09: whole value → catalog-aware (all stations)
     return s ? { code: s.code, name: s.name } : null;
   }
 

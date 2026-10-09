@@ -104,11 +104,17 @@ export const SameTrainInline: React.FC<{
   if (!res.ok || !res.card) {
     if (!FALLBACK_CODES.has(res.code) || !onFallback) return null;
     // F3: a FAILED search is said as failed (provider error / limit), never as "no seat"
+    // 2026-10-09: checks answered with a too-old provider snapshot → "fresh status confirm nahi" (never "no seat")
+    const staleFailed = staleChecksOf(res);
+    if (res.code === 'SEARCH_FAILED' && staleFailed.length) {
+      return <div className="bk-sti bk-sti--failed bk-sti--stale" role="status"><div className="bk-sti__note">{SAME_TRAIN_STALE_NOTE}</div><StaleCheckLines list={staleFailed} />{fallbackBtn}</div>;
+    }
     return res.code === 'SEARCH_FAILED' || res.code === 'POLL_TIMEOUT'
       ? <div className="bk-sti bk-sti--failed" role="status"><div className="bk-sti__note">{SAME_TRAIN_FAILED_NOTE}</div>{fallbackBtn}</div>
       : fallbackBtn;
   }
   const sum = checkSummaryOf(res.card);
+  const stale = staleChecksOf(res.card);
   // same completeness rule as the server card view (an older card without searchComplete: not truncated and not partial)
   const complete = (res.card.searchComplete ?? (!res.card.candidatesTruncated && res.card.status !== 'PARTIAL')) === true && res.card.status !== 'PARTIAL';
   // P42-14: nothing verified AND the search could not check every station / class (rate limit / timeout) → say so honestly
@@ -117,9 +123,12 @@ export const SameTrainInline: React.FC<{
   if (!groupRecoveryByPair(res.card, travelClass || res.card.travelClass).length) {
     if (res.card.status === 'PARTIAL' || !complete) {
       // provider errors / limits → the P42-14 note; no error but the search was bounded (truncated) → "not complete"
+      // 2026-10-09: when every unchecked result is a too-old provider snapshot, say THAT (not "provider limit")
+      const onlyStale = stale.length > 0 && !!sum && sum.unchecked <= stale.length;
       return <div className="bk-sti bk-sti--partial" role="status">
-          <div className="bk-sti__note">{res.card.status === 'PARTIAL' ? SAME_TRAIN_PARTIAL_NOTE : SAME_TRAIN_INCOMPLETE_NOTE}</div>
+          <div className="bk-sti__note">{onlyStale ? SAME_TRAIN_STALE_NOTE : res.card.status === 'PARTIAL' ? SAME_TRAIN_PARTIAL_NOTE : SAME_TRAIN_INCOMPLETE_NOTE}</div>
           {sum && sum.unchecked > 0 && <div className="bk-sti__meta">{partialCountText(sum)}</div>}
+          <StaleCheckLines list={stale} />
           {fallbackBtn}
         </div>;
     }
@@ -133,6 +142,7 @@ export const SameTrainInline: React.FC<{
     {complete
       ? sum && <div className="bk-sti__meta bk-sti__status" role="status">{completeText(sum)}</div>
       : <div className="bk-sti__note bk-sti__status" role="status">{sum && sum.unchecked > 0 ? partialCountText(sum) : SAME_TRAIN_INCOMPLETE_NOTE}</div>}
+    {!complete && <StaleCheckLines list={stale} />}
   </>;
 };
 
@@ -144,11 +154,11 @@ export const SAME_TRAIN_FAILED_NOTE = 'Same train search provider error ki wajah
 export const SAME_TRAIN_INCOMPLETE_NOTE = 'Search poora nahi hua — kuch stations / classes check nahi ho paaye.';
 
 /** F3: counts for the state line, from the backend's own check summary (falls back to the provider coverage). */
-export function checkSummaryOf(d: any): { total: number; succeeded: number; unchecked: number } | null {
+export function checkSummaryOf(d: any): { total: number; succeeded: number; unchecked: number; stale?: number } | null {
   const c = d?.checkSummary;
   if (c && Number.isFinite(Number(c.total))) {
-    const total = Number(c.total), succeeded = Number(c.succeeded) || 0;
-    return { total, succeeded, unchecked: Math.max(0, total - succeeded) };
+    const total = Number(c.total), succeeded = Number(c.succeeded) || 0, stale = Number(c.stale) || 0;
+    return { total, succeeded, unchecked: Math.max(0, total - succeeded), ...(stale > 0 ? { stale } : {}) };
   }
   const prov: any[] = Array.isArray(d?.providers) ? d.providers : [];
   if (!prov.length) return null;
@@ -157,8 +167,36 @@ export function checkSummaryOf(d: any): { total: number; succeeded: number; unch
   return { total, succeeded, unchecked: Math.max(0, total - succeeded) };
 }
 export const completeText = (s: { total: number }) => `Saare ${s.total} checks complete.`;
-export const partialCountText = (s: { total: number; unchecked: number }) =>
-  `Search adhoora: ${s.unchecked} / ${s.total} checks provider limit / error ki wajah se nahi ho paaye — inke liye koi result nahi.`;
+export const partialCountText = (s: { total: number; unchecked: number; stale?: number }) => {
+  const st = Math.min(Number(s.stale) || 0, s.unchecked);
+  if (st <= 0) return `Search adhoora: ${s.unchecked} / ${s.total} checks provider limit / error ki wajah se nahi ho paaye — inke liye koi result nahi.`;
+  if (st >= s.unchecked) return `Search adhoora: ${s.unchecked} / ${s.total} checks ka provider data purana tha — inke liye fresh result nahi.`;
+  return `Search adhoora: ${s.unchecked} / ${s.total} checks verify nahi ho paaye (${st} purana provider data, ${s.unchecked - st} provider limit / error) — inke liye koi result nahi.`;
+};
+
+/** 2026-10-09: some checks came back with a provider snapshot older than the freshness limit — never "no seat". */
+export const SAME_TRAIN_STALE_NOTE = 'Same train: kuch checks ka provider data purana hai — fresh status confirm nahi ho paaya, isliye "seat nahi hai" nahi keh sakte.';
+export interface StaleCheckView { ticketOrigin: string; ticketDestination: string; travelClass: string; status: string; providerUpdatedAt: string; ageMinutes: number }
+export function staleChecksOf(d: any): StaleCheckView[] {
+  const l = Array.isArray(d?.staleChecks) ? d.staleChecks : [];
+  return l.filter((c: any) => c && c.ticketOrigin && c.ticketDestination && c.travelClass);
+}
+/** Provider snapshot time in IST (HH:MM), or null when unparsable. */
+export function staleTimeIST(iso: string): string | null {
+  const t = Date.parse(String(iso || ''));
+  if (!Number.isFinite(t)) return null;
+  try { return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(t)); }
+  catch { return null; }
+}
+export const staleLineText = (c: StaleCheckView) => {
+  const at = staleTimeIST(c.providerUpdatedAt);
+  return `${c.ticketOrigin} → ${c.ticketDestination} ${c.travelClass}: provider data ${at ? `${at} ka` : ''} (${Number(c.ageMinutes) || 0} min purana · ${c.status}) — fresh status confirm nahi ho paaya`.replace(/\s+/g, ' ');
+};
+export const StaleCheckLines: React.FC<{ list: StaleCheckView[] }> = ({ list }) => !list.length ? null : (
+  <div className="bk-sti__stale">
+    {list.map(c => <div key={`${c.ticketOrigin}-${c.ticketDestination}-${c.travelClass}`} className="bk-sti__meta">{staleLineText(c)}</div>)}
+  </div>
+);
 export const unavailableText = (s: { total: number } | null) =>
   `Same train: ${s ? `saare ${s.total} checks complete` : 'search complete'} — is train mein waitlisted class ke liye koi verified seat nahi mili.`;
 

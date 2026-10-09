@@ -3,7 +3,8 @@
  * LLM does not resolve stations itself; this resolver extracts origin/destination
  * and maps them to canonical station codes via a station dictionary.
  */
-import { STATION_ALIASES } from '@shared/constants';
+import { STATION_ALIASES, AMBIGUOUS_STATION_NAMES } from '@shared/constants';
+import { lookupStationCatalog, type StationCatalogMatch } from './station-catalog';
 import { providerToolCatalog } from '../../ai/tools/provider-tools';
 import type { ResolvedStation, RailwayError } from '../types/railway-types';
 
@@ -34,6 +35,37 @@ export function resolveStationToken(raw: string): ResolvedStation | null {
   const t = raw.trim();
   if (providerToolCatalog.enabled() && /^[A-Z]{2,5}$/.test(t)) return { code: t, name: t };
   return null;
+}
+
+/**
+ * 2026-10-09 — resolve ONE whole station value (a tool argument / entity slot the LLM filled from the user's words) for
+ * ALL stations: dictionary alias (exact) → station catalog (official code in any case, or the full official name; a
+ * name shared by several stations is AMBIGUOUS, never guessed) → the existing resolveStationToken rules.
+ * Never used to scan free text word by word.
+ */
+export function resolveStationArgumentDetailed(raw: string): { kind: 'RESOLVED'; code: string; name: string }
+  | { kind: 'AMBIGUOUS'; candidates: ReadonlyArray<{ code: string; name: string }> } | { kind: 'UNKNOWN' } {
+  if (typeof raw !== 'string' || !raw.trim()) return { kind: 'UNKNOWN' };
+  const key = raw.toLowerCase().trim().replace(/\s+/g, ' ');
+  if (STATION_ALIASES[key]) return { kind: 'RESOLVED', code: STATION_ALIASES[key].code, name: STATION_ALIASES[key].name };
+  if (AMBIGUOUS_STATION_NAMES[key]) return { kind: 'AMBIGUOUS', candidates: AMBIGUOUS_STATION_NAMES[key] };
+  const c: StationCatalogMatch | null = lookupStationCatalog(raw);
+  if (c?.kind === 'RESOLVED') return { kind: 'RESOLVED', code: c.code, name: c.name };
+  if (c?.kind === 'AMBIGUOUS') return { kind: 'AMBIGUOUS', candidates: c.candidates };
+  const r = resolveStationToken(raw);
+  return r ? { kind: 'RESOLVED', code: r.code, name: r.name } : { kind: 'UNKNOWN' };
+}
+
+/** resolveStationArgumentDetailed → the station, or null when ambiguous / unknown. */
+export function resolveStationArgument(raw: string): ResolvedStation | null {
+  const r = resolveStationArgumentDetailed(raw);
+  return r.kind === 'RESOLVED' ? { code: r.code, name: r.name } : null;
+}
+
+/** "Katra (KEA), Miranpur Katra (MK) ya Shri Mata Vaishno Devi Katra (SVDK)" */
+export function stationCandidatesText(candidates: ReadonlyArray<{ code: string; name: string }>): string {
+  const names = candidates.map(c => `${c.name} (${c.code})`);
+  return names.length > 1 ? `${names.slice(0, -1).join(', ')} ya ${names[names.length - 1]}` : names.join('');
 }
 
 /**

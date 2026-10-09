@@ -35,6 +35,8 @@ export const SameTrainErrorCode = Object.freeze({
   RATE_LIMITED: 'RATE_LIMITED',
   PROVIDER_UNAVAILABLE: 'PROVIDER_UNAVAILABLE',
   PROVIDER_DATA_CONFLICT: 'PROVIDER_DATA_CONFLICT',
+  /** 2026-10-09: the provider answered with an availability snapshot older than the freshness limit — never a verdict */
+  STALE_PROVIDER_DATA: 'STALE_PROVIDER_DATA',
   RESULT_STALE: 'ALTERNATIVE_RESULT_STALE',
   STALE_RESULT: 'STALE_ALTERNATIVE_RESULT',
   NOT_FOUND: 'ALTERNATIVE_NOT_FOUND',
@@ -95,6 +97,8 @@ export interface ProviderEvidence {
   passengersCount: number;
   /** provider answer (only when outcome SUCCESS) */
   availability?: { category: AvailabilityCategory; status: string; statusText?: string; quota?: string; providerUpdatedAt?: string };
+  /** 2026-10-09: outcome FAILED / STALE_PROVIDER_DATA — the provider's old snapshot (kept for honesty, never a verdict) */
+  staleSnapshot?: { status: string; providerUpdatedAt: string; ageMinutes: number };
   fare?: { total?: number; perPassenger?: number; currency?: string; fetchedAt: string };
   fareOutcome?: EvidenceOutcome;
   /** typed reason when not SUCCESS (never a provider secret / raw body) */
@@ -264,7 +268,10 @@ export interface SameTrainAlternativesResult {
   /** false when the candidate list was truncated or some provider calls failed / timed out — never claim exhaustive */
   searchComplete?: boolean;
   /** F3: counts of real provider outcomes of this search (skipped = never sent, e.g. deadline); paced = fair queue used */
-  checkSummary?: { total: number; succeeded: number; failed: number; skipped: number; retried: number; paced: boolean };
+  checkSummary?: { total: number; succeeded: number; failed: number; skipped: number; retried: number; paced: boolean; stale?: number };
+  /** 2026-10-09: checks whose provider snapshot was older than maxSnapshotAgeMs — shown as "not confirmed", never as a
+   *  verdict or an option (status = the stale provider text, providerUpdatedAt = the provider's own snapshot time) */
+  staleChecks?: SameTrainStaleCheck[];
   toolExecutionId?: string | null;
   /** P42.9: provider call counters for this recovery execution (observability) */
   callStats?: SameTrainCallStats;
@@ -326,6 +333,12 @@ export function toSameTrainRecoveryResults(r: SameTrainAlternativesResult | null
 }
 
 /** Bounded search limits (spec "SEARCH LIMITS") — configurable via env, clamped to safe ranges. */
+/** 2026-10-09: one availability check answered with a provider snapshot older than the freshness limit. */
+export interface SameTrainStaleCheck {
+  provider: string; ticketOrigin: string; ticketDestination: string; travelClass: string;
+  status: string; providerUpdatedAt: string; ageMinutes: number;
+}
+
 export interface SameTrainLimits {
   maxCandidatePairs: number;
   maxOriginSweepStations: number;
@@ -339,6 +352,9 @@ export interface SameTrainLimits {
   /** RailRadar Phase 1: cross-check the route on the secondary route provider when the primary route data cannot verify
    *  the requested pair (default on; SAME_TRAIN_ROUTE_CROSS_CHECK=off disables) */
   routeCrossCheck?: boolean;
+  /** 2026-10-09: max age (ms) of a provider availability snapshot (providerUpdatedAt). An older snapshot is never a
+   *  verdict: outcome FAILED / STALE_PROVIDER_DATA, the search is not complete (SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN, 0 = off) */
+  maxSnapshotAgeMs?: number;
 }
 
 /**
@@ -373,7 +389,8 @@ export const SAME_TRAIN_DEFAULT_LIMITS: Readonly<SameTrainLimits> = Object.freez
   maxParallel: 6,
   perCallTimeoutMs: 9000,
   totalTimeoutMs: 45000,
-  maxWebChecks: 8
+  maxWebChecks: 8,
+  maxSnapshotAgeMs: 60 * 60 * 1000          // 60 min (SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN)
 });
 export const DESTINATION_EXTENSION_MIN = 5;
 export const DESTINATION_EXTENSION_MAX = 7;

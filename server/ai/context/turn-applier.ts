@@ -40,7 +40,7 @@ import type { BookingSession, PendingInteraction, BookingEventType } from '@shar
 import type { AgentDecision, ExtractedEntities, OrchestratorError, OrchestratorErrorCode } from '../decisions/agent-decision';
 import type { ConversationStateManager } from '../state/conversation-state';
 import { STATE_ORDER } from '../state/state-transition-validator';
-import { resolveStationToken } from '../../railway/resolvers/route-resolver';
+import { resolveStationArgument as resolveStationToken } from '../../railway/resolvers/route-resolver';   // 2026-10-09: whole slot values → catalog-aware resolver
 import { ContextPatchValidator, classPreferenceFamily, type PatchReview } from '../conversation/context-patch';
 import { explicitPreferenceSaveRequested, PREFERENCE_NOT_EXPLICIT } from './preference-save-grounding';
 import type { ContextPatch, RejectedPatch } from '@shared/conversation-context';

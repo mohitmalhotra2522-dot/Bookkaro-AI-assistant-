@@ -269,7 +269,9 @@ export interface SameTrainDiscoverProgress {
   state: 'QUEUED' | 'RUNNING' | 'FINALIZING'; total: number; done: number; succeeded: number; failed: number; retried: number;
   found: { ticketOrigin: string; ticketDestination: string; travelClass: string; status: string }[];
 }
-export interface SameTrainDiscoverResult { ok: boolean; code: string; card?: any; budget?: { used: number; max: number }; progress?: SameTrainDiscoverProgress | null }
+export interface SameTrainDiscoverResult { ok: boolean; code: string; card?: any; budget?: { used: number; max: number }; progress?: SameTrainDiscoverProgress | null;
+  /** 2026-10-09: failed search whose checks came back with too-old provider snapshots */
+  staleChecks?: Array<{ ticketOrigin: string; ticketDestination: string; travelClass: string; status: string; providerUpdatedAt: string; ageMinutes: number }> }
 export async function discoverSameTrainAlternative(sessionId: string, body: { trainNumber: string; travelClass?: string; searchResultsVersion: number },
   opts: { async?: boolean } = {}): Promise<SameTrainDiscoverResult> {
   try {

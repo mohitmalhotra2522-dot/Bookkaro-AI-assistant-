@@ -20,7 +20,10 @@ export const STATION_ALIASES: Record<string, { code: string; name: string }> = {
   juc: { code: 'JUC', name: 'Jalandhar City' },
   // Prompt 16: two real stations share the name "Ambala" — the bare name is AMBIGUOUS (never guessed)
   'ambala cantt': { code: 'UMB', name: 'Ambala Cantt Junction' },
-  'ambala city': { code: 'UBC', name: 'Ambala City' }
+  'ambala city': { code: 'UBC', name: 'Ambala City' },
+  // 2026-10-09: official alternate names the station catalog spells differently ("Jammutavi", "Delhi") — exact keys only
+  'jammu tawi': { code: 'JAT', name: 'Jammu Tawi' },
+  'old delhi': { code: 'DLI', name: 'Old Delhi' }
 };
 
 /**

@@ -47,7 +47,9 @@ export function sameTrainLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Sa
     maxWebChecks: envNum(env, 'SAME_TRAIN_MAX_WEB_CHECKS', D.maxWebChecks, 0, 20),
     maxAvailabilityChecks: envNum(env, 'SAME_TRAIN_MAX_AVAILABILITY_CHECKS', D.maxAvailabilityChecks ?? 120, 1, MAX_AVAILABILITY_CHECKS),
     // RailRadar Phase 1: route cross-check on the secondary route provider (default on; off|false|0 disables)
-    routeCrossCheck: !/^(off|false|0)$/i.test(String(env.SAME_TRAIN_ROUTE_CROSS_CHECK ?? '').trim())
+    routeCrossCheck: !/^(off|false|0)$/i.test(String(env.SAME_TRAIN_ROUTE_CROSS_CHECK ?? '').trim()),
+    // 2026-10-09: provider snapshot freshness limit in minutes (0 = off); default 60
+    maxSnapshotAgeMs: envNum(env, 'SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN', Math.round((D.maxSnapshotAgeMs ?? 3600000) / 60000), 0, 24 * 60) * 60000
   };
 }
 
@@ -295,8 +297,21 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (x: T) => Promise<R
   return out;
 }
 
-/** Validate one provider availability answer against the request binding (no silent substitution). */
-export function evaluateAvailabilityAnswer(resp: any, q: AvailabilityQuery): Pick<ProviderEvidence, 'outcome' | 'availability' | 'errorCode' | 'rejectedReason'> {
+/** Freshness of a provider snapshot: age in ms from the provider's own timestamp, or null when it has none / unparsable. */
+export function snapshotAgeMs(providerUpdatedAt: unknown, nowMs: number = Date.now()): number | null {
+  if (providerUpdatedAt === undefined || providerUpdatedAt === null || providerUpdatedAt === '') return null;
+  const t = Date.parse(String(providerUpdatedAt));
+  if (!Number.isFinite(t)) return null;
+  return Math.max(0, nowMs - t);                // a clock-skewed future timestamp counts as fresh (age 0)
+}
+
+/**
+ * Validate one provider availability answer against the request binding (no silent substitution).
+ * 2026-10-09: with `opts.maxSnapshotAgeMs` (> 0), an answer whose provider snapshot (providerUpdatedAt) is older than the
+ * limit is NOT a verdict — outcome FAILED / STALE_PROVIDER_DATA; the old status + time are kept as staleSnapshot.
+ */
+export function evaluateAvailabilityAnswer(resp: any, q: AvailabilityQuery, opts: { maxSnapshotAgeMs?: number; nowMs?: number } = {})
+  : Pick<ProviderEvidence, 'outcome' | 'availability' | 'errorCode' | 'rejectedReason' | 'staleSnapshot'> {
   if (!resp || typeof resp !== 'object') return { outcome: 'FAILED', errorCode: 'MALFORMED_PROVIDER_RESPONSE' };
   if (resp.ok !== true) {
     const code = String(resp.error?.code || 'PROVIDER_ERROR');
@@ -308,6 +323,14 @@ export function evaluateAvailabilityAnswer(resp: any, q: AvailabilityQuery): Pic
   if (d.date && normDate(d.date) !== q.date) return { outcome: 'REJECTED', rejectedReason: 'WRONG_DATE', errorCode: 'RESULT_IDENTITY_MISMATCH' };
   if (d.travelClass && String(d.travelClass).toUpperCase() !== q.travelClass) return { outcome: 'REJECTED', rejectedReason: 'WRONG_CLASS', errorCode: 'RESULT_IDENTITY_MISMATCH' };
   const status = String(d.status).replace(/\s+/g, ' ').trim().slice(0, 40);
+  const maxAge = Number(opts.maxSnapshotAgeMs) || 0;
+  if (maxAge > 0) {
+    const age = snapshotAgeMs(d.providerUpdatedAt, opts.nowMs ?? Date.now());
+    if (age !== null && age > maxAge) {
+      return { outcome: 'FAILED', errorCode: E.STALE_PROVIDER_DATA,
+        staleSnapshot: { status, providerUpdatedAt: String(d.providerUpdatedAt).slice(0, 40), ageMinutes: Math.round(age / 60000) } };
+    }
+  }
   return { outcome: 'SUCCESS', availability: { category: availabilityCategory(status), status,
     ...(d.statusText ? { statusText: String(d.statusText).slice(0, 80) } : {}), ...(d.quota ? { quota: String(d.quota).slice(0, 8) } : {}),
     ...(d.providerUpdatedAt ? { providerUpdatedAt: String(d.providerUpdatedAt).slice(0, 40) } : {}) } };
@@ -604,7 +627,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
           if (stale) skippedStale = true;
           return { evald: { outcome: 'SKIPPED' as const, errorCode: stale ? E.RESULT_STALE : E.SEARCH_TIMEOUT }, at, latencyMs: at - s1, rateLimitLocal: undefined, retries: 0, cancelled: true };
         }
-        const evald = r.timedOut ? { outcome: 'TIMEOUT' as const, errorCode: 'PROVIDER_TIMEOUT' } : evaluateAvailabilityAnswer(r.value, q);
+        const evald = r.timedOut ? { outcome: 'TIMEOUT' as const, errorCode: 'PROVIDER_TIMEOUT' } : evaluateAvailabilityAnswer(r.value, q, { maxSnapshotAgeMs: L.maxSnapshotAgeMs, nowMs: Date.now() });
         if (evald.errorCode === 'RATE_LIMITED') stats.rateLimitedAttempts++;
         const retries = Number(sched?.retries) || 0;
         if (retries) { prog.retried += retries; }
@@ -744,6 +767,10 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
       timeouts: mine.filter(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT)).length };
   });
   const apiEv = allEv.filter(e => e.level === 'PROVIDER_API');
+  // 2026-10-09: checks answered with a too-old provider snapshot — reported as "not confirmed", never as a verdict
+  const staleChecks = apiEv.filter(e => e.errorCode === E.STALE_PROVIDER_DATA && e.staleSnapshot).map(e => ({ provider: e.provider,
+    ticketOrigin: e.ticketOrigin, ticketDestination: e.ticketDestination, travelClass: e.travelClass,
+    status: e.staleSnapshot!.status, providerUpdatedAt: e.staleSnapshot!.providerUpdatedAt, ageMinutes: e.staleSnapshot!.ageMinutes }));
   const anySuccess = apiEv.some(e => e.outcome === 'SUCCESS');
   const completedAt = new Date(now()).toISOString();
   const latencyMs = now() - t0;
@@ -762,11 +789,12 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     const allInvalid = apiEv.length > 0 && apiEv.every(e => e.outcome === 'REJECTED');
     return { ok: false, code: allTimeout ? E.SEARCH_TIMEOUT : E.SEARCH_FAILED, message: SAME_TRAIN_ALL_FAILED_MESSAGE,
       errorClass: allTimeout ? SameTrainErrorClass.TOOL_TIMEOUT : allInvalid ? SameTrainErrorClass.INVALID_TOOL_RESULT : SameTrainErrorClass.PROVIDER_UNAVAILABLE,
-      partial: { callStats } as any };
+      partial: { callStats, ...(staleChecks.length ? { staleChecks } : {}) } as any };
   }
   const anyFailure = apiEv.some(e => e.outcome !== 'SUCCESS');
   if (anyFailure && apiEv.some(e => e.outcome === 'TIMEOUT' || (e.outcome === 'SKIPPED' && e.errorCode === E.SEARCH_TIMEOUT))) errors.push(E.SEARCH_TIMEOUT);
   if (alternatives.some(a => a.verificationStatus === 'CONFLICTING')) errors.push(E.PROVIDER_DATA_CONFLICT);
+  if (staleChecks.length) errors.push(E.STALE_PROVIDER_DATA);
   // P42.2: a verified alternative needs seats for the WHOLE party (AVAILABLE count ≥ passengers) or RAC
   const verifiedAlternativeCount = alternatives.filter(isVerifiedSameTrainAlternative).length;
   const foundAlternative = verifiedAlternativeCount > 0;
@@ -802,7 +830,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     // F3: honest check summary for the screen (counts of real outcomes; skipped = never sent, e.g. search deadline)
     checkSummary: { total: apiEv.length, succeeded: apiEv.filter(e => e.outcome === 'SUCCESS').length,
       failed: apiEv.filter(e => e.outcome !== 'SUCCESS' && e.outcome !== 'SKIPPED').length, skipped: apiEv.filter(e => e.outcome === 'SKIPPED').length,
-      retried: apiEv.reduce((n, e) => n + (Number((e as any).retryCount) || 0), 0), paced: scheduled },
+      retried: apiEv.reduce((n, e) => n + (Number((e as any).retryCount) || 0), 0), paced: scheduled, stale: staleChecks.length },
+    ...(staleChecks.length ? { staleChecks } : {}),
     classesChecked: classes, earlierStationsChecked, downstreamStationsChecked, availabilityChecks: checksUsed, checksTruncated,
     ...(req.explicitUserRequest ? { explicitUserRequest: true } : {}),
     toolExecutionId: req.toolExecutionId ?? null,

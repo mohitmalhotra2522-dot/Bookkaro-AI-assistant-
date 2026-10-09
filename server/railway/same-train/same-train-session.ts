@@ -15,7 +15,7 @@
 import type { ConversationStateManager } from '../../ai/state/conversation-state';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import { evaluateSeatShortage } from '@shared/same-train-shortage';
-import type { SameTrainAlternativesResult } from '@shared/same-train-alternatives';
+import type { SameTrainAlternativesResult, SameTrainStaleCheck } from '@shared/same-train-alternatives';
 import { sameTrainAlternativesEnabledFromEnv } from '../../ai/tools/tool-registry';
 import type { RailwayToolService } from '../tools/railway-tool-service';
 import type { SameTrainDeps, SameTrainProgress } from './same-train-engine';
@@ -44,6 +44,8 @@ export interface DiscoverOutcome {
   budget?: { used: number; max: number };
   /** F3: RUNNING → genuine progress of the queued search (counts + interim seats; not a final verdict) */
   progress?: DiscoverProgress | null;
+  /** 2026-10-09: a failed search whose checks came back with too-old provider snapshots (never a verdict) */
+  staleChecks?: SameTrainStaleCheck[];
 }
 
 /** F3 progress view of one automatic search (QUEUED = waiting for its first provider slot). */
@@ -175,7 +177,8 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
     if (!isCurrent()) return { ok: false, code: 'RESULTS_STALE' };
     if (!out.ok) {
       opts.log?.({ event: 'same_train_auto', ok: false, code: out.code, trainNumber, travelClass, pax, paced: !!deps.scheduled, latencyMs: Date.now() - t0 });
-      const failed: DiscoverOutcome = { ok: false, code: 'SEARCH_FAILED', errorCode: out.code };
+      const stale = (out as any).partial?.staleChecks as SameTrainStaleCheck[] | undefined;
+      const failed: DiscoverOutcome = { ok: false, code: 'SEARCH_FAILED', errorCode: out.code, ...(stale?.length ? { staleChecks: stale } : {}) };
       rememberFailure(key, failed);
       return failed;
     }

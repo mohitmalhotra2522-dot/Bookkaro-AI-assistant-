@@ -13,7 +13,7 @@
  */
 import type { BookingSession } from '@shared/entities';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
-import { resolveStationToken } from '../../railway/resolvers/route-resolver';
+import { resolveStationToken, resolveStationArgumentDetailed, stationCandidatesText } from '../../railway/resolvers/route-resolver';
 import { extractDateExpression } from '../conversation/grounding';
 import { validateToolArgumentShape } from './tool-argument-schema';
 
@@ -73,8 +73,21 @@ function resolveStationArg(v: any): { code: string } | null {
   if (typeof v !== 'string' || !v.trim()) return null;
   const raw = v.trim();
   if (CODE.test(raw)) return { code: raw };
-  const r = resolveStationToken(raw);
+  // 2026-10-09: all stations — official code in any case ("Svdk") / full official name via the station catalog
+  const d = resolveStationArgumentDetailed(raw);
+  if (d.kind === 'RESOLVED') return { code: d.code };
+  const r = d.kind === 'UNKNOWN' ? resolveStationToken(raw) : null;
   return r ? { code: r.code } : null;
+}
+
+/** 2026-10-09: an unresolved station value → the honest reason (several stations share the name → list them). */
+function stationArgRejection(v: any, f: string): ArgRejection {
+  const d = typeof v === 'string' ? resolveStationArgumentDetailed(v.trim()) : { kind: 'UNKNOWN' as const };
+  if (d.kind === 'AMBIGUOUS') {
+    return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${v}" naam ke ek se zyada stations hain — ${stationCandidatesText(d.candidates)}. Kaunsa station?`,
+      details: { field: f, missingField: 'STATION', candidates: d.candidates.map(c => ({ code: c.code, name: c.name })) } } as any;
+  }
+  return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${v}" station identify nahi hua.`, details: { field: f, missingField: 'STATION' } };
 }
 
 export function normalizeToolArguments(tool: string, rawArgs: Record<string, any>, session: BookingSession, userText: string): NormalizedArgs | ArgRejection {
@@ -118,7 +131,7 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
     for (const f of ['origin', 'destination'] as const) {
       if (args[f] === undefined) continue;
       const r = resolveStationArg(args[f]);
-      if (!r) return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${args[f]}" station identify nahi hua.`, details: { field: f, missingField: 'STATION' } };
+      if (!r) return stationArgRejection(args[f], f);
       if (r.code !== args[f]) corrections.push(`${f}: "${args[f]}" → ${r.code} (RouteResolver)`);
       args[f] = r.code;
     }
@@ -130,7 +143,7 @@ export function normalizeToolArguments(tool: string, rawArgs: Record<string, any
       if (args[f] === undefined) continue;
       const r = resolveStationArg(args[f]);
       const cur = session[f];
-      if (!r) return { ok: false, code: 'AMBIGUOUS_STATION', message: `"${args[f]}" station identify nahi hua.`, details: { field: f, missingField: 'STATION' } };
+      if (!r) return stationArgRejection(args[f], f);
       if (cur && r.code !== cur) {
         return { ok: false, code: 'CONTEXT_CONFLICT', message: `Abhi journey ${session.origin} → ${session.destination} hai. ${f === 'origin' ? 'Origin' : 'Destination'} ${r.code} karna hai to pehle journey badal dijiye.`, details: { field: f, current: cur, proposed: r.code } };
       }

@@ -233,11 +233,13 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
   const once = (p: ProviderRef) => Promise.race([deps.checkAvailability(p, q), new Promise(res => setTimeout(() => res({ ok: false, error: { code: 'PROVIDER_TIMEOUT' } }), deps.limits.perCallTimeoutMs))]);
   const answers = await Promise.all(refs.map(async p => {
     const r = await once(p);
-    let ev = evaluateAvailabilityAnswer(r, q);
+    // 2026-10-09: the re-check is fresh-only — a too-old provider snapshot is FAILED / STALE_PROVIDER_DATA (no fallback)
+    const freshness = { maxSnapshotAgeMs: deps.limits.maxSnapshotAgeMs, nowMs: Date.now() };
+    let ev = evaluateAvailabilityAnswer(r, q, freshness);
     // P42.9: fresh re-check — primary eligible fault (rate limit / unavailable / timeout) → backend fallback provider once
     if (ev.outcome !== 'SUCCESS' && isFallbackEligible(ev.errorCode) && p.id !== ACTIVE) {
       const fid = fallbackProviderFor(p.id, 'CHECK_AVAILABILITY');
-      if (fid && !refs.some(x => x.id === fid)) { const fp = refOf(fid); const ev2 = evaluateAvailabilityAnswer(await once(fp), q); return { p: fp, ev: ev2, fallbackFrom: p.id, fallbackReason: String(ev.errorCode) }; }
+      if (fid && !refs.some(x => x.id === fid)) { const fp = refOf(fid); const ev2 = evaluateAvailabilityAnswer(await once(fp), q, freshness); return { p: fp, ev: ev2, fallbackFrom: p.id, fallbackReason: String(ev.errorCode) }; }
     }
     return { p, ev };
   }));
@@ -246,7 +248,11 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
     ...((a as any).fallbackFrom ? { fallbackUsed: true, fallbackReason: (a as any).fallbackReason, primaryProvider: (a as any).fallbackFrom } : {}) }));
   const view = { alternativeId: alt.alternativeId, trainNumber: alt.trainNumber, travelClass: alt.travelClass, date: alt.date, ticketOrigin: alt.ticketOrigin, ticketDestination: alt.ticketDestination,
     boardingStation: alt.boardingStation, alightingStation: alt.alightingStation, boardingRuleStatus: alt.boardingRuleStatus, alightingRuleStatus: alt.alightingRuleStatus, verificationStatus: alt.verificationStatus };
-  if (!ok.length) return { ok: false, code: E.SEARCH_FAILED, message: 'Fresh availability verify nahi ho paayi — abhi select nahi kar sakte.', alternative: view };
+  if (!ok.length) {
+    const st = answers.find(a => a.ev.errorCode === E.STALE_PROVIDER_DATA && a.ev.staleSnapshot);
+    if (st) return { ok: false, code: E.STALE_PROVIDER_DATA, message: `Provider ka data ${st.ev.staleSnapshot!.ageMinutes} min purana hai — fresh availability verify nahi ho paayi, abhi select nahi kar sakte.`, alternative: view };
+    return { ok: false, code: E.SEARCH_FAILED, message: 'Fresh availability verify nahi ho paayi — abhi select nahi kar sakte.', alternative: view };
+  }
   if (new Set(ok.map(a => statusKey(a.ev.availability!.status))).size > 1) return { ok: false, code: E.PROVIDER_DATA_CONFLICT, message: 'Providers ka fresh data match nahi kar raha.', alternative: view, fresh };
   const cat = ok[0].ev.availability!.category;
   // P42.4: an alternative is actionable only while it is still AVAILABLE (whole party) or RAC — a pair that has fallen to

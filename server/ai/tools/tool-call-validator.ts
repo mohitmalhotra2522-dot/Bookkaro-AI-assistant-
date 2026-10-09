@@ -30,7 +30,7 @@ import type { OrchestratorError } from '../decisions/agent-decision';
 import { TrainReferenceResolver, currentResults } from '../context/train-reference-resolver';
 import { resultSetOf } from '../context/reference-context';
 import { resolveDate } from '../../railway/resolvers/date-resolver';
-import { resolveStationToken } from '../../railway/resolvers/route-resolver';
+import { resolveStationArgument as resolveStationToken } from '../../railway/resolvers/route-resolver';   // 2026-10-09: catalog-aware (all stations)
 import { normalizePnrInput, pnrsInText } from '../../booking/post-booking/pnr-validator';
 import type { ToolGrounding } from '../../booking/post-booking/post-booking-service';
 import { namedResultRow } from '../tool-runtime/tool-argument-normalizer';

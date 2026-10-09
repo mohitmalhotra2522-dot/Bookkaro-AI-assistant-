@@ -592,6 +592,8 @@ img, svg { display: block; }
 .bk-sti__fallback { margin-top: 6px; }
 .bk-sti__more { justify-self: start; align-self: flex-start; margin-top: 4px; }
 .bk-sti--partial { gap: 4px; }
+.bk-sti__stale { display: flex; flex-direction: column; gap: 2px; }
+.bk-sti__stale .bk-sti__meta { margin-left: 0; }
 /* F3 — paced queue states: progress bar, interim (not selectable) seats, final state line */
 .bk-sti--running, .bk-sti--queued { display: flex; flex-direction: column; gap: 4px; }
 .bk-sti__bar { height: 4px; border-radius: 2px; background: var(--line, rgba(127,127,127,.25)); overflow: hidden; }
