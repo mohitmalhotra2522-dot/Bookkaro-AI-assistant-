@@ -89,7 +89,8 @@ describe('RK-R4 P42.9 provider-tool fallback walks the capability chain', () => 
     expect(primaryProviderId(ROUTED)).toBe('railcore');
     expect(primaryProviderId(ROUTED, 'SEARCH_TRAINS')).toBe('railcore');
     expect(fallbackChainFor('railkit', 'CHECK_AVAILABILITY', ROUTED)).toEqual(['railcore', 'railradar']);
-    expect(fallbackChainFor('railcore', 'CHECK_AVAILABILITY', ROUTED)).toEqual([]);     // not the availability primary
+    expect(fallbackChainFor('railcore', 'CHECK_AVAILABILITY', ROUTED)).toEqual(['railradar']);   // LLM-picked RailCore keeps RailCore → RailRadar
+    expect(fallbackChainFor('railradar', 'CHECK_AVAILABILITY', ROUTED)).toEqual([]);              // end of the chain; never back up to RailKit
     expect(fallbackChainFor('railcore', 'SEARCH_TRAINS', ROUTED)).toEqual(['railradar']);
     expect(fallbackProviderFor('railkit', 'GET_FARE', ROUTED)).toBe('railcore');
   });
@@ -130,7 +131,7 @@ describe('RK-R5 same-train uses the availability primary + linked fallbacks', ()
   });
   afterEach(() => { for (const k of Object.keys(saved)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; } });
 
-  it('default → RailKit availability, RailCore route; fallbacks railkit→railcore→railradar; an LLM choice is honoured but gets no hidden fallback', () => {
+  it('default → RailKit availability, RailCore route; fallbacks railkit→railcore→railradar; an LLM choice is honoured and keeps the rest of the chain (visible fallback)', () => {
     const r: any = resolveSameTrainProviders();
     expect(r.ok).toBe(true);
     expect(r.selection).toBe('DEFAULT_PRIMARY');
@@ -140,7 +141,9 @@ describe('RK-R5 same-train uses the availability primary + linked fallbacks', ()
     expect(Object.fromEntries(Object.entries(r.fallbacks).map(([k, v]: any) => [k, v.id]))).toEqual({ railkit: 'railcore', railcore: 'railradar' });
     const llm: any = resolveSameTrainProviders('railcore');
     expect(llm.selection).toBe('LLM'); expect(llm.providers.map((p: any) => p.id)).toEqual(['railcore']);
-    expect(llm.fallbacks).toEqual({});
+    expect(Object.fromEntries(Object.entries(llm.fallbacks).map(([k, v]: any) => [k, v.id]))).toEqual({ railcore: 'railradar' });
+    const rr: any = resolveSameTrainProviders('railradar');
+    expect(rr.providers.map((p: any) => p.id)).toEqual(['railradar']); expect(rr.fallbacks).toEqual({});
   });
 
   it('engine: RailKit RATE_LIMITED → RailCore RATE_LIMITED → RailRadar answers THAT request; a RailKit success asks nobody else', async () => {
@@ -168,5 +171,40 @@ describe('RK-R5 same-train uses the availability primary + linked fallbacks', ()
     const ev = (out as any).result.alternatives.flatMap((a: any) => a.evidence).find((e: any) => e.provider === 'railradar');
     expect(ev).toMatchObject({ outcome: 'SUCCESS', fallbackUsed: true, fallbackReason: 'RATE_LIMITED', primaryProvider: 'railkit' });
     expect(calls.filter(c => c.includes(':B-'))).toEqual(['railkit:B-D']);   // RailKit answered → no fallback call
+  });
+});
+
+describe('RK-R6 an LLM-selected provider keeps the RailCore → RailRadar fallback (availability / fare chain only)', () => {
+  const reg = (id: string, caps: any[]) => providerToolCatalog.register({ id, label: id, registryId: id, capabilities: caps });
+  beforeEach(() => {
+    reg('railcore', ['SEARCH_TRAINS', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE']);
+    reg('railradar', ['SEARCH_TRAINS', 'GET_TIMETABLE', 'CHECK_AVAILABILITY', 'GET_FARE']);
+    reg('railkit', ['CHECK_AVAILABILITY', 'GET_FARE']);
+  });
+  const code = (r: any) => (r.ok ? null : r.error.code);
+  const mk = (codes: Record<string, string | null>, order: string[]) => async (p: string) => { order.push(p); return codes[p] ? { ok: false, error: { code: codes[p] } } : { ok: true, data: p }; };
+
+  it('Muse picks RailCore for availability / fare: RATE_LIMITED → RailRadar answers (visible); RailKit is never asked behind its back', async () => {
+    for (const cap of ['CHECK_AVAILABILITY', 'GET_FARE']) {
+      const order: string[] = [];
+      const o = await runWithProviderFallback({ primary: 'railcore', capability: cap, call: mk({ railcore: 'RATE_LIMITED', railradar: null }, order), errorCodeOf: code, env: ROUTED });
+      expect(order).toEqual(['railcore', 'railradar']);
+      expect(o).toMatchObject({ served: 'railradar', fallbackUsed: true, fallbackReason: 'RATE_LIMITED' });
+    }
+  });
+  it('non-eligible answers still stop it (NOT_FOUND / INVALID_*); a RailCore success asks nobody else', async () => {
+    for (const c of ['NOT_FOUND', 'INVALID_REQUEST', null]) {
+      const order: string[] = [];
+      await runWithProviderFallback({ primary: 'railcore', capability: 'CHECK_AVAILABILITY', call: mk({ railcore: c, railradar: null }, order), errorCodeOf: code, env: ROUTED });
+      expect(order).toEqual(['railcore']);
+    }
+  });
+  it('unchanged elsewhere: search / route keep the general chain; without RAILWAY_AVAILABILITY_PROVIDERS a non-primary still gets no fallback', () => {
+    expect(fallbackChainFor('railradar', 'SEARCH_TRAINS', ROUTED)).toEqual([]);
+    expect(fallbackChainFor('railradar', 'GET_TIMETABLE', ROUTED)).toEqual([]);
+    const legacy = { RAILWAY_PROVIDER: 'live', RAILWAY_PRIMARY_PROVIDER: 'railcore', RAILWAY_FALLBACK_PROVIDERS: 'railkit,railradar' };
+    expect(fallbackChainFor('railcore', 'CHECK_AVAILABILITY', legacy)).toEqual(['railkit', 'railradar']);
+    expect(fallbackChainFor('railkit', 'CHECK_AVAILABILITY', legacy)).toEqual([]);
+    expect(fallbackChainFor('railcore', 'CHECK_AVAILABILITY', { ...ROUTED, RAILWAY_PROVIDER_FALLBACK: 'off' })).toEqual([]);
   });
 });

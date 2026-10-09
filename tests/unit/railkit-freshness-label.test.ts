@@ -191,4 +191,22 @@ describe('RK-F3 same-train — label on undated options; the 120-minute guard is
     expect(r.freshnessUnverified).toBe(true);
     expect(r.fresh[0].freshness).toMatchObject({ status: 'TIMESTAMP_UNAVAILABLE' });
   });
+
+  it('fresh re-check REFUSALS also carry the label when undated (no longer available / not enough seats); a dated re-check has none', async () => {
+    const recheck = (status: string, updatedAt: string | null): SameTrainDeps => ({ ...deps(() => null),
+      checkAvailability: async (_p, q) => ({ ok: true, data: { trainNumber: q.trainNumber, travelClass: q.travelClass, date: q.date, status, providerUpdatedAt: updatedAt } }) });
+    const run = async (pax: number) => { const out: any = await runSameTrainSearch({ ...req(), passengersCount: pax } as any, deps(() => null));
+      return { stored: out.result, alt: out.result.alternatives.find((a: any) => a.ticketOrigin === 'A' && a.availability === 'AVAILABLE') }; };
+    const { stored, alt } = await run(1);
+    const gone: any = await revalidateSameTrainAlternative(stored, stored.alternativeSearchId, alt.alternativeId, stored.journeyKey, { deps: recheck('GNWL 3', null), acknowledgeUnverifiedRules: true });
+    expect(gone).toMatchObject({ ok: false, code: 'ALTERNATIVE_NO_LONGER_AVAILABLE' });
+    expect(gone.message).toBe(`Fresh check: GNWL 3 — yeh option ab available nahi. ${LABEL}`);
+    const dated: any = await revalidateSameTrainAlternative(stored, stored.alternativeSearchId, alt.alternativeId, stored.journeyKey, { deps: recheck('GNWL 3', ago(5)), acknowledgeUnverifiedRules: true });
+    expect(dated.code).toBe('ALTERNATIVE_NO_LONGER_AVAILABLE');
+    expect(dated.message).not.toContain(LABEL);
+    const two = await run(2);
+    const few: any = await revalidateSameTrainAlternative(two.stored, two.stored.alternativeSearchId, two.alt.alternativeId, two.stored.journeyKey, { deps: recheck('AVAILABLE-0001', null), acknowledgeUnverifiedRules: true });
+    expect(few).toMatchObject({ ok: false, code: 'ALTERNATIVE_INSUFFICIENT_SEATS' });
+    expect(few.message).toContain(LABEL);
+  });
 });

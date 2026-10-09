@@ -18,7 +18,7 @@
  * web connector, never MOCK for LIVE.
  */
 import { providerToolCatalog } from '../../ai/tools/provider-tools';
-import { providerChainFor } from './live/live-config';
+import { AVAILABILITY_ROUTED_CAPABILITIES, parseAvailabilityChain, providerChainFor } from './live/live-config';
 import { WEB_PROVIDER_IDS } from './web/web-providers';
 
 type Env = Record<string, string | undefined>;
@@ -43,7 +43,8 @@ export function primaryProviderId(env: Env = process.env, capability?: string): 
 }
 
 /**
- * Ordered fallback connectors for (provider, capability): only for that capability's configured PRIMARY, only registered
+ * Ordered fallback connectors for (provider, capability): for that capability's configured PRIMARY (and, for availability /
+ * fare with RAILWAY_AVAILABILITY_PROVIDERS set, for an LLM-named provider further down that chain — the rest of it), only registered
  * non-web connectors that implement the capability, in chain order (2026-10-09: the whole chain, so RailKit → RailCore →
  * RailRadar keeps the RailCore → RailRadar step). [] → no fallback.
  */
@@ -51,10 +52,18 @@ export function fallbackChainFor(provider: string | null | undefined, capability
   if (!provider || !providerFallbackEnabled(env)) return [];
   let chain: string[];
   try { chain = providerChainFor(capability, env); } catch { return []; }
-  if (chain[0] !== provider) return [];
+  let start = chain.indexOf(provider as any);
+  if (start !== 0) {
+    // 2026-10-09 (approved routing): with RAILWAY_AVAILABILITY_PROVIDERS set, an LLM-named NON-primary availability / fare
+    // provider keeps the REST of that chain after it (RailKit preferred → an LLM-picked RailCore still falls back to
+    // RailRadar; never back up the chain). Everything else (general chain, or the variable unset) is unchanged: [].
+    let routed = false;
+    try { routed = AVAILABILITY_ROUTED_CAPABILITIES.includes(capability) && !!parseAvailabilityChain(env); } catch { routed = false; }
+    if (start < 0 || !routed) return [];
+  }
   const primaryInfo = providerToolCatalog.get(provider);
   const out: string[] = [];
-  for (const id of chain.slice(1)) {
+  for (const id of chain.slice(start + 1)) {
     if ((WEB_PROVIDER_IDS as readonly string[]).includes(id)) continue;
     const c = providerToolCatalog.get(id);
     if (!c || !c.capabilities.includes(capability as any)) continue;

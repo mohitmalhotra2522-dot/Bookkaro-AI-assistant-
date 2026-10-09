@@ -297,22 +297,25 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
     if (st) return { ok: false, code: E.STALE_PROVIDER_DATA, message: `Provider ka data ${st.ev.staleSnapshot!.ageMinutes} min purana hai — fresh availability verify nahi ho paayi, abhi select nahi kar sakte.`, alternative: view };
     return { ok: false, code: E.SEARCH_FAILED, message: 'Fresh availability verify nahi ho paayi — abhi select nahi kar sakte.', alternative: view };
   }
-  if (new Set(ok.map(a => statusKey(a.ev.availability!.status))).size > 1) return { ok: false, code: E.PROVIDER_DATA_CONFLICT, message: 'Providers ka fresh data match nahi kar raha.', alternative: view, fresh };
+
+  // 2026-10-09: an undated provider answer is a NEW provider answer, but its data age is unknown → every re-check message
+  // that reports it carries the label (success AND refusal), never "fresh data"
+  const undated = ok.some(a => isFreshnessUnverifiable(a.ev.availability!.freshness));
+  const label = undated ? ` ${PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL}` : '';
+  if (new Set(ok.map(a => statusKey(a.ev.availability!.status))).size > 1) return { ok: false, code: E.PROVIDER_DATA_CONFLICT, message: `Providers ka fresh data match nahi kar raha.${label}`, alternative: view, fresh };
   const cat = ok[0].ev.availability!.category;
   // P42.4: an alternative is actionable only while it is still AVAILABLE (whole party) or RAC — a pair that has fallen to
   // WAITLIST since the search is no longer an alternative to the waitlisted original
-  if (cat === 'NOT_AVAILABLE' || cat === 'UNKNOWN' || cat === 'WAITLIST') return { ok: false, code: 'ALTERNATIVE_NO_LONGER_AVAILABLE', message: `Fresh check: ${ok[0].ev.availability!.status} — yeh option ab available nahi.`, alternative: view, fresh };
+  if (cat === 'NOT_AVAILABLE' || cat === 'UNKNOWN' || cat === 'WAITLIST') return { ok: false, code: 'ALTERNATIVE_NO_LONGER_AVAILABLE', message: `Fresh check: ${ok[0].ev.availability!.status} — yeh option ab available nahi.${label}`, alternative: view, fresh };
   // P42.2: the fresh count must still cover the whole party ("AVAILABLE-0001" for 3 passengers is not selectable)
   const seats = evaluateSeatShortage({ status: ok[0].ev.availability!.status, requestedPassengerCount: alt.passengersCount });
   if (seats.sufficiency === 'INSUFFICIENT') {
-    return { ok: false, code: 'ALTERNATIVE_INSUFFICIENT_SEATS', message: `Fresh check: ${ok[0].ev.availability!.status} — ${alt.passengersCount} passengers ke liye seats kaafi nahi.`, alternative: view, fresh };
+    return { ok: false, code: 'ALTERNATIVE_INSUFFICIENT_SEATS', message: `Fresh check: ${ok[0].ev.availability!.status} — ${alt.passengersCount} passengers ke liye seats kaafi nahi.${label}`, alternative: view, fresh };
   }
   const handoffText = `Same Train Alternative chuna (${alt.alternativeId}): train ${alt.trainNumber}, ${alt.travelClass}, ${alt.date}, ticket ${alt.ticketOrigin} se ${alt.ticketDestination}. Isi ticket journey ke saath booking aage badhao.`;
   // 2026-10-09: an earlier-station ticket of the same run is dated for that station's departure — say so explicitly
   const shifted = alt.ticketDateShiftDays && alt.journeyDate ? ` Ticket date ${alt.date} hai — train ${alt.ticketOrigin} se isi run par chalti hai (${alt.requestedOrigin} ka date ${alt.journeyDate}).` : '';
-  // 2026-10-09: an undated provider answer is a NEW provider answer, but its data age is unknown → say so (never "fresh data")
-  const undated = ok.some(a => isFreshnessUnverifiable(a.ev.availability!.freshness));
-  return { ok: true, message: `Fresh check: ${ok[0].ev.availability!.status}.${undated ? ` ${PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL}` : ''}`, alternative: view, fresh,
+  return { ok: true, message: `Fresh check: ${ok[0].ev.availability!.status}.${label}`, alternative: view, fresh,
     handoffText: handoffText + shifted, ...(undated ? { freshnessUnverified: true } : {}) };
 }
 
