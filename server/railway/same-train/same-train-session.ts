@@ -14,14 +14,12 @@
  */
 import type { ConversationStateManager } from '../../ai/state/conversation-state';
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
-import { evaluateSeatShortage } from '@shared/same-train-shortage';
 import type { SameTrainAlternativesResult, SameTrainStaleCheck } from '@shared/same-train-alternatives';
-import { BOARD_EARLIER_STOPS, BOOK_UPTO_STOPS, EARLIER_PROBE_CONCURRENCY, SAME_TRAIN_TRAIN_CONCURRENCY } from '@shared/same-train-alternatives';
 import { sameTrainAlternativesEnabledFromEnv } from '../../ai/tools/tool-registry';
 import type { RailwayToolService } from '../tools/railway-tool-service';
 import type { SameTrainDeps, SameTrainProgress } from './same-train-engine';
-import { scheduledSameTrainDeps, sameTrainPacedQueueEnabled } from './same-train-service';
-import { liveSameTrainDeps, searchSameTrainAlternatives, resolveSameTrainProviders, findSameTrainResult, sameTrainResultsOf, isSameTrainResultStale, type RevalidationOutcome } from './same-train-service';
+import { boardFromEarlierConfigFromEnv, sameTrainClassEligibility, rowClassesOf, eligibleClassMatrix, directStatusOf, sharedSearchShape, acquireTrainSlot, sharedSameTrainDeps } from './same-train-policy';
+import { searchSameTrainAlternatives, resolveSameTrainProviders, findSameTrainResult, sameTrainResultsOf, isSameTrainResultStale, type RevalidationOutcome } from './same-train-service';
 
 // ------------------------------------------------------------------ 1) auto display discovery
 
@@ -35,42 +33,9 @@ export function sameTrainAutoBudgetFromEnv(env: NodeJS.ProcessEnv = process.env)
 }
 
 // ------------------------------------------------------------------ findBoardFromEarlier config (Phase 2)
-
-export interface BoardFromEarlierConfig {
-  /** only trains whose DIRECT status is a waitlist, waitlisted classes only (SAME_TRAIN_WL_ONLY, default on) */
-  wlOnly: boolean;
-  /** staged depth (SAME_TRAIN_STAGED_DEPTH, default on): first earlier / ahead stops, then origin / terminus if nothing found */
-  staged: { earlier: number; ahead: number } | null;
-  probeConcurrency: number;
-  trainConcurrency: number;
-}
-const flagOn = (v: unknown) => !/^(0|off|false|no)$/i.test(String(v ?? '').trim());
-const intIn = (v: unknown, d: number, lo: number, hi: number) => { const n = Number(v); return Number.isFinite(n) && String(v ?? '').trim() !== '' ? Math.min(hi, Math.max(lo, Math.floor(n))) : d; };
-export function boardFromEarlierConfigFromEnv(env: NodeJS.ProcessEnv = process.env): BoardFromEarlierConfig {
-  return {
-    wlOnly: flagOn(env.SAME_TRAIN_WL_ONLY),
-    staged: flagOn(env.SAME_TRAIN_STAGED_DEPTH)
-      ? { earlier: intIn(env.SAME_TRAIN_BOARD_EARLIER_STOPS, BOARD_EARLIER_STOPS, 0, 15), ahead: intIn(env.SAME_TRAIN_BOOK_UPTO_STOPS, BOOK_UPTO_STOPS, 0, 7) } : null,
-    probeConcurrency: intIn(env.SAME_TRAIN_PROBE_CONCURRENCY, EARLIER_PROBE_CONCURRENCY, 1, 12),
-    trainConcurrency: intIn(env.SAME_TRAIN_TRAIN_CONCURRENCY, SAME_TRAIN_TRAIN_CONCURRENCY, 1, 40)
-  };
-}
-
-/** Phase 2: at most `trainConcurrency` automatic train searches run at once (the rest wait QUEUED, FIFO). */
-let trainSlotsUsed = 0;
-const trainSlotWaiters: Array<() => void> = [];
-async function acquireTrainSlot(max: number): Promise<() => void> {
-  if (trainSlotsUsed >= max) await new Promise<void>(res => trainSlotWaiters.push(res));
-  else trainSlotsUsed++;
-  let released = false;
-  return () => {
-    if (released) return; released = true;
-    const next = trainSlotWaiters.shift();
-    if (next) next();            // the slot passes straight to the next waiting search
-    else trainSlotsUsed--;
-  };
-}
-export function sameTrainTrainSlotsForTests(): { used: number; waiting: number } { return { used: trainSlotsUsed, waiting: trainSlotWaiters.length }; }
+// The policy (config, eligibility, class matrix, search shape, train slots, provider queue) lives in same-train-policy —
+// shared with Muse's SEARCH_SAME_TRAIN_ALTERNATIVES tool. Re-exported here for existing importers.
+export { boardFromEarlierConfigFromEnv, sameTrainTrainSlotsForTests, type BoardFromEarlierConfig } from './same-train-policy';
 
 export type DiscoverCode = 'OK' | 'RUNNING' | 'NOT_ENABLED' | 'INVALID_REQUEST' | 'RESULTS_STALE' | 'TRAIN_NOT_DISPLAYED' | 'CLASS_NOT_LISTED'
   | 'NOT_NEEDED' | 'BUDGET_EXCEEDED' | 'LOCKED' | 'SEARCH_FAILED';
@@ -130,17 +95,12 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   }
   const row = ((sr.trains || []) as any[]).find(t => String(t?.trainNumber ?? t?.number) === trainNumber);
   if (!row) return { ok: false, code: 'TRAIN_NOT_DISPLAYED' };
-  const rowClasses = ((row.classes || []) as any[]).map(c => ({ code: String(c?.code ?? c).toUpperCase(), availability: c?.availability ?? null }))
-    .filter(c => /^[A-Z0-9]{1,4}$/.test(c.code));
+  const rowClasses = rowClassesOf(row);
   const pax = Number(s.passengersCount) > 0 ? Number(s.passengersCount) : 1;
   const bfe = boardFromEarlierConfigFromEnv(env);
   // only a MEANINGFUL shortage shown by the provider's own search status (RAC / UNKNOWN / sufficient → no search)
-  const meaningful = (c: { availability: unknown }) => {
-    const a = evaluateSeatShortage({ status: c.availability ?? null, requestedPassengerCount: pax });
-    // Phase 2 (findBoardFromEarlier): WAITLIST only — AVAILABLE / RAC / REGRET / CANCELLED / NOT AVAILABLE are never searched
-    if (bfe.wlOnly) return a.availabilityStatus === 'WAITLIST' ? a : null;
-    return a.shortage && a.triggerReason && a.triggerReason !== 'TRAIN_CANCELLED' ? a : null;
-  };
+  // Phase 2 (findBoardFromEarlier, shared policy): WAITLIST only — AVAILABLE / RAC / REGRET / CANCELLED / NOT AVAILABLE never
+  const meaningful = (c: { availability: unknown }) => sameTrainClassEligibility(c.availability, pax, bfe);
   // P42.7 per-train eligibility on the REQUESTED class (selected class → the class the user named at search). Another class
   // being available never suppresses it; requested-class seats sufficient → no automatic recovery. Requested class unknown
   // → P42.4 behaviour: the train's first class (provider order) with a shortage seeds the all-class search.
@@ -156,7 +116,7 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   const travelClass = cls.code;
   // P42-14 (user decision 2026-10-09): search ONLY the classes that show a shortage (waiting) on this train's search row —
   // seed / requested class first; a class that is already available on the row is not re-searched
-  const classes = [travelClass, ...rowClasses.filter(c => c.code !== travelClass && meaningful(c)).map(c => c.code)];
+  const classes = eligibleClassMatrix(travelClass, rowClasses, pax, bfe);
 
   const key = `${sessionId}|${version}|${trainNumber}|${travelClass}|${pax}`;
   opts.onKey?.(key);
@@ -201,21 +161,18 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
     };
     const deps: SameTrainDeps = opts.deps
       ? { ...opts.deps, onProgress: (p: SameTrainProgress) => { onProgress(p); opts.deps!.onProgress?.(p); } }
-      : sameTrainPacedQueueEnabled(env) ? scheduledSameTrainDeps(opts.tools as any, { isCurrent, onProgress })
-      : liveSameTrainDeps(opts.tools as any, { isCurrent, onProgress });
+      : sharedSameTrainDeps(opts.tools, env, { isCurrent, onProgress });
     // Phase 2: bounded trains in parallel — wait for a slot (stays QUEUED), then re-check the list is still current
-    const release = await acquireTrainSlot(bfe.trainConcurrency);
+    const release = (await acquireTrainSlot(bfe.trainConcurrency))!;
     if (!isCurrent()) { release(); return { ok: false, code: 'RESULTS_STALE' }; }
     const out = await searchSameTrainAlternatives({
       sessionId, turnId: null, requestId: null, journeyVersion,
       trainNumber, trainName: row.trainName || row.name, date: String(s.date || j.date), travelClass, classes, passengersCount: pax,
       origin: String(s.origin || j.origin), destination: String(s.destination || j.destination), originName: s.originName, destinationName: s.destinationName,
-      originSweep: true, destinationSweep: true, combinedPairs: 'NEVER', includeFare: false, webEvidence: false,
-      // P42-14: no seat inside ≤15 earlier stations / destination + 5..7 → continue the destination up to the train's terminal
-      terminalSweep: 'AUTO',
-      // Phase 2: staged depth, bounded probes per train, the direct status per waitlisted class (better WL)
-      ...(bfe.staged ? { staged: bfe.staged } : {}), probeConcurrency: bfe.probeConcurrency,
-      directStatus: Object.fromEntries(rowClasses.filter(c => classes.includes(c.code) && c.availability != null).map(c => [c.code, String(c.availability)])),
+      includeFare: false, webEvidence: false,
+      // shared policy (same-train-policy, also Muse's tool): single-ended pairs, staged depth (2 back / 3 ahead first, then
+      // origin, then terminus only if nothing bookable), bounded probes per train, direct status per WL class (better WL)
+      ...sharedSearchShape(bfe, directStatusOf(rowClasses, classes)),
       // primary availability provider only (bounded cost); route from the resolved route provider — never a hidden failover
       providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [], fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
       triggerReason: shortage.triggerReason, triggerSource: 'AUTO_DISPLAY',

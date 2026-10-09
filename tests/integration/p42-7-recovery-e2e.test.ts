@@ -137,8 +137,17 @@ async function selectVia(state: ConversationStateManager, sid: string, alternati
 const altOf = (res: any, o: string, cls: string) => (res.alternatives || []).find((a: any) => a.ticketOrigin === o && a.travelClass === cls);
 
 // ================================================================= G3 — Muse + safety-net
+
+/** Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): tests that pin the PRE-Phase-2 Muse rules run with the
+ *  documented rollback switch SAME_TRAIN_MUSE_SHARED_POLICY=off; the env is restored afterwards. Assertions unchanged. */
+async function withMuseSharedPolicyOff(fn: () => unknown): Promise<void> {
+  const prev = process.env.SAME_TRAIN_MUSE_SHARED_POLICY;
+  process.env.SAME_TRAIN_MUSE_SHARED_POLICY = 'off';
+  try { await fn(); } finally { if (prev === undefined) delete process.env.SAME_TRAIN_MUSE_SHARED_POLICY; else process.env.SAME_TRAIN_MUSE_SHARED_POLICY = prev; }
+}
+
 describe('P42.7 G3 — Muse decides, safety-net once, no selection required', () => {
-  it('[G3.1] Muse requests recovery (no train / class selected): all-class search, recoveryEligibility on the search result (2A AVL does not cancel SL WL)', async () => {
+  it('[G3.1] Muse requests recovery (no train / class selected): all-class search, recoveryEligibility on the search result (2A AVL does not cancel SL WL)', () => withMuseSharedPolicyOff(async () => {
     let elig: any;
     const h = harness({ [Q]: museFlow({ recovery: true, final: 'SL WL 1 hai; Jalandhar City se SL AVL 3 mil raha hai.', seen: v => { const r = v.results.find(x => x.name === 'railcore_search'); if (r) elig = r.content?.recoveryEligibility; } }) });
     const r = await h.say(Q);
@@ -151,9 +160,9 @@ describe('P42.7 G3 — Muse decides, safety-net once, no selection required', ()
     expect(altOf(c, 'JUC', 'SL')).toMatchObject({ availability: 'AVAILABLE', availableSeatCount: 3 });
     expect(logs.find(l => l.museRequestedBfe)).toMatchObject({ safetyNetTriggered: false });
     expect(logs.some(l => l.safetyNetTriggered)).toBe(false);
-  }, 30000);
+  }), 30000);
 
-  it('[G3.2] Muse does not request → the safety-net invokes the existing tool once (search fact + requested class, no selection) and Muse presents', async () => {
+  it('[G3.2] Muse does not request → the safety-net invokes the existing tool once (search fact + requested class, no selection) and Muse presents', () => withMuseSharedPolicyOff(async () => {
     let sn: any;
     const h = harness({ [Q]: museFlow({ seen: v => { const m = snMsg(v); if (m) sn = snJson(m); } }) });
     const r = await h.say(Q);
@@ -163,7 +172,7 @@ describe('P42.7 G3 — Muse decides, safety-net once, no selection required', ()
     expect(cards(r)[0]).toMatchObject({ trainNumber: '12414', travelClass: 'SL', triggerSource: 'SAFETY_NET', classesChecked: ['SL', '3A', '2A', '1A'] });
     expect(logs.find(l => l.safetyNetTriggered)).toMatchObject({ trainNumber: '12414', classCode: 'SL', eligibilityReason: 'WAITLIST' });
     expect(h.s().sameTrainSelection).toBeUndefined();
-  }, 30000);
+  }), 30000);
 
   it('[G3.3] requested class has enough seats → recoveryEligible false → no safety-net, no same-train provider traffic', async () => {
     searchData = { '12414': [['SL', 'AVAILABLE-0005'], ['2A', 'WL 3']] };
@@ -177,7 +186,7 @@ describe('P42.7 G3 — Muse decides, safety-net once, no selection required', ()
     expect(logs).toHaveLength(0);
   }, 30000);
 
-  it('[G3.4] explicit user request overrides SAME_TRAIN_NOT_NEEDED ("aur options dikhao"); without it the tool refuses', async () => {
+  it('[G3.4] explicit user request overrides SAME_TRAIN_NOT_NEEDED ("aur options dikhao"); without it the tool refuses', () => withMuseSharedPolicyOff(async () => {
     searchData = { '12414': [['SL', 'AVAILABLE-0005'], ['2A', 'AVAILABLE-0009']] };
     setStatus(q => (q.origin === 'ASR' ? 'AVAILABLE-0005' : 'AVAILABLE-0009'));
     let refused: any;
@@ -194,7 +203,7 @@ describe('P42.7 G3 — Muse decides, safety-net once, no selection required', ()
     expect(cards(r2)[0]).toMatchObject({ explicitUserRequest: true });
     expect(altCalls().length).toBeGreaterThan(0);
     expect(r1).toBeTruthy();
-  }, 30000);
+  }), 30000);
 
   it('[G3.5] duplicate prevented: Muse already searched this train → no safety-net; a repeated identical call in the turn reuses one fan-out', async () => {
     const h = harness({ [Q]: (v: TurnView) => (v.step === 0 ? { calls: [SEARCH()] } : v.step === 1 ? { calls: [ALT(), ALT()] } : { content: 'Jalandhar City se SL AVL 3.' }) });
@@ -215,12 +224,12 @@ describe('P42.7 G3 — Muse decides, safety-net once, no selection required', ()
     expect(cards(r2)[0]).toMatchObject({ fresh: true, cached: false });
   }, 30000);
 
-  it('[G3.7] Muse presents: its own words reach the user; the backend never ranks (no best match unless Muse presents one)', async () => {
+  it('[G3.7] Muse presents: its own words reach the user; the backend never ranks (no best match unless Muse presents one)', () => withMuseSharedPolicyOff(async () => {
     const h = harness({ [Q]: museFlow({ afterSn: 'SL abhi WL 1 hai. Isi train mein Jalandhar City se SL ki 3 seats mil rahi hain, aur 2A mein RAC 4 hai.' }) });
     const r = await h.say(Q);
     expect(shown(r)).toContain('Jalandhar City se SL ki 3 seats');
     expect(cards(r)[0].presentation).toMatchObject({ bestMatchId: null, decidedBy: 'NONE' });
-  }, 30000);
+  }), 30000);
 
   it('[G3.8] several eligible trains and nothing selected → the backend does not pick one (no safety-net call); the UI shows recovery per train', async () => {
     searchData = { '12414': P49_ROW, '12904': [['SL', 'WL 7'], ['3A', 'AVAILABLE-0009']] };
@@ -234,7 +243,7 @@ describe('P42.7 G3 — Muse decides, safety-net once, no selection required', ()
 
 // ================================================================= Part 49 regression
 describe('P42.7 Part 49 — 12414, 3 pax, ASR → NDLS SL (SL WL1; 2A / 1A AVL)', () => {
-  it('[P49] recovery still runs; JUC → NDLS SL AVL 3 shown automatically with Select; Select → fresh check → apply (ticketOrigin JUC, 12414, SL, pax kept, fare / review invalidated)', async () => {
+  it('[P49] recovery still runs; JUC → NDLS SL AVL 3 shown automatically with Select; Select → fresh check → apply (ticketOrigin JUC, 12414, SL, pax kept, fare / review invalidated)', () => withMuseSharedPolicyOff(async () => {
     const h = harness({ [Q]: museFlow({}) });
     await h.say(Q);
     const s0 = h.s();
@@ -266,7 +275,7 @@ describe('P42.7 Part 49 — 12414, 3 pax, ASR → NDLS SL (SL WL1; 2A / 1A AVL)'
     expect(s.fare).toBeUndefined();
     expect(s.review.valid).toBe(false);
     expect(s.sameTrainSelection).toMatchObject({ ticketOrigin: 'JUC', ticketDestination: 'NDLS', requestedOrigin: 'ASR', travelClass: 'SL', boardingRuleStatus: 'UNVERIFIED', freshStatus: 'AVAILABLE-0003' });
-  }, 30000);
+  }), 30000);
 });
 
 // ================================================================= G5 — stale / security
@@ -332,7 +341,7 @@ describe('P42.7 G5 — stale protection and security', () => {
     const { res } = await recovered();
     expect(res.alternatives.filter((a: any) => a.ticketOrigin === 'JUC')).toHaveLength(0);     // INVALID (wrong date) → hidden
   }, 30000);
-  it('[G5.8] stale list: discovery for an older search-results version is refused with no provider call; stale context is dropped from Muse memory', async () => {
+  it('[G5.8] stale list: discovery for an older search-results version is refused with no provider call; stale context is dropped from Muse memory', () => withMuseSharedPolicyOff(async () => {
     const { h, res } = await recovered();
     const n = altCalls().length;
     expect(await discoverSameTrainForDisplay(h.state, h.sid, { trainNumber: '12414', searchResultsVersion: h.s().searchResultsVersion - 1 })).toMatchObject({ ok: false, code: 'RESULTS_STALE' });
@@ -344,7 +353,7 @@ describe('P42.7 G5 — stale protection and security', () => {
     expect(m.sameTrainShown).toBeUndefined();
     expect(m.staleRejected).toBeGreaterThan(0);
     expect(res).toBeTruthy();
-  }, 30000);
+  }), 30000);
   it('[G5.9] boarding stays UNVERIFIED and separate: ticket JUC, boarding JUC (never "board at ASR allowed")', async () => {
     const { h, res } = await recovered();
     const a = altOf(res, 'JUC', 'SL');

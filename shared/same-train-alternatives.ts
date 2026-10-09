@@ -407,6 +407,8 @@ export const MAX_EARLIER_STATIONS = 15;
 export const BOARD_EARLIER_STOPS = 2;
 export const BOOK_UPTO_STOPS = 3;
 export const EARLIER_PROBE_CONCURRENCY = 3;
+/** Phase 2: the label of a lower-WL option from an earlier station (Muse's view) — still a waitlist, never a confirmed seat. */
+export const BETTER_WAITLIST_LABEL = 'Waiting List — not confirmed';
 export const SAME_TRAIN_TRAIN_CONCURRENCY = 3;
 export const MAX_DOWNSTREAM_STATIONS = 7;
 export const MAX_AVAILABILITY_CHECKS = 160;

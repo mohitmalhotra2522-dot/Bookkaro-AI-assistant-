@@ -11,6 +11,9 @@ vi.hoisted(() => {
   process.env.SAME_TRAIN_ALTERNATIVES_ENABLED = '1';
   process.env.SAME_TRAIN_CALL_TIMEOUT_MS = '500';
   process.env.SAME_TRAIN_TOTAL_TIMEOUT_MS = '4000';
+  // Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): Muse's tool now runs through the shared paced queue —
+  // no queue retries in this file (retry / backoff behaviour is covered by f3-paced-queue), like the timeouts above
+  process.env.SAME_TRAIN_QUEUE_MAX_RETRIES = '0';
 });
 import { ConversationStateManager } from '../../server/ai/state/conversation-state';
 import { RailwayToolService } from '../../server/railway/tools/railway-tool-service';
@@ -25,6 +28,7 @@ import { registerMockProviderConnectors, MOCK_CONNECTOR_CAPS, type MockProviderC
 import { todayInIndia } from '../../server/ai/providers/openai-compatible-llm';
 import { revalidateSameTrainAlternative, currentSameTrainKey } from '../../server/railway/same-train/same-train-service';
 import { SAME_TRAIN_ALL_FAILED_MESSAGE } from '../../shared/same-train-alternatives';
+import { resetSameTrainSchedulers } from '../../server/railway/same-train/same-train-scheduler';
 import { FakeOpenAI, type TurnView, type FakeReply } from '../helpers/fake-openai-server';
 
 const KEY = 'sk-live-P42-SAME-TRAIN-SECRET-42424';
@@ -53,11 +57,22 @@ function harness(script: Record<string, Script | FakeReply[]>) {
   (orch as any).runtime.toolRuntime = new RailwayToolRuntime({ timeoutMs: 120, sleep: async () => { /* no backoff */ } });
   const eng = new ConversationTurnEngine(orch, state, { longWaitMs: 0 });
   const sid = state.createSession().sessionId;
+  // Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): Muse's tool searches only a VERIFIED waitlist — the
+  // journey's current availability fact (12014 CC WL, as the mock providers answer for LDH → UMB) is set up front
+  Object.assign(state.getSession(sid) as any, { origin: 'LDH', destination: 'UMB', date: TOMORROW,
+    availability: { CC: { trainNumber: '12014', travelClass: 'CC', date: TOMORROW, origin: 'LDH', destination: 'UMB', status: 'GNWL 12', available: false, toolExecutionId: 'setup-wl' } } });
   const say = (t: string, mode: 'TEXT' | 'VOICE' = 'TEXT') => eng.processTurn(sid, t, mode) as Promise<any>;
   return { fake, say, sid, s: () => state.getSession(sid) as any };
 }
 const recs = (r: any) => (r.turnLog?.toolExecutions || []) as any[];
 const shown = (r: any) => [r.voice?.assistantText, r.responseMessage].map(x => String(x ?? '')).join(' | ');
+/** Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): tests that pin the PRE-Phase-2 Muse rules run with the
+ *  documented rollback switch SAME_TRAIN_MUSE_SHARED_POLICY=off; the env is restored afterwards. Assertions unchanged. */
+async function withMuseSharedPolicyOff(fn: () => Promise<void>): Promise<void> {
+  const prev = process.env.SAME_TRAIN_MUSE_SHARED_POLICY;
+  process.env.SAME_TRAIN_MUSE_SHARED_POLICY = 'off';
+  try { await fn(); } finally { if (prev === undefined) delete process.env.SAME_TRAIN_MUSE_SHARED_POLICY; else process.env.SAME_TRAIN_MUSE_SHARED_POLICY = prev; }
+}
 const card = (r: any) => (r.cards || []).find((c: any) => c.type === 'same_train_alternatives')?.data;
 const toolsSent = (h: ReturnType<typeof harness>) => (h.fake.decisionRequests[0].body.tools as any[]).map(t => t.function.name);
 /** find a key anywhere in a tool result Muse received */
@@ -97,6 +112,9 @@ beforeAll(() => {
 afterAll(() => dispose());
 beforeEach(() => {
   rc.reset(); rr.reset();
+  // Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): the shared paced queue is process-wide — a fresh queue
+  // per test so a deliberately never-settling provider call ([6] HANG) cannot hold in-flight slots into the next test
+  resetSameTrainSchedulers();
   (rc as any).getTimetable = async (req: any) => { rc.calls.push(['timetable' as any, req]); return { ok: true, data: ROUTE, meta: { source: 'mock' } }; };
   (rr as any).getTimetable = async (req: any) => { rr.calls.push(['timetable' as any, req]); return { ok: true, data: ROUTE, meta: { source: 'mock' } }; };
   setStatus(ASR_GOOD);
@@ -187,7 +205,7 @@ describe('P42 G3 — Same Train Alternative through Muse', () => {
     expect(shown(r)).not.toMatch(/AVAILABLE|RAC \d/);
   });
 
-  it('[6] partial failure (RailRadar times out) keeps RailCore evidence and reports PARTIAL — timeouts are never "no seats"', async () => {
+  it('[6] partial failure (RailRadar times out) keeps RailCore evidence and reports PARTIAL — timeouts are never "no seats"', async () => withMuseSharedPolicyOff(async () => {
     setStatus((p, q) => (p === 'railradar' ? 'HANG' : ASR_GOOD(p, q)));
     const h = harness({ [USER]: fullFlow() });
     const r = await h.say(USER);
@@ -196,7 +214,7 @@ describe('P42 G3 — Same Train Alternative through Muse', () => {
     expect(c.providers.find((p: any) => p.provider === 'railradar')).toMatchObject({ succeeded: 0 });
     expect(c.alternatives.find((a: any) => a.ticketOrigin === 'ASR').availability).toBe('AVAILABLE');
     expect(c.alternatives.some((a: any) => a.availability === 'NOT_AVAILABLE')).toBe(false);
-  }, 20000);
+  }), 20000);
 
   it('[7] Muse picks the provider: providers="railcore" → RailRadar is never called (no hidden fan-out / failover)', async () => {
     const h = harness({ [USER]: [{ calls: [SEARCH({ providers: 'railcore' })] }, { content: 'RailCore se check kiya.' }] });
@@ -284,11 +302,11 @@ describe('P42 G3 — Same Train Alternative through Muse', () => {
     expect(codesSpoken).toBeLessThan(c.alternatives.length - 1);
   });
 
-  it('[14] destination == terminal → no destination sweep; only origin alternatives are checked', async () => {
+  it('[14] destination == terminal → no destination sweep; only origin alternatives are checked', async () => withMuseSharedPolicyOff(async () => {
     const h = harness({ [USER]: [{ calls: [SEARCH({ destination: 'NDLS' })] }, { content: 'Check kar liya.' }] });
     const c = card(await h.say(USER));
     expect(c.route.destinationSweep).toBe('NONE_TERMINAL');
     expect(c.alternatives.every((a: any) => a.ticketDestination === 'NDLS')).toBe(true);
     expect(c.candidateCount).toBe(1 + 4);
-  });
+  }));
 });

@@ -72,6 +72,15 @@ function sessionWith(classes: Array<[string, string]>, opts: { requestedClass?: 
   return { state, s, sid: s.sessionId as string };
 }
 
+
+/** Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): tests that pin the PRE-Phase-2 Muse rules run with the
+ *  documented rollback switch SAME_TRAIN_MUSE_SHARED_POLICY=off; the env is restored afterwards. Assertions unchanged. */
+async function withMuseSharedPolicyOff(fn: () => unknown): Promise<void> {
+  const prev = process.env.SAME_TRAIN_MUSE_SHARED_POLICY;
+  process.env.SAME_TRAIN_MUSE_SHARED_POLICY = 'off';
+  try { await fn(); } finally { if (prev === undefined) delete process.env.SAME_TRAIN_MUSE_SHARED_POLICY; else process.env.SAME_TRAIN_MUSE_SHARED_POLICY = prev; }
+}
+
 describe('P42.7 G2 — recovery search (all-class route matrix)', () => {
   it('[G2.1] WL on the requested class → recovery eligible; the search finds JUC → NDLS SL AVL 3', async () => {
     const e = evaluateBfeEligibility({ ok: true, status: 'WL 1', trainNumber: '12414', classCode: 'SL', passengers: 3, binding: {} as any });
@@ -161,7 +170,7 @@ describe('P42.7 G2 — recovery search (all-class route matrix)', () => {
     const r = await ok(REQ(), mkDeps(P49).deps);
     expect(r.presentation).toEqual({ bestMatchId: null, order: r.alternatives.map(x => x.alternativeId), decidedBy: 'NONE' });
   });
-  it('[G2.11] unsupported class: the validator rejects a class the train row does not list; matrixClasses never invents one', () => {
+  it('[G2.11] unsupported class: the validator rejects a class the train row does not list; matrixClasses never invents one', () => withMuseSharedPolicyOff(() => {
     const { s } = sessionWith([['SL', 'WL 1'], ['2A', 'AVAILABLE-0009']], { requestedClass: 'SL' });
     const v = new ToolCallValidator();
     const call = (args: any) => ({ callId: 'c1', name: 'SEARCH_SAME_TRAIN_ALTERNATIVES', arguments: { trainNumber: '12414', ...args } });
@@ -170,7 +179,7 @@ describe('P42.7 G2 — recovery search (all-class route matrix)', () => {
     const good = v.validate(call({}) as any, s, { userText: 'x' } as any);     // no selection: requested class from the session (named at search)
     expect(good).toMatchObject({ ok: true, v: { arguments: { travelClass: 'SL', classes: 'SL,2A' } } });
     expect(matrixClasses('SL', ['2A', 'sl', '', 'bad code!', '2A'])).toEqual(['SL', '2A']);
-  });
+  }));
   it('[G2.12] UNKNOWN stays UNKNOWN: an unrecognised answer is never NOT_AVAILABLE / verified; an UNKNOWN requested class is not a shortage', async () => {
     const r = await ok(REQ(), mkDeps(q => (q.origin === 'JUC' && q.travelClass === '3A' ? 'SOMETHING ODD' : P49(q) as string)).deps);
     const a = r.alternatives.find(x => x.ticketOrigin === 'JUC' && x.travelClass === '3A')!;

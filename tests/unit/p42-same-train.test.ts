@@ -73,6 +73,15 @@ const byPair = (r: SameTrainAlternativesResult, p: string) => r.alternatives.fin
 const stations = () => { const n = normalizeRoute(ROUTE); if (!n.ok) throw new Error('route'); return n; };
 
 // ================================================================= 1. route + planning
+
+/** Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): tests that pin the PRE-Phase-2 Muse rules run with the
+ *  documented rollback switch SAME_TRAIN_MUSE_SHARED_POLICY=off; the env is restored afterwards. Assertions unchanged. */
+async function withMuseSharedPolicyOff(fn: () => unknown): Promise<void> {
+  const prev = process.env.SAME_TRAIN_MUSE_SHARED_POLICY;
+  process.env.SAME_TRAIN_MUSE_SHARED_POLICY = 'off';
+  try { await fn(); } finally { if (prev === undefined) delete process.env.SAME_TRAIN_MUSE_SHARED_POLICY; else process.env.SAME_TRAIN_MUSE_SHARED_POLICY = prev; }
+}
+
 describe('P42 G2 — route + candidate planning', () => {
   it('[1] route is normalised from provider stops (order kept, codes upper-cased, < 2 stations → INVALID_TRAIN_ROUTE)', () => {
     const n = stations();
@@ -356,13 +365,13 @@ describe('P42 G2 — tool registry + validator', () => {
     expect(RAILWAY_TOOL_NAMES).not.toContain('SEARCH_SAME_TRAIN_ALTERNATIVES' as any);
     expect(RAILWAY_TOOL_NAMES).toHaveLength(10);
   });
-  it('[32] the train must be grounded (typed by the user or on screen) — Muse cannot invent one', () => {
+  it('[32] the train must be grounded (typed by the user or on screen) — Muse cannot invent one', () => withMuseSharedPolicyOff(() => {
     const s = mk();
     expect(v.validate(call(full) as any, s, { userText: 'koi aur option?' } as any)).toMatchObject({ ok: false, error: { code: 'AUTHORITATIVE_DATA_REQUIRED' } });
     const ok = v.validate(call(full) as any, s, { userText: '12014 ka same train alternative' } as any);
     expect(ok.ok).toBe(true);
     if (ok.ok) expect(ok.v.arguments).toMatchObject({ trainNumber: '12014', travelClass: 'CC', origin: 'LDH', destination: 'UMB', passengersCount: 1, originSweep: true, destinationSweep: true, combinedPairs: 'AUTO', includeFare: false, webEvidence: false });
-  });
+  }));
   it('[33] missing class / date / stations → SAME_TRAIN_ALTERNATIVE_NOT_READY; same origin/destination → INVALID_STATION_PAIR', () => {
     const s = mk(); const g = { userText: '12014' } as any;
     expect(v.validate(call({ ...full, travelClass: undefined }) as any, s, g)).toMatchObject({ ok: false, error: { code: 'SAME_TRAIN_ALTERNATIVE_NOT_READY' } });

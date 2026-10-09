@@ -59,6 +59,15 @@ async function ok(req: SameTrainSearchRequest, deps: SameTrainDeps): Promise<Sam
 const byPair = (r: SameTrainAlternativesResult, id: string) => r.alternatives.find(a => a.pairId === id)!;
 
 // ================================================================= 1. shortage evaluation (pure)
+
+/** Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): tests that pin the PRE-Phase-2 Muse rules run with the
+ *  documented rollback switch SAME_TRAIN_MUSE_SHARED_POLICY=off; the env is restored afterwards. Assertions unchanged. */
+async function withMuseSharedPolicyOff(fn: () => unknown): Promise<void> {
+  const prev = process.env.SAME_TRAIN_MUSE_SHARED_POLICY;
+  process.env.SAME_TRAIN_MUSE_SHARED_POLICY = 'off';
+  try { await fn(); } finally { if (prev === undefined) delete process.env.SAME_TRAIN_MUSE_SHARED_POLICY; else process.env.SAME_TRAIN_MUSE_SHARED_POLICY = prev; }
+}
+
 describe('P42.2 G2 — shortage evaluation', () => {
   it('[1] sufficient seats → no trigger (AVAILABLE-0005 for 2 passengers)', () => {
     expect(evaluateSeatShortage({ status: 'AVAILABLE-0005', requestedPassengerCount: 2 })).toEqual({
@@ -116,34 +125,36 @@ describe('P42.2 G2 — validator (passenger-count safety, class filter)', () => 
       { trainNumber: '12903', classes: [{ code: '1A', availability: 'AVAILABLE-0005' }, { code: '2A', availability: 'GNWL 4' }, { code: '3A', availability: null }] }] }, ...o });
   const g = { userText: '12903 dekho' } as any;
   const args = (o: any = {}) => ({ trainNumber: '12903', travelClass: '1A', date: DATE, origin: 'LDH', destination: 'UMB', ...o });
-  it('[1v] sufficient availability → SAME_TRAIN_ALTERNATIVE_NOT_NEEDED before any provider call (structured details, no wording)', () => {
+  it('[1v] sufficient availability → SAME_TRAIN_ALTERNATIVE_NOT_NEEDED before any provider call (structured details, no wording)', () => withMuseSharedPolicyOff(() => {
     const r: any = v.validate(call(args()) as any, sess(), g);
     expect(r).toMatchObject({ ok: false, error: { code: SAME_TRAIN_NOT_NEEDED, details: { availabilityStatus: 'AVAILABLE', availableSeatCount: 5, requestedPassengerCount: 2 } } });
     // CHECK_AVAILABILITY (newer, same journey) wins over the search row
     const r2: any = v.validate(call(args()) as any, sess({ availability: { '1A': { trainNumber: '12903', travelClass: '1A', date: DATE, origin: 'LDH', destination: 'UMB', status: 'AVAILABLE-0001', toolExecutionId: 'x' } } }), g);
     expect(r2.ok).toBe(true);
     expect(r2.v.arguments).toMatchObject({ triggerReason: 'INSUFFICIENT_SEATS', triggerSource: 'SESSION_EVIDENCE', passengersCount: 2 });
-  });
-  it('[2v] pax binding: the same 5 seats are insufficient for 6 passengers → allowed, INSUFFICIENT_SEATS', () => {
+  }));
+  it('[2v] pax binding: the same 5 seats are insufficient for 6 passengers → allowed, INSUFFICIENT_SEATS', () => withMuseSharedPolicyOff(() => {
     const r: any = v.validate(call(args({ passengersCount: 6 })) as any, sess(), g);
     expect(r.ok).toBe(true);
     expect(r.v.arguments).toMatchObject({ passengersCount: 6, triggerReason: 'INSUFFICIENT_SEATS', triggerSource: 'SESSION_EVIDENCE' });
-  });
-  it('[3v] WL class allowed (evidence reason wins); UNKNOWN class is not blocked and not a shortage (Muse reason only recorded)', () => {
+  }));
+  it('[3v] WL class allowed (evidence reason wins); UNKNOWN class is not blocked and not a shortage (Muse reason only recorded)', () => withMuseSharedPolicyOff(() => {
     expect((v.validate(call(args({ travelClass: '2A' })) as any, sess(), g) as any).v.arguments).toMatchObject({ triggerReason: 'WAITLIST', triggerSource: 'SESSION_EVIDENCE' });
     const u: any = v.validate(call(args({ travelClass: '3A', triggerReason: 'INSUFFICIENT_SEATS' })) as any, sess(), g);
     expect(u.v.arguments).toMatchObject({ triggerReason: 'INSUFFICIENT_SEATS', triggerSource: 'MUSE' });
     expect((v.validate(call(args({ travelClass: '3A' })) as any, sess(), g) as any).v.arguments).toMatchObject({ triggerReason: null, triggerSource: 'NONE' });
     // free text is never a reason (schema enum) — rejected before any provider call
     expect(v.validate(call(args({ travelClass: '3A', triggerReason: 'because I want' })) as any, sess(), g)).toMatchObject({ ok: false });
-  });
-  it('[4v] evidence from another date / route never applies (no false "not needed")', () => {
+  }));
+  it('[4v] evidence from another date / route never applies (no false "not needed")', () => withMuseSharedPolicyOff(() => {
     expect(v.validate(call(args({ date: '2026-10-10' })) as any, sess(), g)).toMatchObject({ ok: true });
     expect(sessionShortageEvidence(sess(), { trainNumber: '12903', travelClass: '1A', date: DATE, origin: 'JUC', destination: 'UMB', passengersCount: 2 })).toBeNull();
-  });
+  }));
   it('[15] class filter: a class the train does not list is refused (result row, else the selected train) — never invented', () => {
     expect(v.validate(call(args({ travelClass: 'EC' })) as any, sess(), g)).toMatchObject({ ok: false, error: { code: 'INVALID_TOOL_CALL' } });
-    const s2 = sess({ searchResults: undefined, selectedTrain: { number: '12903', classes: [{ code: '1A' }, { code: '2A' }] } });
+    // Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): setup only — the 2A fact is a verified waitlist
+    const s2 = sess({ searchResults: undefined, selectedTrain: { number: '12903', classes: [{ code: '1A' }, { code: '2A' }] },
+      availability: { '2A': { trainNumber: '12903', travelClass: '2A', date: DATE, origin: 'LDH', destination: 'UMB', status: 'GNWL 4', toolExecutionId: 'setup-wl' } } });
     expect(v.validate(call(args({ travelClass: 'CC' })) as any, s2, g)).toMatchObject({ ok: false, error: { code: 'INVALID_TOOL_CALL' } });
     expect(v.validate(call(args({ travelClass: '2A' })) as any, s2, g)).toMatchObject({ ok: true });
   });

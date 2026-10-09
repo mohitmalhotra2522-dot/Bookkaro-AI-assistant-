@@ -38,11 +38,20 @@ function sessionWith(classes: Array<[string, string]>, opts: { requestedClass?: 
 const v = new ToolCallValidator();
 const validate = (s: any, args: any = {}) => v.validate({ callId: 'c1', name: 'SEARCH_SAME_TRAIN_ALTERNATIVES', arguments: { trainNumber: '12414', ...args } } as any, s, { userText: 'same train alternative dikhao' } as any);
 
+
+/** Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): tests that pin the PRE-Phase-2 Muse rules run with the
+ *  documented rollback switch SAME_TRAIN_MUSE_SHARED_POLICY=off; the env is restored afterwards. Assertions unchanged. */
+async function withMuseSharedPolicyOff(fn: () => unknown): Promise<void> {
+  const prev = process.env.SAME_TRAIN_MUSE_SHARED_POLICY;
+  process.env.SAME_TRAIN_MUSE_SHARED_POLICY = 'off';
+  try { await fn(); } finally { if (prev === undefined) delete process.env.SAME_TRAIN_MUSE_SHARED_POLICY; else process.env.SAME_TRAIN_MUSE_SHARED_POLICY = prev; }
+}
+
 describe('P42-13 F1 — missing class resolves from the authoritative row (tool-only)', () => {
-  it('[1] no class anywhere → the first shortage class of the row seeds the search; the matrix keeps every row class', () => {
+  it('[1] no class anywhere → the first shortage class of the row seeds the search; the matrix keeps every row class', () => withMuseSharedPolicyOff(() => {
     const s = sessionWith([['2A', 'AVAILABLE-0009'], ['SL', 'WL 4'], ['3A', 'WL 2']]);
     expect(validate(s)).toMatchObject({ ok: true, v: { arguments: { travelClass: 'SL', classes: 'SL,2A,3A' } } });
-  });
+  }));
   it('[2] RAC, enough seats and UNKNOWN never seed; too few seats for the party does (pax-aware)', () => {
     expect(firstShortageClass({ classes: [{ code: '2A', availability: 'RAC 3' }, { code: '1A', availability: 'AVAILABLE-0005' }, { code: 'CC', availability: '???' }, { code: '3A', availability: 'AVAILABLE-0001' }] }, 2)).toBe('3A');
     expect(firstShortageClass({ classes: [{ code: '3A', availability: 'AVAILABLE-0002' }] }, 2)).toBe('');
@@ -71,11 +80,11 @@ describe('P42-13 F1 — missing class resolves from the authoritative row (tool-
     expect(validate(sessionWith([['SL', 'WL 4'], ['3A', 'WL 2']], { selectedClass: '3A' }))).toMatchObject({ ok: true, v: { arguments: { travelClass: '3A' } } });
     expect(validate(sessionWith([['SL', 'WL 4'], ['3A', 'WL 2']], { requestedClass: '3A' }))).toMatchObject({ ok: true, v: { arguments: { travelClass: '3A' } } });
   });
-  it('[7] the party size from the call (or the session) decides the shortage; the requested-pair gate (NOT_NEEDED) is unchanged', () => {
+  it('[7] the party size from the call (or the session) decides the shortage; the requested-pair gate (NOT_NEEDED) is unchanged', () => withMuseSharedPolicyOff(() => {
     const s = sessionWith([['3A', 'AVAILABLE-0002'], ['SL', 'AVAILABLE-0009']], { pax: 2 });
     expect(validate(s)).toMatchObject({ ok: false, error: { code: SameTrainErrorCode.NOT_READY } });
     expect(validate(s, { passengersCount: 3 })).toMatchObject({ ok: true, v: { arguments: { travelClass: '3A', passengersCount: 3 } } });
-  });
+  }));
 });
 
 // ------------------------------------------------------------------------------------------------ F2

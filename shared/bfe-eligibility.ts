@@ -19,7 +19,9 @@ import { evaluateSeatShortage } from './same-train-shortage';
 export type BfeEligibilityReason = 'WAITLIST' | 'NOT_AVAILABLE' | 'REGRET' | 'INSUFFICIENT_SEATS';
 export type BfeIneligibleReason =
   | 'SEATS_SUFFICIENT' | 'RAC_AVAILABLE' | 'UNKNOWN_STATUS' | 'PROVIDER_ERROR' | 'TRAIN_CANCELLED'
-  | 'MISSING_IDENTITY' | 'STALE_RESULT';
+  | 'MISSING_IDENTITY' | 'STALE_RESULT'
+  /** Phase 2 shared policy (WL-only): a shortage that is not a waitlist (REGRET / NOT AVAILABLE / too few seats) */
+  | 'NOT_WAITLIST';
 
 /** Failure codes that are NEVER a shortage (a request that did not produce authoritative availability). */
 export const BFE_UNKNOWN_CODES = ['UNKNOWN', 'TIMEOUT', 'PROVIDER_ERROR', 'RATE_LIMITED', 'AUTH_ERROR', 'DATA_UNAVAILABLE'] as const;

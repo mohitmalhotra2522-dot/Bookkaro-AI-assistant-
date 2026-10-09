@@ -144,7 +144,8 @@ export function sameTrainPacedQueueEnabled(env: NodeJS.ProcessEnv = process.env)
  * call keeps the P42.9 path.
  */
 export function scheduledSameTrainDeps(tools: RailwayToolService = new RailwayToolService(),
-  extra: Partial<SameTrainDeps> & { isCurrent?: () => boolean } = {}): SameTrainDeps {
+  extra: Partial<SameTrainDeps> & { isCurrent?: () => boolean; totalTimeoutMs?: number } = {}): SameTrainDeps {
+  const { totalTimeoutMs: budgetMs, ...hooks } = extra;
   const base = liveSameTrainDeps(tools, {});
   const searchId = `stq_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const isCurrent = extra.isCurrent || (() => true);
@@ -153,18 +154,39 @@ export function scheduledSameTrainDeps(tools: RailwayToolService = new RailwayTo
     const t = setTimeout(() => res({ ok: false, error: { code: 'PROVIDER_TIMEOUT' }, meta: { scheduler: { attempts: 1, retries: 0, queuedMs: 0, timedOut: true } } }), base.limits.perCallTimeoutMs);
     Promise.resolve().then(fn).then(v => { clearTimeout(t); res(v); }, () => { clearTimeout(t); res({ ok: false, error: { code: 'PROVIDER_ERROR' } }); });
   });
-  const queued = <T>(p: ProviderRef, fn: () => Promise<T>, deadline?: number): Promise<T> => (p.id === ACTIVE
-    ? timed(fn)
-    : sameTrainSchedulerFor(p.id, { paced: !p.isMock }).schedule({ searchId, cancelled: () => !isCurrent() || (deadline !== undefined && Date.now() >= deadline) }, () => inProviderScope(p.id, fn)));
-  const routeDeadline = Date.now() + sameTrainQueueTotalMsFromEnv();
+  // Muse's shared-policy path: a unit still unfinished at the search deadline (queued, in a retry backoff or in flight)
+  // ends for this search on time — the search returns an honest PARTIAL, never past its budget. If the provider already
+  // answered with an error and the unit is only waiting for a retry, that real answer (e.g. RATE_LIMITED) is returned —
+  // a provider error is never relabelled as a timeout; with no answer at all it is a TIMEOUT.
+  const byDeadline = <T>(pr: Promise<T>, deadline: number | undefined, lastAnswer: () => { v: any; attempts: number } | undefined): Promise<T> => {
+    if (deadline === undefined) return pr;
+    let t: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<T>(res => { t = setTimeout(() => {
+      const la = lastAnswer();
+      if (la && la.v && typeof la.v === 'object' && la.v.ok === false) {
+        res({ ...la.v, meta: { ...(la.v.meta || {}), scheduler: { attempts: la.attempts, retries: Math.max(0, la.attempts - 1), queuedMs: 0, deadlineReached: true } } } as any);
+      } else res({ ok: false, error: { code: 'PROVIDER_TIMEOUT' }, meta: { scheduler: { attempts: la?.attempts ?? 0, retries: 0, queuedMs: 0, timedOut: true } } } as any);
+    }, Math.max(0, deadline - Date.now())); });
+    return Promise.race([pr, late]).finally(() => { if (t) clearTimeout(t); });
+  };
+  const queued = <T>(p: ProviderRef, fn: () => Promise<T>, deadline?: number): Promise<T> => {
+    if (p.id === ACTIVE) return timed(fn);
+    let last: { v: any; attempts: number } | undefined;
+    let attempts = 0;
+    const run = () => { attempts++; return inProviderScope(p.id, fn).then(v => { last = { v, attempts }; return v; }); };
+    return byDeadline(sameTrainSchedulerFor(p.id, { paced: !p.isMock }).schedule({ searchId, cancelled: () => !isCurrent() || (deadline !== undefined && Date.now() >= deadline) }, run),
+      budgetMs ? deadline : undefined, () => last);
+  };
+  const totalMs = budgetMs ? Math.min(budgetMs, sameTrainQueueTotalMsFromEnv()) : sameTrainQueueTotalMsFromEnv();
+  const routeDeadline = Date.now() + totalMs;
   return {
     ...base,
-    limits: { ...base.limits, totalTimeoutMs: sameTrainQueueTotalMsFromEnv() },
+    limits: { ...base.limits, totalTimeoutMs: totalMs },
     scheduled: true,
     getRoute: (p, trainNumber) => (p.id === ACTIVE ? timed(() => base.getRoute(p, trainNumber)) : queued(p, () => tools.GET_TIMETABLE(trainNumber), routeDeadline)),
     checkAvailability: (p, q, ctx) => (p.id === ACTIVE ? timed(() => base.checkAvailability(p, q))
       : queued(p, () => tools.CHECK_AVAILABILITY({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, date: q.date, origin: q.origin, destination: q.destination } as any), ctx?.deadline)),
-    ...extra
+    ...hooks
   };
 }
 

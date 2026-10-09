@@ -30,6 +30,8 @@ import { sameTrainSearchesPerTurn } from '@shared/same-train-alternatives';
 import { evaluateBfeEligibility, bfeEligibilityCurrent, bfeKey, type BfeEligibility, type BfeBinding, recoveryEligibilityView } from '@shared/bfe-eligibility';
 import { MAX_TOOL_STEPS_PER_TURN as BFE_MAX_TOOL_STEPS } from '../tool-runtime/railway-tool-runtime';
 import { sameTrainLLMView } from '../../railway/same-train/same-train-view';
+import { musePolicyFromEnv, applySameTrainPolicyToBfe, sharedSearchShape, directStatusOf, rowClassesOf, acquireTrainSlot, sharedSameTrainDeps, museSearchBudgetMs } from '../../railway/same-train/same-train-policy';
+import { SameTrainErrorCode as STEC, SAME_TRAIN_PROVIDER_BUSY_MESSAGE } from '@shared/same-train-alternatives';
 import { toolOutcomeOf } from '../tool-runtime/tool-outcome';
 import type { LLMProvider } from '../providers/llm-provider';
 import { isLLMProviderError, LLM_UNAVAILABLE_MESSAGE, type AgentTranscriptStep, type SessionUpdateOutcomeView } from '../providers/llm-provider';
@@ -835,6 +837,31 @@ export class BoundToolRuntime {
     const trainName = row?.trainName || row?.name || (sel && String(sel.number || sel.trainNumber) === a.trainNumber ? (sel.name || sel.trainName) : undefined);
     const H = this.hooks;
     const t0 = Date.now();
+    // Phase 2 — ONE policy (same-train-policy, the automatic display's): staged depth, single-ended pairs, bounded probes,
+    // the paced provider queue and a train slot (≤ trainConcurrency searches at once; a Muse call waits at the front).
+    // SAME_TRAIN_MUSE_SHARED_POLICY=off → the pre-Phase-2 tool path below (Muse's depth knobs, P42.9 deps).
+    const policy = musePolicyFromEnv();
+    const isCurrent = () => (guard?.canApply ? guard.canApply() : true) && !H.isStale?.();
+    const log = (event: string, fields: Record<string, unknown>) => H.emit?.('SAME_TRAIN_SEARCH' as any, { event, ...fields });
+    let release: (() => void) | null = null;
+    let deps = liveSameTrainDeps(this.tools as any, { isCurrent, log });
+    let shape: Record<string, unknown> = {};
+    if (policy) {
+      const budget = museSearchBudgetMs();
+      release = await acquireTrainSlot(policy.trainConcurrency, { priority: true, waitMs: Math.floor(budget / 3) });
+      if (!release) {
+        const meta = { source: 'live', providerId: pr.providers.map(p => p.id).join('+'), requestTimestamp: new Date(t0).toISOString(), responseTimestamp: new Date().toISOString(), latencyMs: Date.now() - t0, cache: 'disabled' };
+        return { ok: false, error: { code: STEC.RATE_LIMITED, message: SAME_TRAIN_PROVIDER_BUSY_MESSAGE, details: { errorClass: SameTrainErrorClass.PROVIDER_UNAVAILABLE, reason: 'TRAIN_SLOTS_BUSY', partial: true } }, meta };
+      }
+      deps = sharedSameTrainDeps(this.tools as any, process.env, { isCurrent, log, totalTimeoutMs: Math.max(5000, budget - (Date.now() - t0)) });
+      const classes = String(a.classes || a.travelClass || '').split(',').filter(Boolean);
+      const src = row || (sel && String(sel.number || sel.trainNumber) === a.trainNumber ? sel : null);
+      const direct = directStatusOf(rowClassesOf(src), classes);
+      // the requested class's direct status from the session's own CHECK_AVAILABILITY when the row has none (better WL)
+      const av: any = s.availability?.[String(a.travelClass).toUpperCase()];
+      if (!direct[a.travelClass] && av?.status && String(av.trainNumber ?? a.trainNumber) === a.trainNumber && (!av.date || av.date === a.date)) direct[a.travelClass] = String(av.status);
+      shape = sharedSearchShape(policy, direct);
+    }
     const out = await searchSameTrainAlternatives({
       sessionId: s.sessionId, turnId: H.turnId ?? null, requestId: H.requestId ?? null, journeyVersion: s.journeyVersion ?? null,
       trainNumber: a.trainNumber, trainName, date: a.date, travelClass: a.travelClass, passengersCount: a.passengersCount,
@@ -844,13 +871,11 @@ export class BoundToolRuntime {
       originSweep: a.originSweep !== false, destinationSweep: a.destinationSweep !== false, destinationExtensionStations: a.destinationExtensionStations,
       combinedPairs: a.combinedPairs, includeFare: !!a.includeFare, webEvidence: !!a.webEvidence,
       providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders, fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
+      ...(shape as any),
       triggerReason: a.triggerReason ?? null, triggerSource: this.safetyNetCallIds.has(vt.callId) ? 'SAFETY_NET' : (a.triggerSource || 'NONE'),
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion: s.journeyVersion ?? null,
         requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }
-    }, liveSameTrainDeps(this.tools as any, {
-      isCurrent: () => (guard?.canApply ? guard.canApply() : true) && !H.isStale?.(),
-      log: (event, fields) => H.emit?.('SAME_TRAIN_SEARCH' as any, { event, ...fields })
-    }));
+    }, deps).finally(() => release?.());
     const t1 = new Date().toISOString();
     const meta = { source: out.ok && out.result.isMock ? 'mock' : 'live', providerId: pr.providers.map(p => p.id).join('+'), requestTimestamp: new Date(t0).toISOString(), responseTimestamp: t1, latencyMs: Date.now() - t0, cache: 'disabled' };
     if (!out.ok) return { ok: false, error: { code: out.code, message: out.message, ...(out.errorClass ? { details: { errorClass: out.errorClass } } : {}) }, meta };
@@ -917,7 +942,11 @@ export class BoundToolRuntime {
     return { view: norm.success ? { bfeEligibility: this.bfeEligibilityOf(fact, now.passengers) } : {}, fact };
   }
 
+  // Phase 2: the same WL-only rule as the automatic display (a non-waitlist shortage is not BFE-eligible → no safety-net)
   private bfeEligibilityOf(f: BfeFact, passengers: number | null, classCode?: string, trainNumber?: string): BfeEligibility {
+    return applySameTrainPolicyToBfe(this.bfeEligibilityRaw(f, passengers, classCode, trainNumber), musePolicyFromEnv());
+  }
+  private bfeEligibilityRaw(f: BfeFact, passengers: number | null, classCode?: string, trainNumber?: string): BfeEligibility {
     if (f.kind === 'CHECK') {
       return evaluateBfeEligibility({ ok: f.ok, status: f.status, trainNumber: f.trainNumber, trainName: f.trainName, date: f.date, classCode: f.classCode,
         requestedOrigin: f.origin, requestedDestination: f.destination, passengers, binding: f.binding });

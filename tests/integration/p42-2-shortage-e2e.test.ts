@@ -113,6 +113,15 @@ const flow = (pax: number, after: Array<(v: TurnView) => FakeReply>): Script => 
 const seatCheckSeen = (v: TurnView) => deep(resultsOf(v, 'railcore_search')[0], 'seatCheck');
 const altResults = (v: TurnView) => resultsOf(v, 'SEARCH_SAME_TRAIN_ALTERNATIVES');
 
+
+/** Phase 2 shared policy (user-authorized 2026-10-09, "mixed"): tests that pin the PRE-Phase-2 Muse rules run with the
+ *  documented rollback switch SAME_TRAIN_MUSE_SHARED_POLICY=off; the env is restored afterwards. Assertions unchanged. */
+async function withMuseSharedPolicyOff(fn: () => unknown): Promise<void> {
+  const prev = process.env.SAME_TRAIN_MUSE_SHARED_POLICY;
+  process.env.SAME_TRAIN_MUSE_SHARED_POLICY = 'off';
+  try { await fn(); } finally { if (prev === undefined) delete process.env.SAME_TRAIN_MUSE_SHARED_POLICY; else process.env.SAME_TRAIN_MUSE_SHARED_POLICY = prev; }
+}
+
 describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
   it('[A] sufficient seats → Muse sees no shortage; a same-train call is refused (NOT_NEEDED) before any provider call; no card', async () => {
     let sc: any, err: any;
@@ -125,7 +134,7 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(cards(r)).toHaveLength(0);
   });
 
-  it('[B][G] 3 passengers, 1 seat → INSUFFICIENT_SEATS fact → alternative found (Jalandhar 3 seats) → card; honest wording kept', async () => {
+  it('[B][G] 3 passengers, 1 seat → INSUFFICIENT_SEATS fact → alternative found (Jalandhar 3 seats) → card; honest wording kept', () => withMuseSharedPolicyOff(async () => {
     let sc: any, res: any;
     const U = 'Ludhiana se Ambala kal 12903 1A, 3 passengers';
     const final = '12903 1A mein Ludhiana se sirf 1 seat hai. Jalandhar se 3 seats available hain, lekin Ludhiana se boarding ka rule verify karna zaroori hai.';
@@ -147,9 +156,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(shown(r)).toContain('sirf 1 seat');
     expect(shown(r)).toContain('Jalandhar se 3 seats available');
     expect(h.s().selectedTrain ?? null).toBeNull();                                              // nothing booked / selected
-  });
+  }));
 
-  it('[C] WAITLIST → trigger WAITLIST; [D][H] NOT AVAILABLE with nothing better → NO_VERIFIED outcome to Muse, no fake card', async () => {
+  it('[C] WAITLIST → trigger WAITLIST; [D][H] NOT AVAILABLE with nothing better → NO_VERIFIED outcome to Muse, no fake card', () => withMuseSharedPolicyOff(async () => {
     searchData = { '12903': [['1A', 'GNWL 12'], ['2A', 'NOT AVAILABLE']] };
     let resC: any, resD: any;
     const U1 = 'Ludhiana se Ambala kal 12903 1A, 2 passengers';
@@ -179,9 +188,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(stored3).toMatchObject({ travelClass: '2A', triggerReason: 'NOT_AVAILABLE', outcome: 'NO_VERIFIED_SAME_TRAIN_ALTERNATIVE', verifiedAlternativeCount: 0, classesChecked: ['2A'] });
     expect(cards(r3)).toHaveLength(0);                                                           // no empty / fake card
     expect(shown(r3)).toContain('Koi verified option nahi mila');
-  });
+  }));
 
-  it('[E] mixed classes: shortages only for 1A (1 seat) + 3A (WL); 2A (10 seats) refused; invented EC refused; 1A + 3A searched in parallel → one card each', async () => {
+  it('[E] mixed classes: shortages only for 1A (1 seat) + 3A (WL); 2A (10 seats) refused; invented EC refused; 1A + 3A searched in parallel → one card each', () => withMuseSharedPolicyOff(async () => {
     let sc: any, results: any[] = [];
     setStatus(q => (q.origin === 'JUC' ? 'AVAILABLE-0003' : 'GNWL 9'));
     const U = 'Ludhiana se Ambala kal 12903, 3 passengers — koi bhi AC class';
@@ -197,9 +206,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(recs(r).filter((x: any) => x.tool === 'SEARCH_SAME_TRAIN_ALTERNATIVES' && x.status === 'SUCCEEDED').length).toBe(2);   // 2A's own search refused
     expect(cards(r).map((c: any) => c.travelClass).sort()).toEqual(['1A', '3A']);
     expect(h.s().sameTrainAlternativeSets.length).toBe(2);
-  });
+  }));
 
-  it('[F] multi-train: two displayed trains with a shortage are both eligible; each result keeps its own train identity', async () => {
+  it('[F] multi-train: two displayed trains with a shortage are both eligible; each result keeps its own train identity', () => withMuseSharedPolicyOff(async () => {
     searchData = { '12903': [['1A', 'GNWL 3']], '12497': [['CC', 'REGRET'], ['2S', 'AVAILABLE-0040']] };
     let sc: any;
     setStatus(q => (q.origin === 'JUC' ? 'AVAILABLE-0006' : 'GNWL 9'));
@@ -215,7 +224,7 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     // P42.7: each train is searched over its OWN supported classes (12903: 1A; 12497: CC + 2S) — never another train's class
     expect(availCalls(rc).every(x => (x[1].trainNumber === '12903' && x[1].travelClass === '1A') || (x[1].trainNumber === '12497' && ['CC', '2S'].includes(x[1].travelClass)))).toBe(true);
     expect(new Set(availCalls(rc).filter(x => x[1].trainNumber === '12497').map(x => x[1].travelClass))).toEqual(new Set(['CC', '2S']));
-  });
+  }));
 
   it('[budget + duplicate] identical call in the same turn is deduplicated (one fan-out); more than 4 searches per turn stop safely', async () => {
     searchData = { '12903': [['1A', 'GNWL 3'], ['2A', 'GNWL 4'], ['3A', 'GNWL 5'], ['SL', 'GNWL 6'], ['2S', 'GNWL 7']] };
@@ -237,7 +246,7 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect([...new Set(reqPairClasses)].sort()).toEqual(['1A', '2A', '3A', 'SL']);
   });
 
-  it('[I] selection: fresh recheck against the result set; fewer seats now → refused; [J] date change → stale, no provider call', async () => {
+  it('[I] selection: fresh recheck against the result set; fewer seats now → refused; [J] date change → stale, no provider call', () => withMuseSharedPolicyOff(async () => {
     const U = 'Ludhiana se Ambala kal 12903 1A, 3 passengers';
     const h = harness({ [U]: flow(3, [() => ({ calls: [ALT()] }), () => ({ content: 'Jalandhar se 3 seats available hain, lekin Ludhiana se boarding ka rule verify karna zaroori hai.' })]) });
     await h.say(U);
@@ -255,9 +264,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(isSameTrainResultStale(h.s(), r)).toBe(true);
     expect(await revalidateSameTrainAlternative(r, r.alternativeSearchId, juc, sameTrainSelectionKey(h.s(), r), { acknowledgeUnverifiedRules: true })).toMatchObject({ ok: false, code: 'ALTERNATIVE_RESULT_STALE' });
     expect(availCalls(rc).length).toBe(m);
-  });
+  }));
 
-  it('[K] passenger change invalidates; the next search is fresh for the new count (not deduplicated)', async () => {
+  it('[K] passenger change invalidates; the next search is fresh for the new count (not deduplicated)', () => withMuseSharedPolicyOff(async () => {
     const U1 = 'Ludhiana se Ambala kal 12903 1A, 2 passengers';
     const U2 = 'Actually 3 passengers — phir se same train option dekho';
     const h = harness({ [U1]: flow(2, [() => ({ calls: [ALT()] }), () => ({ content: 'Theek hai.' })]), [U2]: [{ calls: [ALT({ passengersCount: 3 })] }, { content: 'Theek hai.' }] });
@@ -272,9 +281,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(second.alternativeSearchId).not.toBe(first.alternativeSearchId);
     expect(second).toMatchObject({ passengersCount: 3, requestedPassengerCount: 3 });
     expect(availCalls(rc).length).toBeGreaterThan(n);
-  });
+  }));
 
-  it('[L] class change: "Actually 3A" makes the 1A result stale (PRESENT refused)', async () => {
+  it('[L] class change: "Actually 3A" makes the 1A result stale (PRESENT refused)', () => withMuseSharedPolicyOff(async () => {
     let presentErr: any;
     const U1 = 'Ludhiana se Ambala kal 12903 1A, 3 passengers';
     const h = harness({
@@ -288,9 +297,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(isSameTrainResultStale(h.s(), r)).toBe(true);
     await h.say('ab best wala dikhao');
     expect(JSON.stringify(presentErr)).toMatch(/STALE_ALTERNATIVE_RESULT/);
-  });
+  }));
 
-  it('[M][N] cross-train and cross-class seat claims are removed from the reply; the grounded sentence stays', async () => {
+  it('[M][N] cross-train and cross-class seat claims are removed from the reply; the grounded sentence stays', () => withMuseSharedPolicyOff(async () => {
     const U = 'Ludhiana se Ambala kal 12903 1A, 3 passengers';
     const final = 'Jalandhar se 3 seats available hain, lekin Ludhiana se boarding ka rule verify karna zaroori hai. 12497 mein bhi Jalandhar se 3 seats available hain. 12903 2A mein bhi Jalandhar se 3 seats available hain. 12903 3A mein bhi Jalandhar se 3 seats available hain.';
     setStatus(q => (q.origin === 'JUC' ? (q.travelClass === '2A' ? 'GNWL 4' : 'AVAILABLE-0003') : q.origin === 'LDH' && q.destination === 'UMB' ? 'AVAILABLE-0001' : 'GNWL 9'));
@@ -300,9 +309,9 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(shown(r)).not.toContain('12497 mein bhi');                                            // cross-train: removed
     expect(shown(r)).not.toContain('2A mein bhi');                                               // other class NOT verified: removed
     expect(shown(r)).toContain('3A mein bhi Jalandhar se 3 seats');                              // P42.7: other class verified by the all-class search: kept
-  });
+  }));
 
-  it('[O] voice = screen: same card, spoken words grounded in the same result, unverified claim never spoken', async () => {
+  it('[O] voice = screen: same card, spoken words grounded in the same result, unverified claim never spoken', () => withMuseSharedPolicyOff(async () => {
     const U = 'Ludhiana se Ambala kal 12903 1A, 3 passengers';
     const final = 'Jalandhar se 3 seats available hain, lekin Ludhiana se boarding ka rule verify karna zaroori hai. 12497 mein bhi Jalandhar se 3 seats available hain.';
     const ht = harness({ [U]: flow(3, [() => ({ calls: [ALT()] }), () => ({ content: final })]) });
@@ -315,5 +324,5 @@ describe('P42.2 G3 — intelligent Same Train Alternative through Muse', () => {
     expect(speech.length).toBeGreaterThan(0);
     expect(speech).not.toContain('12497');
     expect(speech).toMatch(/Jalandhar/);
-  });
+  }));
 });

@@ -21,6 +21,7 @@ import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import { SameTrainErrorCode } from '@shared/same-train-alternatives';
 import { resolveSameTrainProviders, isSameTrainResultStale, findSameTrainResult } from '../../railway/same-train/same-train-service';
 import { sessionShortageEvidence, museTriggerReason } from '../../railway/same-train/shortage-trigger';
+import { musePolicyFromEnv, firstEligibleClass, rowClassesOf, eligibleClassMatrix } from '../../railway/same-train/same-train-policy';
 import { SAME_TRAIN_NOT_NEEDED, evaluateSeatShortage } from '@shared/same-train-shortage';
 
 /** P42.7: IRCTC class codes a user may name (SEARCH_TRAINS.requestedClass). */
@@ -167,8 +168,12 @@ export class ToolCallValidator {
     // F1: still none → the background discovery rule (same-train-session): the first class of this train's authoritative
     // row whose OWN search status shows a meaningful shortage for this party seeds the search. Tool-execution only — never
     // written to selectedClass / requestedClass / preferences. No shortage class on the row → the class is still asked.
+    // Phase 2 shared policy (same-train-policy — the automatic display's rule): the seed is the first ELIGIBLE (waitlisted)
+    // class; SAME_TRAIN_MUSE_SHARED_POLICY=off → the pre-Phase-2 shortage seed
+    const policy = musePolicyFromEnv();
+    const seedPax = args.passengersCount !== undefined ? Number(args.passengersCount) : Number(s.passengersCount || 1);
     const travelClass = String(args.travelClass || s.selectedClass || s.requestedClass || '').toUpperCase()
-      || firstShortageClass(src, args.passengersCount !== undefined ? Number(args.passengersCount) : Number(s.passengersCount || 1));
+      || (policy ? firstEligibleClass(src, seedPax, policy) : firstShortageClass(src, seedPax));
     if (!travelClass) return E(SameTrainErrorCode.NOT_READY, 'Kaunsi class ke liye check karna hai? (jaise CC, 3A, SL)', { missing: 'travelClass' });
     const rowClasses: string[] = src ? [...(src.classes || []).map((c: any) => String(c.code || c).toUpperCase()), ...(src.availableClasses || []).map((c: any) => String(c).toUpperCase())] : [];
     if (rowClasses.length && !rowClasses.includes(travelClass)) return E('INVALID_TOOL_CALL', `${train} mein ${travelClass} class nahi hai (${rowClasses.join(', ')}).`);
@@ -182,7 +187,7 @@ export class ToolCallValidator {
       const bad = matrix.filter(c => !/^[A-Z0-9]{1,4}$/.test(c) || (rowClasses.length ? !rowClasses.includes(c) : c !== travelClass));
       if (bad.length) return E('INVALID_TOOL_CALL', `${train} mein ${bad.join(', ')} class nahi hai${rowClasses.length ? ` (${[...new Set(rowClasses)].join(', ')})` : ''}.`);
     }
-    const classes = [travelClass, ...matrix.filter(c => c !== travelClass)];
+    let classes = [travelClass, ...matrix.filter(c => c !== travelClass)];
     const explicitUserRequest = args.explicitUserRequest === true;
     const date = this.resolveDateStr(args.date || s.date);
     if (!date) return E(SameTrainErrorCode.NOT_READY, 'Journey date abhi set nahi hai.', { missing: 'date', missingField: 'DATE' });
@@ -192,6 +197,12 @@ export class ToolCallValidator {
     if (o.code === d.code) return E(SameTrainErrorCode.INVALID_STATION_PAIR, 'Origin aur destination ek jaise nahi ho sakte.');
     const pax = args.passengersCount !== undefined ? Number(args.passengersCount) : Number(s.passengersCount || 1);
     if (!Number.isInteger(pax) || pax < 1 || pax > 6) return E('INVALID_TOOL_CALL', 'Passengers 1 se 6 ke beech hone chahiye.');
+    // shared policy: the party is the session's — a tool argument never silently changes the passenger count
+    const sessionPax = Number(s.passengersCount);
+    if (policy && Number.isInteger(sessionPax) && sessionPax >= 1 && pax !== sessionPax) {
+      return E('INVALID_TOOL_CALL', `Passengers ${sessionPax} hain (session) — same train search usi count ke liye hoga; count sirf user ke kehne par badalta hai.`,
+        { argument: 'passengersCount', expected: sessionPax, received: pax });
+    }
     if (args.destinationExtensionStations !== undefined) {
       const n = Number(args.destinationExtensionStations);
       if (!Number.isInteger(n) || n < 5 || n > 7) return E('INVALID_TOOL_CALL', 'destinationExtensionStations 5 se 7 ke beech hona chahiye.');
@@ -201,6 +212,22 @@ export class ToolCallValidator {
     // P42.2 — passenger-count safety: current authoritative data for exactly this train / class / date / pair already
     // covers the whole party → no same-train search (no provider traffic). Missing / UNKNOWN data never blocks.
     const ev = sessionShortageEvidence(s, { trainNumber: train, travelClass, date, origin: o.code, destination: d.code, passengersCount: pax });
+    if (policy?.wlOnly) {
+      // Phase 2 shared policy — WL-only, exactly the automatic display's eligibility: the provider's own CURRENT status for
+      // THIS train / class / date / pair must be a waitlist. AVAILABLE / RAC / REGRET / NOT AVAILABLE / CANCELLED → no
+      // search (explicitUserRequest does not override it); no current status → check availability first (never assumed).
+      if (!ev) {
+        return E(SameTrainErrorCode.NOT_READY, `${train} ${travelClass} (${date}, ${o.code}→${d.code}) ka current waitlist status verify nahi hai — pehle availability check karni hogi.`,
+          { missing: 'availability', reason: 'WAITLIST_NOT_VERIFIED', expected: 'a current WAITLIST status for this train / class / date / pair' });
+      }
+      if (ev.assessment.availabilityStatus !== 'WAITLIST') {
+        return E(SAME_TRAIN_NOT_NEEDED, `${train} ${travelClass}: ${ev.status} — waitlist nahi hai, isliye same train alternative search nahi hota.`,
+          { argument: 'travelClass', reason: 'NOT_WAITLIST', expected: 'WAITLIST', received: `${ev.status} (${ev.source})`, availabilityStatus: ev.assessment.availabilityStatus,
+            ...(ev.assessment.availableSeatCount !== undefined ? { availableSeatCount: ev.assessment.availableSeatCount } : {}), requestedPassengerCount: pax });
+      }
+      // other classes: only the row's waitlisted ones (Muse's explicit list narrows, never widens)
+      classes = eligibleClassMatrix(travelClass, rowClassesOf(src), pax, policy, clsArg === 'ALL' ? undefined : matrix);
+    }
     // P42.7 Part 42: the user's explicit "aur options dikhao" (Muse sets explicitUserRequest) may search anyway
     if (ev && ev.assessment.sufficiency === 'SUFFICIENT' && !explicitUserRequest) {
       return E(SAME_TRAIN_NOT_NEEDED, `${train} ${travelClass}: ${ev.status} — ${pax} passenger(s) ke liye seats kaafi hain.`,
@@ -214,9 +241,11 @@ export class ToolCallValidator {
     const canonical: Record<string, any> = {
       trainNumber: train, travelClass, classes: classes.join(','), ...(explicitUserRequest ? { explicitUserRequest: true } : {}),
       date, origin: o.code, destination: d.code, passengersCount: pax,
-      originSweep: args.originSweep !== false, destinationSweep: args.destinationSweep !== false,
-      ...(args.destinationExtensionStations !== undefined ? { destinationExtensionStations: Number(args.destinationExtensionStations) } : {}),
-      combinedPairs: args.combinedPairs || 'AUTO',
+      // shared policy: the depth is the policy's (runtime applies sharedSearchShape) — Muse's depth knobs are not used
+      ...(policy ? { originSweep: true, destinationSweep: true, combinedPairs: 'NEVER', sharedPolicy: true } : {
+        originSweep: args.originSweep !== false, destinationSweep: args.destinationSweep !== false,
+        ...(args.destinationExtensionStations !== undefined ? { destinationExtensionStations: Number(args.destinationExtensionStations) } : {}),
+        combinedPairs: args.combinedPairs || 'AUTO' }),
       providers: pr.providers.map(p => p.id).join(','), routeProvider: pr.routeProvider.id, providerSelection: pr.selection,
       includeFare: args.includeFare === true, webEvidence: args.webEvidence === true,
       triggerReason, triggerSource
