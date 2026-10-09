@@ -9,6 +9,7 @@ import { lookupStationCatalog, stationCatalogSize, stationCodesNamedInText, norm
 import { resolveStationArgument, resolveStationArgumentDetailed, resolveStationToken, resolveRoute } from '../../server/railway/resolvers/route-resolver';
 import { resolveStationDetailed, stationCodesMentioned } from '../../server/ai/conversation/grounding';
 import { normalizeToolArguments } from '../../server/ai/tool-runtime/tool-argument-normalizer';
+import { ContextPatchValidator } from '../../server/ai/conversation/context-patch';
 
 describe('station catalog', () => {
   it('[C1] covers the national station list (> 12k codes) incl. SVDK', () => {
@@ -104,5 +105,19 @@ describe('station catalog', () => {
     const r: any = normalizeToolArguments('SEARCH_TRAINS', { origin: 'LDH', destination: 'SVDK', date: '2026-10-20' }, s, 'लुधियाना से कटरा 20 अक्टूबर');
     expect(r.ok).toBe(true);
     expect(r.arguments.destination).toBe('SVDK');
+  });
+  it('[C14] context patch: user names the CURRENT station, LLM entity proposes another (live: SMD) → dropped, no conflict question', () => {
+    const v = new ContextPatchValidator();
+    const s: any = { origin: 'LDH', destination: 'SVDK', destinationName: 'Shri Mata Vaishno Devi Katra', bookingState: 'SHOWING_TRAINS' };
+    const e: any = { destinationRaw: 'SMD' };
+    const r: any = v.review(s, e, 'Ludhiana se Shri Mata Vaishno Devi Katra 20 October ki trains dikhao');
+    expect(r.ok).toBe(true);
+    expect(e.destinationRaw).toBeUndefined();
+    expect(r.rejected.some((x: any) => x.field === 'destination' && x.code === 'UNGROUNDED_VALUE')).toBe(true);
+    // the user did NOT name the current station → the existing conflict guard still asks
+    const e2: any = { destinationRaw: 'SMD' };
+    const r2: any = v.review({ ...s }, e2, 'trains dikhao');
+    expect(r2.ok).toBe(false);
+    expect(r2.code).toBe('CONTEXT_CONFLICT');
   });
 });

@@ -1,6 +1,6 @@
 /**
  * 2026-10-09 — same-train freshness (all trains): a provider availability snapshot older than the freshness limit
- * (providerUpdatedAt, default 60 min, SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN) is NEVER a verdict — FAILED / STALE_PROVIDER_DATA,
+ * (providerUpdatedAt, default 120 min, SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN) is NEVER a verdict — FAILED / STALE_PROVIDER_DATA,
  * the search is PARTIAL / not complete, the stale status + time are reported as "not confirmed", no fallback launders it.
  * Route below is TEST DATA shaped like the reported case (origin sweep up to the train's origin). MOCK only.
  */
@@ -72,8 +72,9 @@ describe('freshness of one provider answer', () => {
     expect(snapshotAgeMs(undefined, now)).toBeNull();
     expect(snapshotAgeMs('', now)).toBeNull();
   });
-  it('[S5] env: default 60 min; SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN overrides (0 = off), bounded', () => {
-    expect(sameTrainLimitsFromEnv({} as any).maxSnapshotAgeMs).toBe(60 * MIN);
+  it('[S5] env: default 120 min; SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN overrides (0 = off), bounded', () => {
+    expect(sameTrainLimitsFromEnv({} as any).maxSnapshotAgeMs).toBe(120 * MIN);
+    expect(SAME_TRAIN_DEFAULT_LIMITS.maxSnapshotAgeMs).toBe(120 * MIN);
     expect(sameTrainLimitsFromEnv({ SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN: '30' } as any).maxSnapshotAgeMs).toBe(30 * MIN);
     expect(sameTrainLimitsFromEnv({ SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN: '0' } as any).maxSnapshotAgeMs).toBe(0);
   });

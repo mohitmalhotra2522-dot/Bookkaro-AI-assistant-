@@ -122,6 +122,13 @@ export class ContextPatchValidator {
       if (r.kind === 'UNKNOWN') continue;                                   // existing RouteResolver path explains it
       const previous = (s as any)[field] ?? null;
       const grounded = mentioned.has(r.code) || pendingCodes.has(r.code) || lc(rawText).includes(lc(proposed)) || llmSemanticAuthority(rawText);
+      // 2026-10-09: the user's own words name the CURRENT station and the LLM's different value is ungrounded → no change
+      // was asked for: the proposal is dropped (never applied, never a pointless conflict question)
+      if (previous && previous !== r.code && !grounded && mentioned.has(previous)) {
+        delete e[key];
+        rejected.push({ field, proposed, code: 'UNGROUNDED_VALUE', reason: 'user named the current station' });
+        continue;
+      }
       if (previous && previous !== r.code && !grounded) {
         return this.conflict(field, proposed, r.code, r.name, previous, field === 'origin' ? s.originName : s.destinationName, patches, rejected);
       }

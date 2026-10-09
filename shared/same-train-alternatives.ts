@@ -390,7 +390,9 @@ export const SAME_TRAIN_DEFAULT_LIMITS: Readonly<SameTrainLimits> = Object.freez
   perCallTimeoutMs: 9000,
   totalTimeoutMs: 45000,
   maxWebChecks: 8,
-  maxSnapshotAgeMs: 60 * 60 * 1000          // 60 min (SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN)
+  // 120 min (SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN): live 2026-10-09 RailCore re-serves a pair's cached snapshot for > 60 min
+  // before refreshing it, so 60 would flag normal data; a 4.7 h snapshot (refresh failed upstream) is still rejected
+  maxSnapshotAgeMs: 120 * 60 * 1000
 });
 export const DESTINATION_EXTENSION_MIN = 5;
 export const DESTINATION_EXTENSION_MAX = 7;

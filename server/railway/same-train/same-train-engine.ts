@@ -48,7 +48,7 @@ export function sameTrainLimitsFromEnv(env: NodeJS.ProcessEnv = process.env): Sa
     maxAvailabilityChecks: envNum(env, 'SAME_TRAIN_MAX_AVAILABILITY_CHECKS', D.maxAvailabilityChecks ?? 120, 1, MAX_AVAILABILITY_CHECKS),
     // RailRadar Phase 1: route cross-check on the secondary route provider (default on; off|false|0 disables)
     routeCrossCheck: !/^(off|false|0)$/i.test(String(env.SAME_TRAIN_ROUTE_CROSS_CHECK ?? '').trim()),
-    // 2026-10-09: provider snapshot freshness limit in minutes (0 = off); default 60
+    // 2026-10-09: provider snapshot freshness limit in minutes (0 = off); default 120
     maxSnapshotAgeMs: envNum(env, 'SAME_TRAIN_MAX_SNAPSHOT_AGE_MIN', Math.round((D.maxSnapshotAgeMs ?? 3600000) / 60000), 0, 24 * 60) * 60000
   };
 }
