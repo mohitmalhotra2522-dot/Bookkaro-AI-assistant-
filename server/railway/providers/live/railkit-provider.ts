@@ -7,7 +7,8 @@
  * moves on. Shapes are implemented from the docs and covered by recorded-shape (MOCK) tests only.
  */
 import type {
-  RailwayResponse, SearchTrainsRequest, TrainSearchResultData, NormalizedTrain, AvailabilityRequest, AvailabilityData, FareRequest, FareData
+  RailwayResponse, SearchTrainsRequest, TrainSearchResultData, NormalizedTrain, AvailabilityRequest, AvailabilityData, FareRequest, FareData,
+  TimetableRequest
 } from '../../types/railway-types';
 import { LiveRailwayProvider, need, MalformedProviderData } from './live-provider-base';
 import { str, num, hhmm, toDMY, canonicalAvailability } from './live-http';
@@ -50,6 +51,40 @@ export class RailKitProvider extends LiveRailwayProvider {
   protected authHeaders() { return { 'x-api-key': String(this.cfg.apiKey || '') }; }
   /** 2026-10-09: LOCAL monthly estimate of the Advance plan's 10,000 requests (not authoritative — no quota headers). */
   protected monthlyQuota() { return railKitMonthlyQuota(); }
+
+  /**
+   * 2026-10-10 (approved, blocker 5): documented `GET /api/v1/trains/:trainNumber/info` → the train's halts (with day
+   * offsets) for SAME-TRAIN route discovery ONLY (SAME_TRAIN_ROUTE_PROVIDERS). Deliberately NOT a declared GET_TIMETABLE /
+   * GET_TRAIN_INFO capability: no chat tool, not in the general failover chain (chat GET_TRAIN_INFO / GET_TIMETABLE
+   * unchanged). Same monthly quota + pacer as every RailKit request. Shape = RailCore getTimetable stops.
+   */
+  async sameTrainRoute(req: TimetableRequest): Promise<RailwayResponse<any[]>> {
+    const t0 = Date.now();
+    if (!this.configured) return this.fail('NOT_CONFIGURED', t0, { retryable: false, message: `${this.label} configured nahi hai.` });
+    const no = String(req?.trainNumber || '').trim();
+    if (!/^\d{5}$/.test(no)) return this.fail('INVALID_REQUEST', t0, { retryable: false, message: 'Route ke liye valid 5-digit train number chahiye.' });
+    try {
+      const r = await this.get(`/api/v1/trains/${encodeURIComponent(no)}/info`);
+      if (!r.ok) return this.httpFail(r, t0);
+      const d = envelope(r.json);
+      const route: any[] = Array.isArray(d?.route) ? d.route : [];
+      if (route.length < 2) throw new MalformedProviderData('route');
+      const got = str(d?.trainInfo?.train_no);
+      if (got && got !== no) throw new MalformedProviderData('train_no');
+      const stops = route.map((s, i) => {
+        const day = num(s?.day);
+        if (day === undefined || day < 1) throw new MalformedProviderData('day');   // day offsets drive ticket dates — never guessed
+        return {
+          station: need(str(s?.stnCode), 'stnCode').toUpperCase(), stationName: str(s?.stnName),
+          ...(i > 0 && hhmm(s?.arrival) ? { arrival: hhmm(s.arrival) } : {}),
+          ...(i < route.length - 1 && hhmm(s?.departure) ? { departure: hhmm(s.departure) } : {}),
+          day, ...(num(s?.distance) !== undefined ? { distanceKm: num(s.distance) } : {}),
+          ...(str(s?.platform) ? { platform: str(s.platform) } : {})
+        };
+      });
+      return { ok: true, data: stops, meta: this.meta(t0) };
+    } catch { return this.fail('PROVIDER_DATA_INVALID', t0, { retryable: false }); }
+  }
 
   searchTrains(req: SearchTrainsRequest): Promise<RailwayResponse<TrainSearchResultData>> {
     return this.run('SEARCH_TRAINS', async t0 => {

@@ -16,6 +16,8 @@ import { WEB_PROVIDER_IDS } from '../providers/web/web-providers';
 import { PROVIDER_TIMESTAMP_UNAVAILABLE_LABEL, isFreshnessUnverifiable } from '@shared/provider-freshness';
 import { fallbackChainFor, fallbackProviderFor, isFallbackEligible, primaryProviderId, providerFallbackEnabled } from '../providers/provider-fallback';
 import { withRateWait } from '../providers/live/provider-rate-limiter';
+import { parseSameTrainRouteChain } from '../providers/live/live-config';
+import { runWithProvider } from '../providers/provider-scope';
 import { sameTrainSchedulerFor } from './same-train-scheduler';
 import { randomUUID } from 'node:crypto';
 import { evaluateSeatShortage } from '@shared/same-train-shortage';
@@ -53,7 +55,9 @@ export function availabilityProviders(): ProviderRef[] {
 export type ProviderResolution =
   | { ok: true; providers: ProviderRef[]; routeProvider: ProviderRef; webProviders: ProviderRef[]; selection: 'LLM' | 'DEFAULT_ALL' | 'DEFAULT_PRIMARY';
       /** P42.9: backend per-request fallback (primary id → fallback ref) and route fallback — never Muse-chosen */
-      fallbacks: Record<string, ProviderRef>; routeFallback: ProviderRef | null }
+      fallbacks: Record<string, ProviderRef>; routeFallback: ProviderRef | null;
+      /** 2026-10-10 (blocker 5): further route fallbacks after `routeFallback` (SAME_TRAIN_ROUTE_PROVIDERS); absent when unset */
+      routeFallbacks?: ProviderRef[] }
   | { ok: false; code: string; message: string };
 
 /** Validate Muse's provider choice (CSV of connector ids) — arbitrary / web-only / route-less ids are rejected. */
@@ -105,12 +109,39 @@ export function resolveSameTrainProviders(providersCsv?: string | null, routePro
       fallbacks[prev] = refOf(fid); prev = fid;
     }
   }
+  // 2026-10-10 (approved, blocker 5): SAME_TRAIN_ROUTE_PROVIDERS (live only) = ordered route chain, e.g. railcore → railkit
+  // (documented /trains/:n/info) → railradar. Default route provider = first usable member; an LLM-chosen (validated)
+  // route provider keeps the chain members after it. Unset → exactly the previous resolution below.
+  const chain = catalog && providerFallbackEnabled() && String(process.env.RAILWAY_PROVIDER || '').trim().toLowerCase() === 'live'
+    ? (parseSameTrainRouteChain() || []).filter(id => sameTrainRouteUsable(id, routeCapable)) : [];
+  if (chain.length) {
+    if (!routeProviderId) routeProvider = refOf(chain[0]);
+    const at = chain.indexOf(routeProvider.id as any);
+    const rest = (at >= 0 ? chain.slice(at + 1) : chain).filter(id => id !== routeProvider!.id).map(refOf);
+    return { ok: true, providers: chosen, routeProvider, webProviders, selection, fallbacks, routeFallback: rest[0] || null, routeFallbacks: rest.slice(1) };
+  }
   const rf = catalog ? fallbackProviderFor(routeProvider.id, 'GET_TIMETABLE') : null;
   const routeFallback = rf && rf !== routeProvider.id ? refOf(rf) : null;
   return { ok: true, providers: chosen, routeProvider, webProviders, selection, fallbacks, routeFallback };
 }
 
 const scoped = <T>(p: ProviderRef, fn: () => Promise<T>): Promise<T> => (p.id === ACTIVE ? fn() : inProviderScope(p.id, fn));
+
+/**
+ * 2026-10-10: a SAME_TRAIN_ROUTE_PROVIDERS member is usable when it is a live, keyed provider that can give a route:
+ * RailKit via its documented train-info route (key present), any other provider only when its catalog entry has
+ * GET_TIMETABLE (unchanged rule).
+ */
+function sameTrainRouteUsable(id: string, routeCapable: (id: string) => boolean): boolean {
+  if (id === 'railkit') return !!String(process.env.RAILKIT_API_KEY || '').trim();
+  return !!providerToolCatalog.get(id) && routeCapable(id);
+}
+/** Provider scope for a route call: the catalog entry, else (RailKit route-only) its own registered connector — never the unscoped failover chain. */
+const inRouteScope = <T>(id: string, fn: () => Promise<T>): Promise<T> =>
+  (!providerToolCatalog.get(id) && id === 'railkit' ? runWithProvider(id, fn) : inProviderScope(id, fn));
+/** Route call: SAME_TRAIN_ROUTE when the tool service has it (RailKit's route; GET_TIMETABLE for every other provider). */
+const routeCall = (tools: RailwayToolService, trainNumber: string) =>
+  (typeof (tools as any).SAME_TRAIN_ROUTE === 'function' ? tools.SAME_TRAIN_ROUTE(trainNumber) : tools.GET_TIMETABLE(trainNumber));
 
 /** Real adapters over RailwayToolService (each call fresh, inside the provider's own scope). */
 export function liveSameTrainDeps(tools: RailwayToolService = new RailwayToolService(), extra: Partial<SameTrainDeps> = {}): SameTrainDeps {
@@ -119,7 +150,7 @@ export function liveSameTrainDeps(tools: RailwayToolService = new RailwayToolSer
   const wait = Number(process.env.SAME_TRAIN_RATE_WAIT_MS) >= 0 && process.env.SAME_TRAIN_RATE_WAIT_MS !== undefined && process.env.SAME_TRAIN_RATE_WAIT_MS !== '' ? Math.min(10000, Number(process.env.SAME_TRAIN_RATE_WAIT_MS)) : 1000;
   return {
     limits: sameTrainLimitsFromEnv(),
-    getRoute: (p, trainNumber) => scoped(p, () => tools.GET_TIMETABLE(trainNumber)),
+    getRoute: (p, trainNumber) => (p.id === ACTIVE ? routeCall(tools, trainNumber) : inRouteScope(p.id, () => routeCall(tools, trainNumber))),
     checkAvailability: (p, q) => withRateWait(wait, () => scoped(p, () => tools.CHECK_AVAILABILITY({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, date: q.date, origin: q.origin, destination: q.destination } as any))),
     getFare: (p, q) => withRateWait(wait, () => scoped(p, () => tools.GET_FARE({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, passengersCount: q.passengersCount, date: q.date, origin: q.origin, destination: q.destination } as any))),
     webListsTrain: async (p, q) => {
@@ -179,7 +210,7 @@ export function scheduledSameTrainDeps(tools: RailwayToolService = new RailwayTo
     if (p.id === ACTIVE) return timed(fn);
     let last: { v: any; attempts: number } | undefined;
     let attempts = 0;
-    const run = () => { attempts++; return inProviderScope(p.id, fn).then(v => { last = { v, attempts }; return v; }); };
+    const run = () => { attempts++; return inRouteScope(p.id, fn).then(v => { last = { v, attempts }; return v; }); };
     return byDeadline(sameTrainSchedulerFor(p.id, { paced: !p.isMock }).schedule({ searchId, cancelled: () => !isCurrent() || (deadline !== undefined && Date.now() >= deadline) }, run),
       budgetMs ? deadline : undefined, () => last);
   };
@@ -189,7 +220,7 @@ export function scheduledSameTrainDeps(tools: RailwayToolService = new RailwayTo
     ...base,
     limits: { ...base.limits, totalTimeoutMs: totalMs },
     scheduled: true,
-    getRoute: (p, trainNumber) => (p.id === ACTIVE ? timed(() => base.getRoute(p, trainNumber)) : queued(p, () => tools.GET_TIMETABLE(trainNumber), routeDeadline)),
+    getRoute: (p, trainNumber) => (p.id === ACTIVE ? timed(() => base.getRoute(p, trainNumber)) : queued(p, () => routeCall(tools, trainNumber), routeDeadline)),
     checkAvailability: (p, q, ctx) => (p.id === ACTIVE ? timed(() => base.checkAvailability(p, q))
       : queued(p, () => tools.CHECK_AVAILABILITY({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, date: q.date, origin: q.origin, destination: q.destination } as any), ctx?.deadline)),
     ...hooks

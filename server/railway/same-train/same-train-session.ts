@@ -174,7 +174,7 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
       // origin, then terminus only if nothing bookable), bounded probes per train, direct status per WL class (better WL)
       ...sharedSearchShape(bfe, directStatusOf(rowClasses, classes)),
       // primary availability provider only (bounded cost); route from the resolved route provider — never a hidden failover
-      providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [], fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
+      providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [], fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback, ...(pr.routeFallbacks?.length ? { routeFallbacks: pr.routeFallbacks } : {}),
       triggerReason: shortage.triggerReason, triggerSource: 'AUTO_DISPLAY',
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion,
         requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }

@@ -870,7 +870,7 @@ export class BoundToolRuntime {
       origin: a.origin, destination: a.destination, originName: s.origin === a.origin ? s.originName : undefined, destinationName: s.destination === a.destination ? s.destinationName : undefined,
       originSweep: a.originSweep !== false, destinationSweep: a.destinationSweep !== false, destinationExtensionStations: a.destinationExtensionStations,
       combinedPairs: a.combinedPairs, includeFare: !!a.includeFare, webEvidence: !!a.webEvidence,
-      providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders, fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
+      providers: pr.providers, routeProvider: pr.routeProvider, webProviders: pr.webProviders, fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback, ...(pr.routeFallbacks?.length ? { routeFallbacks: pr.routeFallbacks } : {}),
       ...(shape as any),
       triggerReason: a.triggerReason ?? null, triggerSource: this.safetyNetCallIds.has(vt.callId) ? 'SAFETY_NET' : (a.triggerSource || 'NONE'),
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion: s.journeyVersion ?? null,

@@ -535,6 +535,8 @@ export interface SameTrainSearchRequest {
   fallbackProviders?: Record<string, ProviderRef>;
   /** P42.9: fallback for the route (timetable) call on an eligible fault of the route provider. */
   routeFallback?: ProviderRef | null;
+  /** 2026-10-10 (blocker 5): further route fallbacks after routeFallback, in order (SAME_TRAIN_ROUTE_PROVIDERS); backend-only */
+  routeFallbacks?: ProviderRef[];
   /** Phase 2 (findBoardFromEarlier): staged depth — see PlanInput.staged */
   staged?: { earlier: number; ahead: number };
   /** Phase 2: provider probes of THIS search in flight at once (EARLIER_PROBE_CONCURRENCY); still through the F3 queue */
@@ -567,7 +569,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const deadline = t0 + L.totalTimeoutMs;
   const alternativeSearchId = `sta_${shortId()}`;
   const current = () => (deps.isCurrent ? deps.isCurrent() : true);
-  const isMock = [req.routeProvider, ...req.providers, ...Object.values(req.fallbackProviders || {}), ...(req.routeFallback ? [req.routeFallback] : [])].some(p => p.isMock);
+  const isMock = [req.routeProvider, ...req.providers, ...Object.values(req.fallbackProviders || {}), ...(req.routeFallback ? [req.routeFallback] : []), ...(req.routeFallbacks || [])].some(p => p.isMock);
   const eligible = (code: string | null | undefined) => !!code && SAME_TRAIN_FALLBACK_ELIGIBLE.has(code);
   // P42.9 observability: per-recovery call counters (no keys / headers / bodies)
   const stats = { requested: 0, executed: 0, successful: 0, rateLimited: 0, rateLimitedAttempts: 0, timeout: 0, providerUnavailable: 0, fallback: 0, fallbackSucceeded: 0, deduped: 0, skipped: 0 };
@@ -585,10 +587,17 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   let routeResp = await call(() => deps.getRoute(req.routeProvider, req.trainNumber), L.perCallTimeoutMs);
   stats.executed++;
   {
-    const c0 = routeResp.timedOut ? 'PROVIDER_TIMEOUT' : ((routeResp.value as any)?.ok === true ? null : String((routeResp.value as any)?.error?.code || ''));
-    if (c0 && eligible(c0) && req.routeFallback && req.routeFallback.id !== req.routeProvider.id && current()) {
-      routeFallbackReason = c0; routeProvider = req.routeFallback; stats.fallback++; stats.executed++;
-      routeResp = await call(() => deps.getRoute(req.routeFallback!, req.trainNumber), L.perCallTimeoutMs);
+    // 2026-10-10 (blocker 5): routeFallback, then routeFallbacks in order (SAME_TRAIN_ROUTE_PROVIDERS) — each tried only on
+    // an eligible fault of the previous one; routeFallbackReason = the PRIMARY's fault. Without routeFallbacks: unchanged.
+    const tried = new Set<string>([req.routeProvider.id]);
+    for (const fb of [req.routeFallback, ...(req.routeFallbacks || [])]) {
+      if (!fb || tried.has(fb.id)) continue;
+      const c0 = routeResp.timedOut ? 'PROVIDER_TIMEOUT' : ((routeResp.value as any)?.ok === true ? null : String((routeResp.value as any)?.error?.code || ''));
+      if (!(c0 && eligible(c0) && current())) break;
+      tried.add(fb.id);
+      if (!routeFallbackReason) routeFallbackReason = c0;
+      routeProvider = fb; stats.fallback++; stats.executed++;
+      routeResp = await call(() => deps.getRoute(fb, req.trainNumber), L.perCallTimeoutMs);
       if (!routeResp.timedOut && (routeResp.value as any)?.ok === true) stats.fallbackSucceeded++;
     }
   }

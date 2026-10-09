@@ -69,6 +69,22 @@ export function parseAvailabilityChain(env: Env = process.env): LiveProviderId[]
 }
 
 /**
+ * 2026-10-10 (approved, blocker 5): SAME_TRAIN_ROUTE_PROVIDERS — ordered route-discovery chain for the SAME-TRAIN flow
+ * only (e.g. railcore,railkit,railradar: RailCore primary, RailKit's documented train-info route, then RailRadar). null when
+ * unset / empty → same-train route resolution unchanged. Unknown id → configuration error. Never affects chat tools.
+ */
+export function parseSameTrainRouteChain(env: Env = process.env): LiveProviderId[] | null {
+  const raw = String(env.SAME_TRAIN_ROUTE_PROVIDERS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (!raw.length) return null;
+  const out: LiveProviderId[] = [];
+  for (const id of raw) {
+    if (!(IDS as readonly string[]).includes(id)) throw new Error(`Unknown railway provider "${id}" in SAME_TRAIN_ROUTE_PROVIDERS (allowed: ${IDS.join(', ')})`);
+    if (!out.includes(id as LiveProviderId)) out.push(id as LiveProviderId);
+  }
+  return out;
+}
+
+/**
  * Ordered provider chain for ONE capability. CHECK_AVAILABILITY / GET_FARE use RAILWAY_AVAILABILITY_PROVIDERS when set
  * (followed by any general-chain provider it does not list, so no configured fallback is lost); every other capability —
  * and availability when the variable is unset — uses the general chain.
@@ -103,6 +119,7 @@ export function createLiveProvider(id: LiveProviderId, env: Env = process.env, f
 }
 
 export function createFailoverProvider(env: Env = process.env, fetchImpl?: FetchLike): FailoverRailwayProvider {
+  parseSameTrainRouteChain(env);   // 2026-10-10: unknown id in SAME_TRAIN_ROUTE_PROVIDERS fails at startup like the other chains
   const providers = allChainProviderIds(env).map(id => createLiveProvider(id, env, fetchImpl));
   const av = parseAvailabilityChain(env);
   // every capability gets its own order, so a provider added only for availability / fare is never asked for anything else

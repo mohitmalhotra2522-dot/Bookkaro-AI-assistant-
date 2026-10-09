@@ -51,6 +51,15 @@ export class RailwayToolService {
     return this.provider.getTimetable({ trainNumber });
   }
 
+  /**
+   * 2026-10-10 (blocker 5): SAME-TRAIN route discovery only (not a chat tool). The scoped provider's dedicated same-train
+   * route (RailKit: its documented /trains/:n/info) when it has one; every other provider → exactly GET_TIMETABLE.
+   */
+  async SAME_TRAIN_ROUTE(trainNumber: string): Promise<RailwayResponse<any[]>> {
+    const p: any = this.provider;
+    return typeof p?.sameTrainRoute === 'function' ? p.sameTrainRoute({ trainNumber }) : this.GET_TIMETABLE(trainNumber);
+  }
+
   // 2026-10-09: every provider (incl. one the LLM picked via a provider tool) gets the same freshness label here
   async CHECK_AVAILABILITY(params: CheckAvailabilityParams): Promise<RailwayResponse<AvailabilityData & { freshness?: ProviderFreshness }>> {
     return withFreshness(await this.provider.checkAvailability(params));
