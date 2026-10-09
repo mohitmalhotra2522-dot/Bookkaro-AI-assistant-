@@ -113,16 +113,18 @@ function sessionWith(classes: Array<[string, string]>, requestedClass?: string) 
 }
 
 describe('P42-14 automatic display — waiting classes only, terminal sweep on', () => {
-  it('[6] only the classes that show a shortage on the row are searched (requested / first waiting class first); an available class is not re-searched', async () => {
+  // Phase 2 (findBoardFromEarlier, user-authorized 2026-10-09): waitlisted classes only (REGRET / AVAILABLE never searched);
+  // staged depth (3 ahead first) → the terminal phase covers the rest of the route after S28
+  it('[6] only the WAITLISTED classes on the row are searched (requested / first waiting class first); available / REGRET classes are not searched', async () => {
     const a = sessionWith([['SL', 'GNWL74/WL16'], ['3E', 'AVAILABLE-0006'], ['3A', 'GNWL14/WL6'], ['2A', 'REGRET']]);
     const { deps, calls } = mkDeps(() => 'GNWL 9');
     const out = await discoverSameTrainForDisplay(a.state, a.sid, { trainNumber: '11906', searchResultsVersion: 1 }, { deps, env: { SAME_TRAIN_ALTERNATIVES_ENABLED: '1' } as any });
     expect(out).toMatchObject({ ok: true, code: 'OK' });
-    expect(out.result!.classesChecked).toEqual(['SL', '3A', '2A']);
-    expect(new Set(calls.map(q => q.travelClass))).toEqual(new Set(['SL', '3A', '2A']));
+    expect(out.result!.classesChecked).toEqual(['SL', '3A']);
+    expect(new Set(calls.map(q => q.travelClass))).toEqual(new Set(['SL', '3A']));
     // nothing bookable in the window → the terminal phase ran (automatic display uses terminalSweep AUTO)
     expect(calls.some(q => idx(q.destination) > 31)).toBe(true);
-    expect(out.result!.route.terminalSweep?.length).toBe(8);
+    expect(out.result!.route.terminalSweep?.length).toBe(11);                 // S29 … S39 (stage A ended at S28)
   });
   it('[7] requested class known and waiting → it is checked first, other waiting classes follow', async () => {
     const a = sessionWith([['SL', 'WL 16'], ['3A', 'WL 6'], ['2A', 'AVAILABLE-0003']], '3A');

@@ -219,7 +219,14 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
   if (stored.journeyKey !== currentKey) return { ok: false, code: E.RESULT_STALE, message: 'Journey badal gayi hai — same train alternative dobara check karna hoga.' };
   const alt = stored.alternatives.find(a => a.alternativeId === alternativeId);
   if (!alt) return { ok: false, code: E.NOT_FOUND, message: 'Yeh option is result mein nahi hai.' };
-  if (alt.verificationStatus !== 'VERIFIED' && alt.verificationStatus !== 'PARTIALLY_VERIFIED') {
+  // Phase 2: an option shown with ⚠ from a too-old RAC / AVAILABLE snapshot may be selected ONLY through this fresh re-check
+  // (the fresh answer decides; the stale snapshot is never applied)
+  const staleBookable = !!alt.staleSnapshot && (alt.staleSnapshot.category === 'RAC' || alt.staleSnapshot.category === 'AVAILABLE') && alt.verificationStatus === 'UNVERIFIED' && !alt.isRequestedPair;
+  if (staleBookable && !opts.acknowledgeUnverifiedRules && (alt.boardingRuleStatus === 'UNVERIFIED' || alt.alightingRuleStatus === 'UNVERIFIED')) {
+    return { ok: false, code: alt.boardingRuleStatus === 'UNVERIFIED' ? E.BOARDING_RULE_UNVERIFIED : E.ALIGHTING_RULE_UNVERIFIED,
+      message: 'Boarding / deboarding rule verify nahi hua — ticket stations se hi travel maan kar aage badhna hoga. Pehle confirm karein.' };
+  }
+  if (alt.verificationStatus !== 'VERIFIED' && alt.verificationStatus !== 'PARTIALLY_VERIFIED' && !staleBookable) {
     return { ok: false, code: 'ALTERNATIVE_NOT_ACTIONABLE', message: alt.verificationStatus === 'CONFLICTING' ? 'Providers ka data match nahi kar raha — yeh option select nahi ho sakta.' : 'Yeh option verify nahi hua — select nahi ho sakta.' };
   }
   if (alt.verificationStatus === 'PARTIALLY_VERIFIED' && !opts.acknowledgeUnverifiedRules) {
@@ -227,7 +234,7 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
       message: 'Boarding / deboarding rule verify nahi hua — ticket stations se hi travel maan kar aage badhna hoga. Pehle confirm karein.' };
   }
   const deps = opts.deps || liveSameTrainDeps();
-  const providerIds = [...new Set(alt.evidence.filter(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS').map(e => e.provider))];
+  const providerIds = [...new Set(alt.evidence.filter(e => e.level === 'PROVIDER_API' && (e.outcome === 'SUCCESS' || (staleBookable && e.errorCode === E.STALE_PROVIDER_DATA))).map(e => e.provider))];
   const refs = providerIds.map(id => (id === ACTIVE ? activeRef() : refOf(id)));
   const q: AvailabilityQuery = { trainNumber: alt.trainNumber, travelClass: alt.travelClass, date: alt.date, origin: alt.ticketOrigin, destination: alt.ticketDestination, passengersCount: alt.passengersCount };
   const once = (p: ProviderRef) => Promise.race([deps.checkAvailability(p, q), new Promise(res => setTimeout(() => res({ ok: false, error: { code: 'PROVIDER_TIMEOUT' } }), deps.limits.perCallTimeoutMs))]);

@@ -52,10 +52,13 @@ describe('P42.4 inline same-train options', () => {
     expect(card).toContain('Full details');
   });
 
-  it('[U3] gate mirror: WL / REGRET / NOT AVAILABLE / fewer seats than party → discover; RAC / enough / unknown → no', () => {
+  // Phase 2 (findBoardFromEarlier, user-authorized 2026-10-09): only a WAITLISTED class is discovered
+  it('[U3] gate mirror: WL → discover; REGRET / NOT AVAILABLE / fewer seats than party / RAC / enough / unknown → no', () => {
     expect(needsSameTrainDiscovery('GNWL 5', 1)).toBe(true);
-    expect(needsSameTrainDiscovery('REGRET', 1)).toBe(true);
-    expect(needsSameTrainDiscovery('AVAILABLE-0001', 3)).toBe(true);
+    expect(needsSameTrainDiscovery('RLWL1/WL1', 2)).toBe(true);
+    expect(needsSameTrainDiscovery('REGRET', 1)).toBe(false);
+    expect(needsSameTrainDiscovery('NOT AVAILABLE', 1)).toBe(false);
+    expect(needsSameTrainDiscovery('AVAILABLE-0001', 3)).toBe(false);
     expect(needsSameTrainDiscovery('AVAILABLE-0010', 3)).toBe(false);
     expect(needsSameTrainDiscovery('RAC 4', 2)).toBe(false);
     expect(needsSameTrainDiscovery(null, 2)).toBe(false);

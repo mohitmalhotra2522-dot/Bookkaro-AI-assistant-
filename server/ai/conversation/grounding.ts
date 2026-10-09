@@ -72,6 +72,12 @@ export function extractDateExpression(text: string): { expression: string; date:
     for (const src of [t, raw]) for (const m of src.matchAll(re)) found.push({ v: m[0].trim(), i: m.index! });
   }
   if (!found.length) return null;
+  // 2026-10-09: "20 October 1 passenger" — "october 1" overlaps "20 october" (same month word): the month already has
+  // its day before it, the trailing number is something else (passenger count …) → the overlapping later match is dropped
+  for (let k = found.length - 1; k >= 0; k--) {
+    const f = found[k];
+    if (found.some(g => g !== f && g.i < f.i && f.i < g.i + g.v.length)) found.splice(k, 1);
+  }
   const negIdx = t.search(NEG);
   const after = negIdx >= 0 ? found.filter(f => f.i > negIdx) : [];
   const pool = (after.length ? after : found).sort((a, b) => a.i - b.i || b.v.length - a.v.length);

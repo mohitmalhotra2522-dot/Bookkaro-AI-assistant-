@@ -86,8 +86,13 @@ export function resolveDate(raw: string): DateResolveResult {
   }
 
   // "22 September", "2 oct", "October 3" (current year assumed; if month already passed → next year)
-  const wordMatch = text.match(/(\d{1,2})\s+([a-zA-Z]+)/);
-  const revWordMatch = text.match(/([a-zA-Z]+)\s+(\d{1,2})/);
+  // 2026-10-09: a real month word is preferred ("1 passenger 20 October" → 20 Oct; "20 October 1 passenger" → 20 Oct);
+  // the generic word pattern stays as the fallback (an unknown month word still asks instead of guessing)
+  const MON_RE = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join('|');
+  const fwd = text.match(new RegExp(`\\b(\\d{1,2})\\s+(${MON_RE})\\b`, 'i'));     // "20 October"
+  const rev = fwd ? null : text.match(new RegExp(`\\b(${MON_RE})\\s+(\\d{1,2})\\b`, 'i'));   // "October 20"
+  const wordMatch = fwd || (rev ? null : text.match(/(\d{1,2})\s+([a-zA-Z]+)/));
+  const revWordMatch = rev || (fwd ? null : text.match(/([a-zA-Z]+)\s+(\d{1,2})/));
   if (wordMatch || revWordMatch) {
     const day = wordMatch ? +wordMatch[1] : +(revWordMatch?.[2] ?? '');
     const monRaw = wordMatch ? wordMatch[2] : (revWordMatch?.[1] ?? '');

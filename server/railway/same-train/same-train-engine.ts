@@ -22,7 +22,7 @@ import {
   sameTrainJourneyKeyString, type SameTrainRouteCheck, type SameTrainRouteVerification
 } from '@shared/same-train-alternatives';
 import {
-  type ShortageTriggerReason, evaluateSeatShortage, normalizeAvailabilityState, isVerifiedSameTrainAlternative, SameTrainOutcome, SameTrainErrorClass
+  type ShortageTriggerReason, evaluateSeatShortage, normalizeAvailabilityState, isVerifiedSameTrainAlternative, SameTrainOutcome, SameTrainErrorClass, currentWaitlistNumber
 } from '@shared/same-train-shortage';
 
 // ------------------------------------------------------------------ limits
@@ -132,6 +132,12 @@ export interface PlanInput {
    * (requested origin → each further station, route order) · NEVER (default — pre-P42-14 behaviour).
    */
   terminalSweep?: 'AUTO' | 'NEVER';
+  /**
+   * findBoardFromEarlier (Phase 2) staged depth: stage A = requested pair + the `earlier` nearest stops before the origin
+   * + `ahead` stops past the destination; stage B (phase3, only when stage A found nothing bookable in any searched class)
+   * = the remaining earlier stops up to the train's origin (≤ MAX_EARLIER_STATIONS), then onward up to the terminus.
+   */
+  staged?: { earlier: number; ahead: number };
 }
 
 export interface CandidatePlan {
@@ -146,6 +152,9 @@ export interface CandidatePlan {
   /** P42-14: stations after the destination extension up to the train's terminal (route order) — phase 3 only */
   terminalExtension: RouteStation[];
   phase3: CandidatePair[];                 // P2-kind pairs requested origin → terminalExtension (terminalSweep AUTO)
+  /** Phase 2 staged depth, stage B1: the remaining earlier stops (nearest first, up to the origin) → requested destination.
+   *  Runs only when stage A found nothing bookable; phase3 (terminus) only when B1 also found nothing. Empty unstaged. */
+  stageB: CandidatePair[];
   truncated: boolean;
 }
 
@@ -182,18 +191,22 @@ export function planCandidates(stations: RouteStation[], duplicates: Set<string>
   else {
     destinationSweep = 'EXTENSION';
     const raw = Number(input.destinationExtensionStations);
-    const n = Number.isFinite(raw) && raw > 0 ? Math.min(DESTINATION_EXTENSION_MAX, Math.max(DESTINATION_EXTENSION_MIN, Math.round(raw))) : Math.min(DESTINATION_EXTENSION_MAX, limits.maxDestinationSweep);
+    const n = input.staged ? Math.max(0, Math.min(DESTINATION_EXTENSION_MAX, Math.round(Number(input.staged.ahead) || 0)))
+      : Number.isFinite(raw) && raw > 0 ? Math.min(DESTINATION_EXTENSION_MAX, Math.max(DESTINATION_EXTENSION_MIN, Math.round(raw))) : Math.min(DESTINATION_EXTENSION_MAX, limits.maxDestinationSweep);
     destinationExtension = stations.slice(di + 1, Math.min(terminal, di + n) + 1).filter(s => !duplicates.has(s.code));
   }
 
   const nearestOrigins = [...originAlternatives].sort((a, b) => b.index - a.index);       // closest to the requested origin first
   const nearestDests = [...destinationExtension].sort((a, b) => a.index - b.index);       // closest to the requested destination first
+  // Phase 2 staged depth: stage A holds only the nearest `earlier` stops; the rest waits for stage B (phase3)
+  const stageAOrigins = input.staged ? nearestOrigins.slice(0, Math.max(0, Math.round(Number(input.staged.earlier) || 0))) : nearestOrigins;
+  const stageBOrigins = input.staged ? nearestOrigins.slice(stageAOrigins.length) : [];
   const all: CandidatePair[] = [pairOf(stations, oi, di, 'P0')];
-  for (const s of nearestOrigins) all.push(pairOf(stations, s.index, di, 'P1'));
+  for (const s of stageAOrigins) all.push(pairOf(stations, s.index, di, 'P1'));
   for (const s of nearestDests) all.push(pairOf(stations, oi, s.index, 'P2'));
   const combined: CandidatePair[] = [];
   if (input.combinedPairs !== 'NEVER') {
-    for (const so of nearestOrigins) for (const sd of nearestDests) combined.push(pairOf(stations, so.index, sd.index, 'P3'));
+    for (const so of stageAOrigins) for (const sd of nearestDests) combined.push(pairOf(stations, so.index, sd.index, 'P3'));
     combined.sort((a, b) => ((oi - a.originIndex) + (a.destinationIndex - di)) - ((oi - b.originIndex) + (b.destinationIndex - di)) || b.originIndex - a.originIndex);
   }
   const cap = limits.maxCandidatePairs;
@@ -202,11 +215,13 @@ export function planCandidates(stations: RouteStation[], duplicates: Set<string>
   const phase2 = combined.filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, Math.max(0, cap - phase1.length));
   // P42-14: the rest of the route after the extension window, up to the terminal (never a duplicate station, never re-checked)
   const lastWindowIndex = destinationExtension.length ? destinationExtension[destinationExtension.length - 1].index : di;
-  const terminalExtension = input.terminalSweep === 'AUTO' && destinationSweep === 'EXTENSION'
+  const terminalExtension = (input.terminalSweep === 'AUTO' || input.staged) && destinationSweep === 'EXTENSION'
     ? stations.slice(lastWindowIndex + 1).filter(s => !duplicates.has(s.code)) : [];
+  // stage B1 (F3 order): the remaining earlier stops nearest first, up to the origin; then phase3 beyond the destination
+  const stageB = stageBOrigins.map(s => pairOf(stations, s.index, di, 'P1')).filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, cap);
   const phase3 = terminalExtension.map(s => pairOf(stations, oi, s.index, 'P2')).filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, cap);
-  const truncated = all.length > phase1.length || combined.length > phase2.length || terminalExtension.length > phase3.length;
-  return { ok: true, plan: { route: stations, originIndex: oi, destinationIndex: di, originAlternatives, destinationExtension, destinationSweep, phase1, phase2, terminalExtension, phase3, truncated } };
+  const truncated = all.length > phase1.length || combined.length > phase2.length || terminalExtension.length > phase3.length || stageBOrigins.length > stageB.length;
+  return { ok: true, plan: { route: stations, originIndex: oi, destinationIndex: di, originAlternatives, destinationExtension, destinationSweep, phase1, phase2, terminalExtension, phase3, stageB, truncated } };
 }
 
 // ------------------------------------------------------------------ provider answers
@@ -439,9 +454,42 @@ export function mergeCandidate(pair: CandidatePair, evidence: ProviderEvidence[]
     fare, verificationStatus, actionable: verificationStatus === 'VERIFIED',
     evidence, webEvidence: web, warnings,
     ...(conflicting ? { conflict: { providers: ok.map(e => e.provider), values: ok.map(e => ({ provider: e.provider, status: e.availability!.status })) } } : {}),
+    // Phase 2: no fresh answer, only a too-old provider snapshot → kept for the screen (⚠ + age), never a verdict
+    ...(!ok.length && !conflicting ? staleOf(api) : {}),
     extensionStations: 0,   // set by the runner (route index distance past the requested destination)
     fetchedAt
   };
+}
+
+/** Phase 2: the newest too-old snapshot among the evidence (status + age) — shown with ⚠, never availability. */
+function staleOf(api: ProviderEvidence[]): Pick<SameTrainAlternative, 'staleSnapshot'> {
+  const st = api.filter(e => e.errorCode === E.STALE_PROVIDER_DATA && e.staleSnapshot).sort((a, b) => a.staleSnapshot!.ageMinutes - b.staleSnapshot!.ageMinutes)[0];
+  if (!st) return {};
+  return { staleSnapshot: { provider: st.provider, status: st.staleSnapshot!.status, category: availabilityCategory(st.staleSnapshot!.status),
+    providerUpdatedAt: st.staleSnapshot!.providerUpdatedAt, ageMinutes: st.staleSnapshot!.ageMinutes } };
+}
+
+/**
+ * Phase 2 "better WL": nothing bookable found → a FRESH waitlist from an EARLIER station lower than the train's direct
+ * waitlist of that class (fresh requested-pair answer first, else the search row) is marked — still WL, never confirmed.
+ */
+export function markBetterWaitlist(alternatives: SameTrainAlternative[], directStatus: Record<string, string> | undefined): number {
+  const direct = (cls: string): number | undefined => {
+    const p0 = alternatives.find(a => a.isRequestedPair && a.travelClass === cls);
+    if (p0 && (p0.availability === 'AVAILABLE' || p0.availability === 'RAC')) return undefined;     // direct is not a waitlist now
+    const fresh = p0 && p0.availability === 'WAITLIST' ? currentWaitlistNumber(p0.availabilityStatusText) : undefined;
+    return fresh ?? currentWaitlistNumber(directStatus?.[cls]);
+  };
+  let n = 0;
+  for (const a of alternatives) {
+    if (a.isRequestedPair || a.kind !== 'ORIGIN_ALTERNATIVE' || a.availability !== 'WAITLIST') continue;
+    if (a.verificationStatus !== 'VERIFIED' && a.verificationStatus !== 'PARTIALLY_VERIFIED') continue;
+    const wl = currentWaitlistNumber(a.availabilityStatusText);
+    const d = direct(a.travelClass);
+    if (wl === undefined || d === undefined || wl >= d) continue;
+    a.betterWaitlist = { waitlist: wl, directWaitlist: d }; n++;
+  }
+  return n;
 }
 
 /** P42.2: normalized state + exact seat count + sufficiency for the party (never inferred from AVAILABLE alone). */
@@ -480,6 +528,12 @@ export interface SameTrainSearchRequest {
   fallbackProviders?: Record<string, ProviderRef>;
   /** P42.9: fallback for the route (timetable) call on an eligible fault of the route provider. */
   routeFallback?: ProviderRef | null;
+  /** Phase 2 (findBoardFromEarlier): staged depth — see PlanInput.staged */
+  staged?: { earlier: number; ahead: number };
+  /** Phase 2: provider probes of THIS search in flight at once (EARLIER_PROBE_CONCURRENCY); still through the F3 queue */
+  probeConcurrency?: number;
+  /** Phase 2 "better WL": the train's DIRECT status per class from the authoritative search row (class code → status) */
+  directStatus?: Record<string, string>;
 }
 
 /** P42.7: requested class first, then the other authoritative classes in provider order (deduped, codes only). */
@@ -629,7 +683,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     stats.requested += run.length * req.providers.length;
     prog.stage = 'CHECKING'; prog.total += run.length * req.providers.length; emit();
     // F3: scheduled → every unit is handed to the fair queue at once, in station order (the queue paces / orders them)
-    const pool = scheduled ? Math.max(1, run.length) : L.maxParallel;
+    const pc = Number(req.probeConcurrency) > 0 ? Math.floor(Number(req.probeConcurrency)) : 0;
+    const pool = scheduled ? Math.max(1, pc ? Math.min(pc, run.length) : run.length) : (pc ? Math.min(pc, L.maxParallel) : L.maxParallel);
     await Promise.all(req.providers.map(provider => mapLimit(run.map((u, i) => ({ ...u, i })), pool, async ({ pair, cls, i }) => {
       const td = ticketDate(pair);
       const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: cls, date: td ? td.date : req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
@@ -729,7 +784,11 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   // the destination over the rest of the route up to the train's terminal (same classes, same providers, same check cap)
   const goodAnyClass = (pairs: CandidatePair[]) => classes.some(c => pairs.some(p => (evidenceByPair.get(ek(p.pairId, c)) || []).some(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS'
     && (e.availability?.category === 'RAC' || (e.availability?.category === 'AVAILABLE' && evaluateSeatShortage({ status: e.availability.status, requestedPassengerCount: req.passengersCount }).sufficiency !== 'INSUFFICIENT')))));
-  const windowPairs = [...plan.phase1, ...(runCombined ? plan.phase2 : [])];
+  // Phase 2 staged depth: stage A found nothing bookable → B1 (rest of the earlier stops up to the origin)
+  const stageAPairs = [...plan.phase1, ...(runCombined ? plan.phase2 : [])];
+  const runStageB = plan.stageB.length > 0 && !goodAnyClass(stageAPairs) && current() && now() < deadline;
+  if (runStageB) await runPhase(plan.stageB);
+  const windowPairs = [...stageAPairs, ...(runStageB ? plan.stageB : [])];
   const runTerminal = plan.phase3.length > 0 && !goodAnyClass(windowPairs) && current() && now() < deadline;
   if (runTerminal) await runPhase(plan.phase3);
   const pairs = [...windowPairs, ...(runTerminal ? plan.phase3 : [])];
@@ -781,6 +840,9 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     const rules = { boarding: await ruleOf('BOARDING', p.ticketOrigin, ctx.requestedOrigin, cls), alighting: await ruleOf('ALIGHTING', p.ticketDestination, ctx.requestedDestination, cls) };
     const m = mergeCandidate(p, ev, webByPair.get(p.pairId) || [], rules, { ...ctx, travelClass: cls, date: td?.date ?? req.date }, fetchedAt);
     m.extensionStations = Math.max(0, p.destinationIndex - destIdx);
+    // Phase 2 output fields: ticket from / travel from + route distance from the requested pair
+    m.bookFrom = p.ticketOrigin; m.boardAt = ctx.requestedOrigin;
+    m.stopsBefore = Math.max(0, plan.originIndex - p.originIndex); m.stopsAfter = Math.max(0, p.destinationIndex - destIdx);
     // 2026-10-09: the ticket is dated for the earlier station's departure on the same run (shown + used for booking)
     if (td?.dayUnknown && !m.warnings.includes(E.TICKET_DATE_UNVERIFIED)) { m.warnings.push(E.TICKET_DATE_UNVERIFIED); m.ticketDateUnverified = true; }
     if (td && td.shiftDays !== 0) {
@@ -814,7 +876,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const anySuccess = apiEv.some(e => e.outcome === 'SUCCESS');
   const completedAt = new Date(now()).toISOString();
   const latencyMs = now() - t0;
-  const earlierStationsChecked = plan.originAlternatives.length;
+  // Phase 2 staged: count what was actually searched (stage B may not have run); unstaged = the pre-Phase-2 numbers
+  const earlierStationsChecked = req.staged ? new Set(pairs.filter(p => p.priority === 'P1').map(p => p.ticketOrigin)).size : plan.originAlternatives.length;
   const terminalChecked = runTerminal ? plan.phase3.length : 0;
   const downstreamStationsChecked = plan.destinationExtension.length + terminalChecked;
   const partialRun = apiEv.some(e => e.outcome !== 'SUCCESS');
@@ -839,6 +902,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   // P42.2: a verified alternative needs seats for the WHOLE party (AVAILABLE count ≥ passengers) or RAC
   const verifiedAlternativeCount = alternatives.filter(isVerifiedSameTrainAlternative).length;
   const foundAlternative = verifiedAlternativeCount > 0;
+  // Phase 2: better WL only when nothing bookable was found and the request carries the direct status (findBoardFromEarlier)
+  const betterWaitlistCount = !foundAlternative && req.directStatus ? markBetterWaitlist(alternatives, req.directStatus) : 0;
   if (!foundAlternative) errors.push(E.NOT_FOUND);
   const p0 = alternatives.find(a => a.isRequestedPair && a.travelClass === requestedClass);
   const requestedPairAssessment = p0 ? evaluateSeatShortage({ status: p0.availability === 'CONFLICTING' ? undefined : p0.availabilityStatusText, requestedPassengerCount: req.passengersCount }) : null;
@@ -867,6 +932,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     requestedPairAssessment,
     outcome: foundAlternative ? SameTrainOutcome.FOUND : SameTrainOutcome.NONE,
     verifiedAlternativeCount,
+    ...(betterWaitlistCount ? { betterWaitlistCount } : {}),
     searchComplete: !plan.truncated && !anyFailure && !checksTruncated,
     // F3: honest check summary for the screen (counts of real outcomes; skipped = never sent, e.g. search deadline)
     checkSummary: { total: apiEv.length, succeeded: apiEv.filter(e => e.outcome === 'SUCCESS').length,

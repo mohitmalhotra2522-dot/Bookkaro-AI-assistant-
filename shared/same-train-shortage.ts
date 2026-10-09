@@ -69,6 +69,25 @@ export function normalizeAvailabilityState(status: unknown): NormalizedAvailabil
   return 'UNKNOWN';
 }
 
+/** findBoardFromEarlier (Phase 2): only a train whose DIRECT status is a waitlist is searched (AVAILABLE / RAC / REGRET / CANCELLED / NOT AVAILABLE never). */
+export function isWaitlistStatus(status: unknown): boolean {
+  return normalizeAvailabilityState(status) === 'WAITLIST';
+}
+
+/**
+ * Current waitlist position of a WAITLIST status ("GNWL84/WL17" → 17 (current after the slash), "RLWL1/WL1" → 1,
+ * "WL 84" → 84, "PQWL5" → 5). Not a waitlist / no number → undefined (never inferred).
+ */
+export function currentWaitlistNumber(status: unknown): number | undefined {
+  if (!isWaitlistStatus(status)) return undefined;
+  const s = up(status);
+  const parts = s.split('/').map(x => x.trim()).filter(Boolean);
+  const cur = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+  if (parts.length > 1 && normalizeAvailabilityState(cur) !== 'WAITLIST') return undefined;   // "GNWL51/RAC78" → not a waitlist now
+  const m = cur.match(/(?:WL|WAITLIST(?:ED)?|WAITING)\s*(\d{1,4})\b/) || cur.match(/(\d{1,4})\b/);
+  return m ? Number(m[1]) : undefined;
+}
+
 /**
  * The provider's exact available-seat count, ONLY when the status is AVAILABLE and carries a number
  * ("AVAILABLE-0001", "AVAILABLE 24", "AVL 5", "CURR_AVBL-0003"). No number → undefined (never inferred).

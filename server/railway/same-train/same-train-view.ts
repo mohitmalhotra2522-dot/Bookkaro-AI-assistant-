@@ -58,6 +58,8 @@ export function sameTrainLLMView(r: SameTrainAlternativesResult): Record<string,
     verifiedAlternativeCount: r.verifiedAlternativeCount ?? r.alternatives.filter(isVerifiedSameTrainAlternative).length,
     ...(r.triggerReason ? { triggerReason: r.triggerReason } : {}),
     searchComplete: r.searchComplete ?? (!r.candidatesTruncated && r.status !== 'PARTIAL'),
+    // Phase 2 better WL (only when nothing bookable): a lower FRESH waitlist from an earlier station — still WL, never confirmed
+    ...(r.betterWaitlistCount ? { betterWaitlistNotConfirmed: r.alternatives.filter(a => a.betterWaitlist).map(a => `${a.ticketOrigin}→${a.ticketDestination} ${a.travelClass} WL ${a.betterWaitlist!.waitlist} (direct WL ${a.betterWaitlist!.directWaitlist})${a.ticketDateShiftDays ? `, ticket ${a.date}` : ''}`) } : {}),
     // 2026-10-09: provider snapshot older than the freshness limit → NOT a verdict (not "no seat"); say it could not be confirmed
     ...(r.staleChecks?.length ? { staleChecksNotVerdict: r.staleChecks.map(c => `${c.ticketOrigin}→${c.ticketDestination} ${c.travelClass}: provider snapshot ${c.ageMinutes} min old (${c.status}) — fresh status not confirmed`) } : {}),
     trainNumber: r.trainNumber, ...(r.trainName ? { trainName: r.trainName } : {}), date: r.date, travelClass: r.travelClass, passengersCount: r.passengersCount,

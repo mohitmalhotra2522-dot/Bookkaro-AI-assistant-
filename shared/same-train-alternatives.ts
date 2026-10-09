@@ -191,6 +191,17 @@ export interface SameTrainAlternative {
   conflict?: { providers: string[]; values: Array<{ provider: string; status: string }> };
   /** extra stations beyond the requested destination (destination extension) */
   extensionStations: number;
+  /** findBoardFromEarlier (2026-10-09 Phase 2): ticket from (= ticketOrigin), travel from (= requested origin) and the
+   *  route distance of the ticket pair from the requested pair (earlier stops before the origin / stops past the destination) */
+  bookFrom?: string;
+  boardAt?: string;
+  stopsBefore?: number;
+  stopsAfter?: number;
+  /** Phase 2: the provider answered only with a too-old snapshot (no verdict). Shown with ⚠ + age; Select = fresh re-check
+   *  first (the re-check decides; a stale snapshot is never applied) */
+  staleSnapshot?: { provider: string; status: string; category: AvailabilityCategory; providerUpdatedAt: string; ageMinutes: number };
+  /** Phase 2 "better WL": a FRESH waitlist from an earlier station lower than the train's direct waitlist (still WL — not confirmed) */
+  betterWaitlist?: { waitlist: number; directWaitlist: number };
   fetchedAt: string;
 }
 
@@ -275,6 +286,8 @@ export interface SameTrainAlternativesResult {
   requestedPairAssessment?: SeatShortageAssessment | null;
   outcome?: SameTrainOutcome;
   verifiedAlternativeCount?: number;
+  /** Phase 2: count of better-WL options (only when no bookable option was found) */
+  betterWaitlistCount?: number;
   /** false when the candidate list was truncated or some provider calls failed / timed out — never claim exhaustive */
   searchComplete?: boolean;
   /** F3: counts of real provider outcomes of this search (skipped = never sent, e.g. deadline); paced = fair queue used */
@@ -388,6 +401,13 @@ export interface SameTrainRouteCheck {
 
 /** P42.7 hard caps of the recovery route matrix (env may lower, never raise). */
 export const MAX_EARLIER_STATIONS = 15;
+/** findBoardFromEarlier config (Phase 2): staged depth — first `boardEarlierStops` stops before the origin and
+ *  `bookUptoStops` past the destination; only when nothing bookable is found → up to the origin (≤ MAX_EARLIER_STATIONS)
+ *  and the terminus. Probes per train and trains in parallel are bounded (still through the F3 limiter / queue). */
+export const BOARD_EARLIER_STOPS = 2;
+export const BOOK_UPTO_STOPS = 3;
+export const EARLIER_PROBE_CONCURRENCY = 3;
+export const SAME_TRAIN_TRAIN_CONCURRENCY = 3;
 export const MAX_DOWNSTREAM_STATIONS = 7;
 export const MAX_AVAILABILITY_CHECKS = 160;
 

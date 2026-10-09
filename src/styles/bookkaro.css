@@ -616,6 +616,9 @@ img, svg { display: block; }
 .bk-sti__chip { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 3px 8px 3px 10px; border: 1px solid var(--border-strong);
   border-radius: var(--r-pill); background: var(--surface); color: var(--navy-900); font: inherit; font-size: 12px; cursor: pointer; }
 .bk-sti__chip .bk-tag { pointer-events: none; }
+.bk-sti__chip.is-stale { border-style: dashed; }
+.bk-sti__stale { color: var(--warn); }
+.bk-sti--bwl { border-style: dashed; }
 .bk-sti__chip.is-active { border-color: var(--navy-700); background: var(--navy-50); box-shadow: inset 0 0 0 1px var(--navy-700); }
 .bk-sti__chip:disabled { opacity: 0.6; cursor: default; }
 .bk-sti__chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

@@ -16,6 +16,7 @@ import type { ConversationStateManager } from '../../ai/state/conversation-state
 import { BookingState, EXECUTION_LOCKED_STATES } from '@shared/states';
 import { evaluateSeatShortage } from '@shared/same-train-shortage';
 import type { SameTrainAlternativesResult, SameTrainStaleCheck } from '@shared/same-train-alternatives';
+import { BOARD_EARLIER_STOPS, BOOK_UPTO_STOPS, EARLIER_PROBE_CONCURRENCY, SAME_TRAIN_TRAIN_CONCURRENCY } from '@shared/same-train-alternatives';
 import { sameTrainAlternativesEnabledFromEnv } from '../../ai/tools/tool-registry';
 import type { RailwayToolService } from '../tools/railway-tool-service';
 import type { SameTrainDeps, SameTrainProgress } from './same-train-engine';
@@ -32,6 +33,44 @@ export function sameTrainAutoBudgetFromEnv(env: NodeJS.ProcessEnv = process.env)
   const n = Number(env.SAME_TRAIN_AUTO_MAX_PER_RESULTS);
   return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 40) : 40;
 }
+
+// ------------------------------------------------------------------ findBoardFromEarlier config (Phase 2)
+
+export interface BoardFromEarlierConfig {
+  /** only trains whose DIRECT status is a waitlist, waitlisted classes only (SAME_TRAIN_WL_ONLY, default on) */
+  wlOnly: boolean;
+  /** staged depth (SAME_TRAIN_STAGED_DEPTH, default on): first earlier / ahead stops, then origin / terminus if nothing found */
+  staged: { earlier: number; ahead: number } | null;
+  probeConcurrency: number;
+  trainConcurrency: number;
+}
+const flagOn = (v: unknown) => !/^(0|off|false|no)$/i.test(String(v ?? '').trim());
+const intIn = (v: unknown, d: number, lo: number, hi: number) => { const n = Number(v); return Number.isFinite(n) && String(v ?? '').trim() !== '' ? Math.min(hi, Math.max(lo, Math.floor(n))) : d; };
+export function boardFromEarlierConfigFromEnv(env: NodeJS.ProcessEnv = process.env): BoardFromEarlierConfig {
+  return {
+    wlOnly: flagOn(env.SAME_TRAIN_WL_ONLY),
+    staged: flagOn(env.SAME_TRAIN_STAGED_DEPTH)
+      ? { earlier: intIn(env.SAME_TRAIN_BOARD_EARLIER_STOPS, BOARD_EARLIER_STOPS, 0, 15), ahead: intIn(env.SAME_TRAIN_BOOK_UPTO_STOPS, BOOK_UPTO_STOPS, 0, 7) } : null,
+    probeConcurrency: intIn(env.SAME_TRAIN_PROBE_CONCURRENCY, EARLIER_PROBE_CONCURRENCY, 1, 12),
+    trainConcurrency: intIn(env.SAME_TRAIN_TRAIN_CONCURRENCY, SAME_TRAIN_TRAIN_CONCURRENCY, 1, 40)
+  };
+}
+
+/** Phase 2: at most `trainConcurrency` automatic train searches run at once (the rest wait QUEUED, FIFO). */
+let trainSlotsUsed = 0;
+const trainSlotWaiters: Array<() => void> = [];
+async function acquireTrainSlot(max: number): Promise<() => void> {
+  if (trainSlotsUsed >= max) await new Promise<void>(res => trainSlotWaiters.push(res));
+  else trainSlotsUsed++;
+  let released = false;
+  return () => {
+    if (released) return; released = true;
+    const next = trainSlotWaiters.shift();
+    if (next) next();            // the slot passes straight to the next waiting search
+    else trainSlotsUsed--;
+  };
+}
+export function sameTrainTrainSlotsForTests(): { used: number; waiting: number } { return { used: trainSlotsUsed, waiting: trainSlotWaiters.length }; }
 
 export type DiscoverCode = 'OK' | 'RUNNING' | 'NOT_ENABLED' | 'INVALID_REQUEST' | 'RESULTS_STALE' | 'TRAIN_NOT_DISPLAYED' | 'CLASS_NOT_LISTED'
   | 'NOT_NEEDED' | 'BUDGET_EXCEEDED' | 'LOCKED' | 'SEARCH_FAILED';
@@ -94,9 +133,12 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   const rowClasses = ((row.classes || []) as any[]).map(c => ({ code: String(c?.code ?? c).toUpperCase(), availability: c?.availability ?? null }))
     .filter(c => /^[A-Z0-9]{1,4}$/.test(c.code));
   const pax = Number(s.passengersCount) > 0 ? Number(s.passengersCount) : 1;
+  const bfe = boardFromEarlierConfigFromEnv(env);
   // only a MEANINGFUL shortage shown by the provider's own search status (RAC / UNKNOWN / sufficient → no search)
   const meaningful = (c: { availability: unknown }) => {
     const a = evaluateSeatShortage({ status: c.availability ?? null, requestedPassengerCount: pax });
+    // Phase 2 (findBoardFromEarlier): WAITLIST only — AVAILABLE / RAC / REGRET / CANCELLED / NOT AVAILABLE are never searched
+    if (bfe.wlOnly) return a.availabilityStatus === 'WAITLIST' ? a : null;
     return a.shortage && a.triggerReason && a.triggerReason !== 'TRAIN_CANCELLED' ? a : null;
   };
   // P42.7 per-train eligibility on the REQUESTED class (selected class → the class the user named at search). Another class
@@ -161,6 +203,9 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
       ? { ...opts.deps, onProgress: (p: SameTrainProgress) => { onProgress(p); opts.deps!.onProgress?.(p); } }
       : sameTrainPacedQueueEnabled(env) ? scheduledSameTrainDeps(opts.tools as any, { isCurrent, onProgress })
       : liveSameTrainDeps(opts.tools as any, { isCurrent, onProgress });
+    // Phase 2: bounded trains in parallel — wait for a slot (stays QUEUED), then re-check the list is still current
+    const release = await acquireTrainSlot(bfe.trainConcurrency);
+    if (!isCurrent()) { release(); return { ok: false, code: 'RESULTS_STALE' }; }
     const out = await searchSameTrainAlternatives({
       sessionId, turnId: null, requestId: null, journeyVersion,
       trainNumber, trainName: row.trainName || row.name, date: String(s.date || j.date), travelClass, classes, passengersCount: pax,
@@ -168,12 +213,15 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
       originSweep: true, destinationSweep: true, combinedPairs: 'NEVER', includeFare: false, webEvidence: false,
       // P42-14: no seat inside ≤15 earlier stations / destination + 5..7 → continue the destination up to the train's terminal
       terminalSweep: 'AUTO',
+      // Phase 2: staged depth, bounded probes per train, the direct status per waitlisted class (better WL)
+      ...(bfe.staged ? { staged: bfe.staged } : {}), probeConcurrency: bfe.probeConcurrency,
+      directStatus: Object.fromEntries(rowClasses.filter(c => classes.includes(c.code) && c.availability != null).map(c => [c.code, String(c.availability)])),
       // primary availability provider only (bounded cost); route from the resolved route provider — never a hidden failover
       providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [], fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
       triggerReason: shortage.triggerReason, triggerSource: 'AUTO_DISPLAY',
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion,
         requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }
-    } as any, deps);
+    } as any, deps).finally(release);
     if (!isCurrent()) return { ok: false, code: 'RESULTS_STALE' };
     if (!out.ok) {
       opts.log?.({ event: 'same_train_auto', ok: false, code: out.code, trainNumber, travelClass, pax, paced: !!deps.scheduled, latencyMs: Date.now() - t0 });

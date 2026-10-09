@@ -60,8 +60,48 @@ function discoverOnce(sessionId: string, trainNumber: string, travelClass: strin
 /** A class chip that should get auto discovery (mirrors the backend gate; the backend decides). */
 export function needsSameTrainDiscovery(status: unknown, passengers: number): boolean {
   const r = evaluateSeatShortage({ status: status ?? null, requestedPassengerCount: passengers > 0 ? passengers : 1 });
-  return r.shortage && !!r.triggerReason && r.triggerReason !== 'TRAIN_CANCELLED';
+  // Phase 2 (findBoardFromEarlier): only a WAITLISTED class is searched (AVAILABLE / RAC / REGRET / CANCELLED never)
+  return r.availabilityStatus === 'WAITLIST';
 }
+
+/** Phase 2: an option whose only provider answer was a too-old RAC / AVAILABLE snapshot — shown with ⚠ + age; Select = fresh re-check first. */
+export function staleSelectable(a: any): boolean {
+  const st = a?.staleSnapshot;
+  if (!st || a.isRequestedPair || a.verificationStatus !== 'UNVERIFIED') return false;
+  if (st.category === 'RAC') return true;
+  if (st.category !== 'AVAILABLE') return false;
+  const pax = Number(a.requestedPassengerCount ?? a.passengersCount) || 1;
+  return evaluateSeatShortage({ status: st.status, requestedPassengerCount: pax }).sufficiency !== 'INSUFFICIENT';
+}
+export function staleOptionLine(a: any): string | null {
+  const st = a?.staleSnapshot;
+  if (!st || !staleSelectable(a)) return null;
+  const at = staleTimeIST(st.providerUpdatedAt);
+  return `⚠ Provider data ${at ? `${at} ka ` : ''}(${Number(st.ageMinutes) || 0} min purana) — Select par pehle fresh check hoga`;
+}
+const staleChipLabel = (a: any) => {
+  const t = String(a?.staleSnapshot?.status || '');
+  const m = t.match(/RAC\s*0*(\d+)/i);
+  return `⚠ ${m ? `RAC ${m[1]}` : t || 'purana data'}`;
+};
+
+/** Phase 2 "better WL": fresh lower waitlist from an earlier station (backend-marked) — WL, never a confirmed seat; no Select. */
+export function betterWaitlistOf(d: any): any[] {
+  return ((d?.alternatives || []) as any[]).filter(a => a?.betterWaitlist && a.availability === 'WAITLIST');
+}
+export const BETTER_WL_HEADING = 'Kam waitlist · pehle station se (confirm seat nahi)';
+export function betterWaitlistLine(a: any): string {
+  const td = Number(a.ticketDateShiftDays) ? ` · ticket date ${shortDate(a.date)}` : '';
+  return `${a.ticketOrigin} → ${a.ticketDestination} · ${a.travelClass} · WL ${a.betterWaitlist.waitlist} (direct WL ${a.betterWaitlist.directWaitlist})${td} — WL hai, confirm nahi`;
+}
+export const BetterWaitlistLines: React.FC<{ d: any }> = ({ d }) => {
+  const list = betterWaitlistOf(d);
+  if (!list.length) return null;
+  return <div className="bk-sti bk-sti--bwl" role="status" data-testid="same-train-better-wl">
+    <div className="bk-sti__head">{BETTER_WL_HEADING}</div>
+    {list.map(a => <div key={a.alternativeId} className="bk-sti__meta">{betterWaitlistLine(a)}</div>)}
+  </div>;
+};
 
 const FALLBACK_CODES = new Set(['BUDGET_EXCEEDED', 'SEARCH_FAILED', 'NETWORK', 'POLL_TIMEOUT']);
 const stn = (code: string, name?: string) => (name ? String(name).replace(/\s+(Jn|Junction)\.?$/i, ' Jn') : code);
@@ -125,24 +165,28 @@ export const SameTrainInline: React.FC<{
       // provider errors / limits → the P42-14 note; no error but the search was bounded (truncated) → "not complete"
       // 2026-10-09: when every unchecked result is a too-old provider snapshot, say THAT (not "provider limit")
       const onlyStale = stale.length > 0 && !!sum && sum.unchecked <= stale.length;
-      return <div className="bk-sti bk-sti--partial" role="status">
+      return <><div className="bk-sti bk-sti--partial" role="status">
           <div className="bk-sti__note">{onlyStale ? SAME_TRAIN_STALE_NOTE : res.card.status === 'PARTIAL' ? SAME_TRAIN_PARTIAL_NOTE : SAME_TRAIN_INCOMPLETE_NOTE}</div>
           {sum && sum.unchecked > 0 && <div className="bk-sti__meta">{partialCountText(sum)}</div>}
           <StaleCheckLines list={stale} />
           {fallbackBtn}
-        </div>;
+        </div><BetterWaitlistLines d={res.card} /></>;
     }
     return res.card.status === 'NOT_FOUND'
-      ? <div className="bk-sti bk-sti--none" role="status">{unavailableText(sum)}</div>
+      ? <><div className="bk-sti bk-sti--none" role="status">{unavailableText(sum)}</div><BetterWaitlistLines d={res.card} /></>
       : null;
   }
+  // Phase 2: a stale check already shown as a ⚠ option is not listed twice
+  const shownStale = new Set(((res.card.alternatives || []) as any[]).filter(staleSelectable).map(a => `${a.ticketOrigin}-${a.ticketDestination}-${a.travelClass}`));
+  const staleRest = stale.filter(c => !shownStale.has(`${c.ticketOrigin}-${c.ticketDestination}-${c.travelClass}`));
   return <>
     <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={BFE_HEADING} requestedClass={travelClass || res.card.travelClass} showTrain />
     {/* F3: completion state under the options — a partial search is never labelled complete */}
     {complete
       ? sum && <div className="bk-sti__meta bk-sti__status" role="status">{completeText(sum)}</div>
       : <div className="bk-sti__note bk-sti__status" role="status">{sum && sum.unchecked > 0 ? partialCountText(sum) : SAME_TRAIN_INCOMPLETE_NOTE}</div>}
-    {!complete && <StaleCheckLines list={stale} />}
+    {!complete && <StaleCheckLines list={staleRest} />}
+    <BetterWaitlistLines d={res.card} />
   </>;
 };
 
@@ -303,7 +347,9 @@ export interface RecoveryPairGroup {
 export function groupRecoveryByPair(d: any, requestedClass?: string | null): RecoveryPairGroup[] {
   const train = String(d?.trainNumber || '');
   const req = String(requestedClass || d?.travelClass || '').toUpperCase();
-  const opts = verifiedInRouteOrder(d).filter(a => canBookAvail(a) && (!train || a.trainNumber === undefined || String(a.trainNumber) === train));
+  const sameTrain = (a: any) => !train || a.trainNumber === undefined || String(a.trainNumber) === train;
+  // Phase 2: fresh bookable options first, then options known only from a too-old snapshot (⚠, fresh re-check on Select)
+  const opts = [...verifiedInRouteOrder(d).filter(a => canBookAvail(a) && sameTrain(a)), ...((d?.alternatives || []) as any[]).filter(a => staleSelectable(a) && sameTrain(a))];
   const groups = new Map<string, RecoveryPairGroup>();
   const pairOfStation = new Map<string, string>();
   for (const a of opts) {
@@ -417,21 +463,24 @@ const PairOption: React.FC<{ d: any; g: RecoveryPairGroup; sessionId: string | n
       <div className="bk-sti__chips" role="group" aria-label="Classes">
         {g.options.map((o, i) => {
           const rac = o.availability === 'RAC';
+          const old = staleSelectable(o);
+          const lbl = old ? staleChipLabel(o) : recoveryChipLabel(o);
           return (
-            <button key={o.alternativeId} type="button" className={`bk-sti__chip${i === active ? ' is-active' : ''}`} aria-pressed={i === active}
+            <button key={o.alternativeId} type="button" className={`bk-sti__chip${i === active ? ' is-active' : ''}${old ? ' is-stale' : ''}`} aria-pressed={i === active}
               disabled={disabled || busy} onClick={() => { setActive(i); setConfirm(false); setMsg(null); }}
-              aria-label={`${o.travelClass} ${recoveryChipLabel(o)}`}>
-              <span className="bk-sti__cls">{o.travelClass}</span><span className={`bk-tag bk-tag--${rac ? 'warn' : 'good'}`}>{recoveryChipLabel(o)}</span>
+              aria-label={`${o.travelClass} ${lbl}`}>
+              <span className="bk-sti__cls">{o.travelClass}</span><span className={`bk-tag bk-tag--${rac || old ? 'warn' : 'good'}`}>{lbl}</span>
             </button>
           );
         })}
         {extras.map(c => <span key={c.code} className="bk-tag">{c.code} · {c.status}</span>)}
-        {!confirm && canBookAvail(a) && (
+        {!confirm && (canBookAvail(a) || staleSelectable(a)) && (
           <button type="button" className="bk-btn bk-btn--primary bk-btn--sm bk-sti__use" disabled={disabled || busy || !sessionId}
-            onClick={() => (a.verificationStatus === 'PARTIALLY_VERIFIED' ? setConfirm(true) : use(false))}
-            aria-label={`Select ${a.travelClass} ${a.ticketOrigin} to ${a.ticketDestination}`}>{busy ? 'Checking…' : 'Select'}</button>
+            onClick={() => (a.verificationStatus === 'PARTIALLY_VERIFIED' || (staleSelectable(a) && (!ruleOk(a.boardingRuleStatus) || !ruleOk(a.alightingRuleStatus))) ? setConfirm(true) : use(false))}
+            aria-label={`Select ${a.travelClass} ${a.ticketOrigin} to ${a.ticketDestination}`}>{busy ? 'Checking…' : staleSelectable(a) ? 'Fresh check + Select' : 'Select'}</button>
         )}
       </div>
+      {staleOptionLine(a) && <div className="bk-sti__note bk-sti__stale" data-testid="same-train-stale-option">{staleOptionLine(a)}</div>}
       {!ruleOk(a.boardingRuleStatus) && <div className="bk-sti__note">{reqO} se boarding ka rule verify nahi hua</div>}
       {!ruleOk(a.alightingRuleStatus) && <div className="bk-sti__note">{reqD} par utarne ka rule verify nahi hua</div>}
       {confirm && (

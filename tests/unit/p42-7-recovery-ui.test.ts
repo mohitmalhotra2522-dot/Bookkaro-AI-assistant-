@@ -94,7 +94,9 @@ describe('P42.7 G4 — automatic recovery display', () => {
     expect(discoverCalls()).toHaveLength(0);
     expect(trainNeedsRecovery(TRAIN(ROW).classes, 'SL', 3)).toBe(true);             // other classes AVL — still recovery
     expect(trainNeedsRecovery(TRAIN([['SL', 'RAC 2']]).classes, 'SL', 3)).toBe(false); // RAC stays RAC (usable)
-    expect(trainNeedsRecovery(TRAIN([['SL', 'AVAILABLE-0002']]).classes, 'SL', 3)).toBe(true); // 2 < 3 passengers
+    // Phase 2 (findBoardFromEarlier, user-authorized 2026-10-09): only a WAITLISTED class triggers recovery — AVAILABLE with
+    // fewer seats than the party is not a waitlist → no recovery
+    expect(trainNeedsRecovery(TRAIN([['SL', 'AVAILABLE-0002']]).classes, 'SL', 3)).toBe(false); // 2 < 3 passengers, not WL
     expect(trainNeedsRecovery(TRAIN([['SL', 'AVAILABLE-0009'], ['3A', 'WL 1']]).classes, null, 3)).toBe(true); // class unknown → any shortage
   });
 
