@@ -18,7 +18,7 @@
  * web connector, never MOCK for LIVE.
  */
 import { providerToolCatalog } from '../../ai/tools/provider-tools';
-import { parseProviderChain } from './live/live-config';
+import { providerChainFor } from './live/live-config';
 import { WEB_PROVIDER_IDS } from './web/web-providers';
 
 type Env = Record<string, string | undefined>;
@@ -33,30 +33,41 @@ export function providerFallbackEnabled(env: Env = process.env): boolean {
   return String(env.RAILWAY_PROVIDER || '').trim().toLowerCase() === 'live';
 }
 
-/** The configured primary provider id (RAILWAY_PRIMARY_PROVIDER, default railcore) or null when the chain is invalid. */
-export function primaryProviderId(env: Env = process.env): string | null {
-  try { return parseProviderChain(env)[0] ?? null; } catch { return null; }
+/**
+ * The configured primary provider id or null when the chain is invalid. Without a capability: the general chain
+ * (RAILWAY_PRIMARY_PROVIDER, default railcore). 2026-10-09: with CHECK_AVAILABILITY / GET_FARE the availability chain
+ * (RAILWAY_AVAILABILITY_PROVIDERS) when configured.
+ */
+export function primaryProviderId(env: Env = process.env, capability?: string): string | null {
+  try { return providerChainFor(capability, env)[0] ?? null; } catch { return null; }
 }
 
 /**
- * Fallback connector for (provider, capability): only for the configured PRIMARY, only a registered non-web connector
- * that implements the capability, first in RAILWAY_FALLBACK_PROVIDERS order. null → no fallback.
+ * Ordered fallback connectors for (provider, capability): only for that capability's configured PRIMARY, only registered
+ * non-web connectors that implement the capability, in chain order (2026-10-09: the whole chain, so RailKit → RailCore →
+ * RailRadar keeps the RailCore → RailRadar step). [] → no fallback.
  */
-export function fallbackProviderFor(provider: string | null | undefined, capability: string, env: Env = process.env): string | null {
-  if (!provider || !providerFallbackEnabled(env)) return null;
+export function fallbackChainFor(provider: string | null | undefined, capability: string, env: Env = process.env): string[] {
+  if (!provider || !providerFallbackEnabled(env)) return [];
   let chain: string[];
-  try { chain = parseProviderChain(env); } catch { return null; }
-  if (chain[0] !== provider) return null;
+  try { chain = providerChainFor(capability, env); } catch { return []; }
+  if (chain[0] !== provider) return [];
   const primaryInfo = providerToolCatalog.get(provider);
+  const out: string[] = [];
   for (const id of chain.slice(1)) {
     if ((WEB_PROVIDER_IDS as readonly string[]).includes(id)) continue;
     const c = providerToolCatalog.get(id);
     if (!c || !c.capabilities.includes(capability as any)) continue;
     // never MOCK for LIVE (or LIVE for MOCK)
     if (primaryInfo && /^mock-/.test(primaryInfo.registryId) !== /^mock-/.test(c.registryId)) continue;
-    return id;
+    out.push(id);
   }
-  return null;
+  return out;
+}
+
+/** First fallback connector for (provider, capability) — see fallbackChainFor. null → no fallback. */
+export function fallbackProviderFor(provider: string | null | undefined, capability: string, env: Env = process.env): string | null {
+  return fallbackChainFor(provider, capability, env)[0] ?? null;
 }
 
 export interface FallbackAttempt {
@@ -81,12 +92,19 @@ export async function runWithProviderFallback<T>(o: {
   const code = o.errorCodeOf(first);
   const rl = (r: T, c: string | null) => (c === 'RATE_LIMITED' ? { rateLimited: true, ...(o.rateLimitLocalOf?.(r) !== undefined ? { rateLimitLocal: !!o.rateLimitLocalOf!(r) } : {}) } : { rateLimited: false });
   attempts.push({ provider: o.primary, attempt: 1, status: code ? 'FAILED' : 'SUCCESS', errorCode: code, latencyMs: Date.now() - t0, ...rl(first, code), fallbackUsed: false, retryCount: 0 });
-  const fb = isFallbackEligible(code) ? fallbackProviderFor(o.primary, o.capability, o.env) : null;
-  if (!fb || (o.canFallback && !o.canFallback())) return { result: first, served: o.primary, attempts, fallbackUsed: false };
-  const t1 = Date.now();
-  const second = await o.call(fb);
-  const code2 = o.errorCodeOf(second);
-  attempts.push({ provider: fb, attempt: 2, status: code2 ? 'FAILED' : 'SUCCESS', errorCode: code2, latencyMs: Date.now() - t1, ...rl(second, code2), fallbackUsed: true, fallbackReason: code!, retryCount: 0 });
-  o.log?.('provider_fallback', { ...(o.context || {}), capability: o.capability, primary: o.primary, fallback: fb, fallbackReason: code, primaryStatus: 'FAILED', fallbackStatus: code2 ? 'FAILED' : 'SUCCESS', fallbackErrorCode: code2, latencyMs: Date.now() - t0 });
-  return { result: second, served: fb, attempts, fallbackUsed: true, fallbackReason: code! };
+  const fbs = isFallbackEligible(code) ? fallbackChainFor(o.primary, o.capability, o.env) : [];
+  if (!fbs.length || (o.canFallback && !o.canFallback())) return { result: first, served: o.primary, attempts, fallbackUsed: false };
+  // sequential down the chain: each next provider only after the previous one FAILED with an ELIGIBLE fault
+  let result = first; let served = o.primary; let lastCode = code;
+  for (const fb of fbs) {
+    if (served !== o.primary && (!isFallbackEligible(lastCode) || (o.canFallback && !o.canFallback()))) break;
+    const t1 = Date.now();
+    const next = await o.call(fb);
+    const c2 = o.errorCodeOf(next);
+    attempts.push({ provider: fb, attempt: attempts.length + 1, status: c2 ? 'FAILED' : 'SUCCESS', errorCode: c2, latencyMs: Date.now() - t1, ...rl(next, c2), fallbackUsed: true, fallbackReason: code!, retryCount: 0 });
+    o.log?.('provider_fallback', { ...(o.context || {}), capability: o.capability, primary: o.primary, fallback: fb, fallbackReason: code, ...(served !== o.primary ? { previousFallback: served, previousErrorCode: lastCode } : {}), primaryStatus: 'FAILED', fallbackStatus: c2 ? 'FAILED' : 'SUCCESS', fallbackErrorCode: c2, latencyMs: Date.now() - t0 });
+    result = next; served = fb; lastCode = c2;
+    if (!c2) break;
+  }
+  return { result, served, attempts, fallbackUsed: true, fallbackReason: code! };
 }

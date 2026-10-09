@@ -8,6 +8,10 @@
  *   RAILWAY_PROVIDER_TIMEOUT_MS (per attempt, default 4000) · RAILWAY_FAILOVER_BUDGET_MS (chain, default runtime timeout − 1000)
  *   RAILCORE_BASE_URL / RAILKIT_BASE_URL / RAILRADAR_BASE_URL (optional overrides; defaults = documented production hosts)
  *
+ *   RAILWAY_AVAILABILITY_PROVIDERS=railkit,railcore,railradar (optional, 2026-10-09) → ordered chain for CHECK_AVAILABILITY
+ *     and GET_FARE ONLY (search / route / timetable / PNR / tracking keep RAILWAY_PRIMARY_PROVIDER → RAILWAY_FALLBACK_PROVIDERS).
+ *     Unset / empty → every capability uses the general chain (pre-2026-10-09 behaviour, unchanged).
+ *
  * An unknown provider id is a configuration ERROR (thrown at startup) — never a silent switch to another provider or to MOCK.
  */
 import type { FetchLike } from './live-http';
@@ -16,7 +20,7 @@ import { RailCoreProvider } from './railcore-provider';
 import { RailKitProvider } from './railkit-provider';
 import { RailRadarProvider } from './railradar-provider';
 import { FailoverRailwayProvider } from './failover-provider';
-import { PROVIDER_CAPABILITY_MATRIX, type LiveProviderId, type RailwayCapability } from './provider-capabilities';
+import { METHOD_CAPABILITY, PROVIDER_CAPABILITY_MATRIX, type LiveProviderId, type RailwayCapability } from './provider-capabilities';
 
 type Env = Record<string, string | undefined>;
 const IDS: readonly LiveProviderId[] = ['railcore', 'railkit', 'railradar'];
@@ -49,6 +53,46 @@ export function parseProviderChain(env: Env = process.env): LiveProviderId[] {
   return out;
 }
 
+/** Capabilities routed by RAILWAY_AVAILABILITY_PROVIDERS (2026-10-09). */
+export const AVAILABILITY_ROUTED_CAPABILITIES: readonly string[] = Object.freeze(['CHECK_AVAILABILITY', 'GET_FARE']);
+
+/** RAILWAY_AVAILABILITY_PROVIDERS as an ordered id list; null when unset / empty. Unknown id → configuration error. */
+export function parseAvailabilityChain(env: Env = process.env): LiveProviderId[] | null {
+  const raw = String(env.RAILWAY_AVAILABILITY_PROVIDERS ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (!raw.length) return null;
+  const out: LiveProviderId[] = [];
+  for (const id of raw) {
+    if (!(IDS as readonly string[]).includes(id)) throw new Error(`Unknown railway provider "${id}" in RAILWAY_AVAILABILITY_PROVIDERS (allowed: ${IDS.join(', ')})`);
+    if (!out.includes(id as LiveProviderId)) out.push(id as LiveProviderId);
+  }
+  return out;
+}
+
+/**
+ * Ordered provider chain for ONE capability. CHECK_AVAILABILITY / GET_FARE use RAILWAY_AVAILABILITY_PROVIDERS when set
+ * (followed by any general-chain provider it does not list, so no configured fallback is lost); every other capability —
+ * and availability when the variable is unset — uses the general chain.
+ */
+export function providerChainFor(capability: string | null | undefined, env: Env = process.env): LiveProviderId[] {
+  const base = parseProviderChain(env);
+  if (!capability || !AVAILABILITY_ROUTED_CAPABILITIES.includes(String(capability))) return base;
+  const av = parseAvailabilityChain(env);
+  if (!av) return base;
+  return [...av, ...base.filter(id => !av.includes(id))];
+}
+
+/** Every provider id used by ANY capability chain (general chain order first). */
+export function allChainProviderIds(env: Env = process.env): LiveProviderId[] {
+  const base = parseProviderChain(env);
+  const av = parseAvailabilityChain(env) || [];
+  return [...base, ...av.filter(id => !base.includes(id))];
+}
+
+/** True when `id` serves `capability` under the current routing (in that capability's chain). */
+export function providerRoutedFor(id: string, capability: string, env: Env = process.env): boolean {
+  try { return (providerChainFor(capability, env) as string[]).includes(id); } catch { return false; }
+}
+
 export function createLiveProvider(id: LiveProviderId, env: Env = process.env, fetchImpl?: FetchLike): LiveRailwayProvider {
   const cfg = { apiKey: env[KEY_VAR[id]] || undefined, baseUrl: env[BASE_VAR[id]] || DEFAULT_BASE[id], timeoutMs: liveTimeouts(env).perAttemptMs, fetchImpl };
   switch (id) {
@@ -59,15 +103,22 @@ export function createLiveProvider(id: LiveProviderId, env: Env = process.env, f
 }
 
 export function createFailoverProvider(env: Env = process.env, fetchImpl?: FetchLike): FailoverRailwayProvider {
-  return new FailoverRailwayProvider(parseProviderChain(env).map(id => createLiveProvider(id, env, fetchImpl)), liveTimeouts(env));
+  const providers = allChainProviderIds(env).map(id => createLiveProvider(id, env, fetchImpl));
+  const av = parseAvailabilityChain(env);
+  // every capability gets its own order, so a provider added only for availability / fare is never asked for anything else
+  const capabilityOrder = av ? Object.fromEntries(Object.values(METHOD_CAPABILITY).map(c => [c, providerChainFor(c, env) as string[]])) : undefined;
+  return new FailoverRailwayProvider(providers, { ...liveTimeouts(env), ...(capabilityOrder ? { capabilityOrder } : {}) });
 }
 
 /** Safe status for /api/health and docs: configured yes/no + declared capabilities. NEVER the key or any part of it. */
-export function liveProviderStatus(env: Env = process.env): Array<{ provider: string; priority: number | null; configured: boolean; capabilities: RailwayCapability[] }> {
+export function liveProviderStatus(env: Env = process.env): Array<{ provider: string; priority: number | null; availabilityPriority?: number | null; configured: boolean; capabilities: RailwayCapability[] }> {
   let chain: LiveProviderId[] = [];
   try { chain = parseProviderChain(env); } catch { chain = []; }
+  let av: LiveProviderId[] | null = null;
+  try { av = parseAvailabilityChain(env) ? providerChainFor('CHECK_AVAILABILITY', env) : null; } catch { av = null; }
   return IDS.map(id => ({
     provider: id.toUpperCase(), priority: chain.includes(id) ? chain.indexOf(id) + 1 : null,
+    ...(av ? { availabilityPriority: av.includes(id) ? av.indexOf(id) + 1 : null } : {}),
     configured: !!(env[KEY_VAR[id]] && String(env[KEY_VAR[id]]).trim()),
     capabilities: Object.keys(PROVIDER_CAPABILITY_MATRIX[id]) as RailwayCapability[]
   }));

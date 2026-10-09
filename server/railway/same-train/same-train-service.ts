@@ -13,7 +13,7 @@ import { providerToolCatalog, inProviderScope } from '../../ai/tools/provider-to
 import { railwayRegistry } from '../registry/provider-registry';
 import { RailwayToolService } from '../tools/railway-tool-service';
 import { WEB_PROVIDER_IDS } from '../providers/web/web-providers';
-import { fallbackProviderFor, isFallbackEligible, primaryProviderId, providerFallbackEnabled } from '../providers/provider-fallback';
+import { fallbackChainFor, fallbackProviderFor, isFallbackEligible, primaryProviderId, providerFallbackEnabled } from '../providers/provider-fallback';
 import { withRateWait } from '../providers/live/provider-rate-limiter';
 import { sameTrainSchedulerFor } from './same-train-scheduler';
 import { randomUUID } from 'node:crypto';
@@ -76,7 +76,8 @@ export function resolveSameTrainProviders(providersCsv?: string | null, routePro
   } else if (catalog && providerFallbackEnabled()) {
     // P42.9: no explicit provider choice → the configured PRIMARY only; the fallback provider is used per request on an
     // eligible fault (never queried when the primary succeeded). An explicit multi-provider choice still cross-checks.
-    const prim = avail.find(p => p.id === primaryProviderId());
+    // 2026-10-09: the AVAILABILITY primary (RAILWAY_AVAILABILITY_PROVIDERS when set, else RAILWAY_PRIMARY_PROVIDER)
+    const prim = avail.find(p => p.id === primaryProviderId(process.env, 'CHECK_AVAILABILITY'));
     if (prim) { chosen = [prim]; selection = 'DEFAULT_PRIMARY'; }
   }
   const routeCapable = (id: string) => !catalog || (providerToolCatalog.get(id)?.capabilities || []).includes('GET_TIMETABLE');
@@ -95,9 +96,13 @@ export function resolveSameTrainProviders(providersCsv?: string | null, routePro
   if (!routeProvider) return { ok: false, code: E.NOT_READY, message: 'Koi route-capable (timetable) provider configured nahi hai.' };
   const webProviders = catalog ? providerToolCatalog.list().filter(c => isWebId(c.id) && c.capabilities.includes('SEARCH_TRAINS')).map(c => refOf(c.id)) : [];
   const fallbacks: Record<string, ProviderRef> = {};
+  // 2026-10-09: a CHAIN of per-request fallbacks (primary → fb1 → fb2, e.g. RailKit → RailCore → RailRadar) as linked entries
   if (catalog) for (const p of chosen) {
-    const fid = fallbackProviderFor(p.id, 'CHECK_AVAILABILITY');
-    if (fid && !chosen.some(c => c.id === fid)) fallbacks[p.id] = refOf(fid);
+    let prev = p.id;
+    for (const fid of fallbackChainFor(p.id, 'CHECK_AVAILABILITY')) {
+      if (chosen.some(c => c.id === fid) || fallbacks[prev]) break;
+      fallbacks[prev] = refOf(fid); prev = fid;
+    }
   }
   const rf = catalog ? fallbackProviderFor(routeProvider.id, 'GET_TIMETABLE') : null;
   const routeFallback = rf && rf !== routeProvider.id ? refOf(rf) : null;
@@ -267,8 +272,16 @@ export async function revalidateSameTrainAlternative(stored: SameTrainAlternativ
     let ev = evaluateAvailabilityAnswer(r, q, freshness);
     // P42.9: fresh re-check — primary eligible fault (rate limit / unavailable / timeout) → backend fallback provider once
     if (ev.outcome !== 'SUCCESS' && isFallbackEligible(ev.errorCode) && p.id !== ACTIVE) {
-      const fid = fallbackProviderFor(p.id, 'CHECK_AVAILABILITY');
-      if (fid && !refs.some(x => x.id === fid)) { const fp = refOf(fid); const ev2 = evaluateAvailabilityAnswer(await once(fp), q, freshness); return { p: fp, ev: ev2, fallbackFrom: p.id, fallbackReason: String(ev.errorCode) }; }
+      // 2026-10-09: down the availability chain, each step only after an ELIGIBLE fault of the previous one
+      const reason = String(ev.errorCode);
+      let last: { p: ProviderRef; ev: typeof ev } | null = null;
+      for (const fid of fallbackChainFor(p.id, 'CHECK_AVAILABILITY')) {
+        if (refs.some(x => x.id === fid)) break;
+        if (last && (last.ev.outcome === 'SUCCESS' || !isFallbackEligible(last.ev.errorCode))) break;
+        const fp = refOf(fid);
+        last = { p: fp, ev: evaluateAvailabilityAnswer(await once(fp), q, freshness) };
+      }
+      if (last) return { p: last.p, ev: last.ev, fallbackFrom: p.id, fallbackReason: reason };
     }
     return { p, ev };
   }));

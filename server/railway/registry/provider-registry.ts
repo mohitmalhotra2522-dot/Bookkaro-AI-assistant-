@@ -1,6 +1,6 @@
 import type { RailwayProvider } from '../providers/railway-provider';
 import { MockRailwayProvider } from '../providers/mock/mock-provider';
-import { createFailoverProvider, createLiveProvider, parseProviderChain } from '../providers/live/live-config';
+import { allChainProviderIds, createFailoverProvider, createLiveProvider, providerRoutedFor } from '../providers/live/live-config';
 import { scopedProviderId } from '../providers/provider-scope';
 import { providerToolCatalog, setWebBlockedLookup } from '../../ai/tools/provider-tools';
 import { PROVIDER_CAPABILITY_MATRIX, type LiveProviderId } from '../providers/live/provider-capabilities';
@@ -23,12 +23,14 @@ const CAP_TO_TOOL: Record<string, RegisteredToolName> = {
  * exposed. The LLM picks among them — the registry never does.
  */
 export function registerLiveProviderTools(env: NodeJS.ProcessEnv = process.env): string[] {
-  const ids = parseProviderChain(env);
+  // 2026-10-09: providers of every capability chain; a provider exposes a capability only when it is routed for it
+  // (RAILWAY_AVAILABILITY_PROVIDERS may add an availability/fare-only provider). Unset → identical to the general chain.
+  const ids = allChainProviderIds(env);
   const exposed: string[] = [];
   for (const id of ids) {
     const p = createLiveProvider(id, env);
     if (!p.configured) continue;
-    const caps = Object.keys(PROVIDER_CAPABILITY_MATRIX[id] || {}).map(c => CAP_TO_TOOL[c]).filter(Boolean);
+    const caps = Object.keys(PROVIDER_CAPABILITY_MATRIX[id] || {}).filter(c => providerRoutedFor(id, c, env)).map(c => CAP_TO_TOOL[c]).filter(Boolean);
     if (!caps.length) continue;
     providerToolCatalog.register({ id, label: LIVE_LABEL[id], registryId: id, capabilities: caps });
     exposed.push(id);

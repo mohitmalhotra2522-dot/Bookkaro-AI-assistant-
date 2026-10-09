@@ -729,12 +729,15 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
         let served = provider;
         let a = await attempt(provider);
         let fb: { reason: string; primary: string; primaryLatencyMs: number } | undefined;
-        const fbProv = req.fallbackProviders?.[provider.id];
-        // P42.9: per-request fallback ONLY for an eligible fault; never for a REJECTED / identity-mismatch / not-found answer
-        if (fbProv && fbProv.id !== provider.id && !req.providers.some(p => p.id === fbProv.id) && a.evald.outcome !== 'SUCCESS'
-          && eligible(a.evald.errorCode) && !(a as any).cancelled && current() && now() < deadline) {
-          fb = { reason: String(a.evald.errorCode), primary: provider.id, primaryLatencyMs: a.latencyMs };
-          stats.fallback++;
+        // P42.9: per-request fallback ONLY for an eligible fault; never for a REJECTED / identity-mismatch / not-found answer.
+        // 2026-10-09: fallbackProviders may be linked (RailKit → RailCore → RailRadar): each next hop only after the previous
+        // provider also failed with an eligible fault; a provider is never visited twice.
+        const visited = new Set<string>([provider.id]);
+        for (let fbProv = req.fallbackProviders?.[provider.id]; fbProv; fbProv = req.fallbackProviders?.[served.id]) {
+          if (visited.has(fbProv.id) || req.providers.some(p => p.id === fbProv!.id) || a.evald.outcome === 'SUCCESS'
+            || !eligible(a.evald.errorCode) || (a as any).cancelled || !current() || now() >= deadline) break;
+          if (!fb) { fb = { reason: String(a.evald.errorCode), primary: provider.id, primaryLatencyMs: a.latencyMs }; stats.fallback++; }
+          visited.add(fbProv.id);
           a = await attempt(fbProv);
           served = fbProv;
           if (a.evald.outcome === 'SUCCESS') stats.fallbackSucceeded++;

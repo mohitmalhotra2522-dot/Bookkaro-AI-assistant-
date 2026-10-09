@@ -23,6 +23,9 @@ export interface FailoverOptions {
   budgetMs: number;
   /** Upper bound for one provider attempt. */
   perAttemptMs: number;
+  /** 2026-10-09: optional per-capability order of provider ids (RAILWAY_AVAILABILITY_PROVIDERS → CHECK_AVAILABILITY /
+   *  GET_FARE). A capability without an entry uses the constructor chain order. */
+  capabilityOrder?: Readonly<Record<string, readonly string[]>>;
 }
 
 const NO_RESULT_CODES = new Set(['NO_TRAINS_FOUND', 'NOT_FOUND', 'CLASS_NOT_AVAILABLE', 'FARE_UNAVAILABLE', 'AVAILABILITY_UNAVAILABLE']);
@@ -51,7 +54,17 @@ export class FailoverRailwayProvider implements RailwayProvider {
 
   constructor(readonly chain: readonly LiveRailwayProvider[], private readonly opts: FailoverOptions) {
     if (!chain.length) throw new Error('FailoverRailwayProvider needs at least one live provider');
-    this.label = `Live railway data (${chain.map(p => p.providerId.toUpperCase()).join(' → ')})`;
+    const co = opts.capabilityOrder?.CHECK_AVAILABILITY;
+    this.label = `Live railway data (${chain.map(p => p.providerId.toUpperCase()).join(' → ')})`
+      + (co && co.length ? `; availability/fare: ${co.map(s => s.toUpperCase()).join(' → ')}` : '');
+  }
+
+  /** Providers in the order used for `cap` (capability order when configured, else the chain order). */
+  chainFor(cap: string): readonly LiveRailwayProvider[] {
+    const order = this.opts.capabilityOrder?.[cap];
+    if (!order || !order.length) return this.chain;
+    const ordered = order.map(id => this.chain.find(p => p.providerId === id)).filter((p): p is LiveRailwayProvider => !!p);
+    return ordered.length ? ordered : this.chain;
   }
 
   searchTrains(r: any) { return this.run('searchTrains', p => p.searchTrains(r)); }
@@ -67,8 +80,9 @@ export class FailoverRailwayProvider implements RailwayProvider {
     const t0 = Date.now();
     const attempts: ProviderAttempt[] = [];
     const responses: Array<{ p: LiveRailwayProvider; r: RailwayResponse<T> }> = [];
-    const primary = this.chain[0].providerId;
-    for (const p of this.chain) {
+    const chain = this.chainFor(cap);
+    const primary = chain[0].providerId;
+    for (const p of chain) {
       const n = attempts.length + 1;
       const rec = (outcome: ProviderAttempt['outcome'], r: RailwayResponse<T> | null, latencyMs: number): ProviderAttempt => {
         const a: ProviderAttempt = { provider: p.providerId, attempt: n, outcome, errorCode: r && !r.ok ? String(r.error?.code || '') : null,
@@ -94,7 +108,7 @@ export class FailoverRailwayProvider implements RailwayProvider {
       const served = responses.find(x => x.p.providerId === attempts[realIdx].provider)!;
       return this.finish(served.r, served.p.providerId, attempts, primary);
     }
-    const anyCapable = this.chain.some(p => p.supports(cap));
+    const anyCapable = chain.some(p => p.supports(cap));
     const code: RailwayErrorCode = anyCapable ? 'PROVIDER_UNAVAILABLE' : 'TOOL_NOT_IMPLEMENTED';
     const message = anyCapable ? 'Is jaankari ke liye koi live railway provider configured nahi hai.' : 'Configured railway providers is jaankari ko support nahi karte.';
     const now = new Date().toISOString();
