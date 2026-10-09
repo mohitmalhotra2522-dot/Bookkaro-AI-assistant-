@@ -237,7 +237,8 @@ export interface AvailabilityQuery { trainNumber: string; travelClass: string; d
 export interface SameTrainDeps {
   limits: SameTrainLimits;
   getRoute: (provider: ProviderRef, trainNumber: string) => Promise<any>;
-  checkAvailability: (provider: ProviderRef, q: AvailabilityQuery) => Promise<any>;
+  /** `ctx.deadline` (epoch ms): F3 scheduled deps drop a still-queued call once the search deadline has passed */
+  checkAvailability: (provider: ProviderRef, q: AvailabilityQuery, ctx?: { deadline: number }) => Promise<any>;
   getFare?: (provider: ProviderRef, q: AvailabilityQuery) => Promise<any>;
   /** public-web listing check (UNVERIFIED_WEB) — does the same train run between this pair? */
   webListsTrain?: (provider: ProviderRef, q: { trainNumber: string; origin: string; destination: string; date: string }) => Promise<{ ok: true; listed: boolean } | { ok: false; code: string }>;
@@ -247,6 +248,32 @@ export interface SameTrainDeps {
   isCurrent?: () => boolean;
   now?: () => number;
   log?: (event: string, fields: Record<string, unknown>) => void;
+  /**
+   * F3: route / availability calls go through the paced fair queue (same-train-scheduler). The queue owns pacing,
+   * the per-call timeout (provider call only), bounded retries and cancellation → the engine must NOT time out the
+   * queue wait, and runs every unit of a phase concurrently so the queue (not mapLimit) decides the order.
+   */
+  scheduled?: boolean;
+  /** F3: genuine progress as results arrive (counts + interim seats; never a final verdict) */
+  onProgress?: (p: SameTrainProgress) => void;
+}
+
+/** F3 progress snapshot (counts of REAL provider outcomes so far; `found` = interim seats, verification still running). */
+export interface SameTrainProgress {
+  stage: 'ROUTE' | 'CHECKING' | 'FINALIZING';
+  total: number;
+  done: number;
+  succeeded: number;
+  failed: number;
+  retried: number;
+  found: { ticketOrigin: string; ticketDestination: string; travelClass: string; status: string }[];
+}
+
+const SCHED_CANCELLED = 'SCHEDULER_CANCELLED';
+/** F3: scheduled call → same shape as withTimeout (the queue's own per-call timeout surfaces as `timedOut`). */
+function viaQueue<T>(p: Promise<T>): Promise<{ timedOut: true } | { timedOut: false; value: T }> {
+  return p.then(v => ((v as any)?.meta?.scheduler?.timedOut ? { timedOut: true as const } : { timedOut: false as const, value: v }),
+    e => ({ timedOut: false as const, value: { ok: false, error: { code: String(e?.code || 'PROVIDER_ERROR'), message: 'provider call failed' } } as any }));
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<{ timedOut: true } | { timedOut: false; value: T }> {
@@ -438,17 +465,28 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   // fallback route provider (visible in result.route.provider / routeFallbackReason)
   let routeProvider = req.routeProvider;
   let routeFallbackReason: string | undefined;
-  let routeResp = await withTimeout(Promise.resolve().then(() => deps.getRoute(req.routeProvider, req.trainNumber)), L.perCallTimeoutMs);
+  const scheduled = !!deps.scheduled;
+  const call = <T>(fn: () => Promise<T>, ms: number) => (scheduled ? viaQueue(Promise.resolve().then(fn)) : withTimeout(Promise.resolve().then(fn), ms));
+  // F3 progress (counts only — the final verdict is the result below)
+  const prog: SameTrainProgress = { stage: 'ROUTE', total: 0, done: 0, succeeded: 0, failed: 0, retried: 0, found: [] };
+  const emit = () => { try { deps.onProgress?.({ ...prog, found: [...prog.found] }); } catch { /* progress must never break the search */ } };
+  emit();
+  let routeResp = await call(() => deps.getRoute(req.routeProvider, req.trainNumber), L.perCallTimeoutMs);
   stats.executed++;
   {
     const c0 = routeResp.timedOut ? 'PROVIDER_TIMEOUT' : ((routeResp.value as any)?.ok === true ? null : String((routeResp.value as any)?.error?.code || ''));
     if (c0 && eligible(c0) && req.routeFallback && req.routeFallback.id !== req.routeProvider.id && current()) {
       routeFallbackReason = c0; routeProvider = req.routeFallback; stats.fallback++; stats.executed++;
-      routeResp = await withTimeout(Promise.resolve().then(() => deps.getRoute(req.routeFallback!, req.trainNumber)), L.perCallTimeoutMs);
+      routeResp = await call(() => deps.getRoute(req.routeFallback!, req.trainNumber), L.perCallTimeoutMs);
       if (!routeResp.timedOut && (routeResp.value as any)?.ok === true) stats.fallbackSucceeded++;
     }
   }
   if (routeResp.timedOut) return { ok: false, code: E.SEARCH_TIMEOUT, errorClass: SameTrainErrorClass.TOOL_TIMEOUT, message: `${routeProvider.label || routeProvider.id} se route time par nahi aaya.` };
+  // F3: the queued route call was dropped before dispatch (journey superseded / search deadline) — never a route verdict
+  if ((routeResp.value as any)?.error?.code === SCHED_CANCELLED) {
+    return current() ? { ok: false, code: E.SEARCH_TIMEOUT, errorClass: SameTrainErrorClass.TOOL_TIMEOUT, message: `Train ${req.trainNumber} ka route time par check nahi ho paaya.` }
+      : { ok: false, code: E.STALE_RESULT, errorClass: SameTrainErrorClass.STALE, message: 'Journey badal gayi — yeh alternative result ab purana hai.' };
+  }
   const rv: any = routeResp.value;
   if (!rv || rv.ok !== true) {
     const code = String(rv?.error?.code || '');
@@ -488,7 +526,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     check.crossCheckProvider = cross.id;
     const crossLabel = cross.label || cross.id;
     stats.executed++;
-    const cr = await withTimeout(Promise.resolve().then(() => deps.getRoute(cross, req.trainNumber)), L.perCallTimeoutMs);
+    const cr = await call(() => deps.getRoute(cross, req.trainNumber), L.perCallTimeoutMs);
     if (cr.timedOut) { stats.timeout++; return unverified('TIMEOUT', ` ${crossLabel} se route cross-check time par nahi aaya.`); }
     const cv: any = cr.value;
     if (!cv || cv.ok !== true) return unverified(String(cv?.error?.code || 'ERROR'), ` ${crossLabel} se route cross-check nahi ho paaya.`);
@@ -537,7 +575,10 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     checksUsed += run.length;
     checkedUnits.push(...run);
     stats.requested += run.length * req.providers.length;
-    await Promise.all(req.providers.map(provider => mapLimit(run.map((u, i) => ({ ...u, i })), L.maxParallel, async ({ pair, cls, i }) => {
+    prog.stage = 'CHECKING'; prog.total += run.length * req.providers.length; emit();
+    // F3: scheduled → every unit is handed to the fair queue at once, in station order (the queue paces / orders them)
+    const pool = scheduled ? Math.max(1, run.length) : L.maxParallel;
+    await Promise.all(req.providers.map(provider => mapLimit(run.map((u, i) => ({ ...u, i })), pool, async ({ pair, cls, i }) => {
       const q: AvailabilityQuery = { trainNumber: req.trainNumber, travelClass: cls, date: req.date, origin: pair.ticketOrigin, destination: pair.ticketDestination, passengersCount: req.passengersCount };
       const baseFor = (prov: ProviderRef) => ({ provider: prov.id, ...(prov.label ? { providerLabel: prov.label } : {}), level: prov.level,
         requestId: req.requestId || alternativeSearchId, toolExecutionId: `${alternativeSearchId}:${prov.id}:${pair.pairId}`,
@@ -549,12 +590,26 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
         const dk = [prov.id, q.trainNumber, q.travelClass, q.origin, q.destination, q.date].join('|');
         let pr = inflight.get(dk);
         if (pr) stats.deduped++;
-        else { pr = withTimeout(Promise.resolve().then(() => deps.checkAvailability(prov, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - s1))); inflight.set(dk, pr); stats.executed++; }
+        else {
+          pr = scheduled ? viaQueue(Promise.resolve().then(() => deps.checkAvailability(prov, q, { deadline })))
+            : withTimeout(Promise.resolve().then(() => deps.checkAvailability(prov, q)), Math.min(L.perCallTimeoutMs, Math.max(1, deadline - s1)));
+          inflight.set(dk, pr); stats.executed++;
+        }
         const r = await pr;
         const at = now();
+        const sched: any = r.timedOut ? undefined : (r.value as any)?.meta?.scheduler;
+        // F3: a queued call dropped before dispatch spent no provider request → SKIPPED (stale / search deadline), never a verdict
+        if (sched?.cancelled) {
+          const stale = !current();
+          if (stale) skippedStale = true;
+          return { evald: { outcome: 'SKIPPED' as const, errorCode: stale ? E.RESULT_STALE : E.SEARCH_TIMEOUT }, at, latencyMs: at - s1, rateLimitLocal: undefined, retries: 0, cancelled: true };
+        }
         const evald = r.timedOut ? { outcome: 'TIMEOUT' as const, errorCode: 'PROVIDER_TIMEOUT' } : evaluateAvailabilityAnswer(r.value, q);
         if (evald.errorCode === 'RATE_LIMITED') stats.rateLimitedAttempts++;
-        return { evald, at, latencyMs: at - s1, rateLimitLocal: r.timedOut ? undefined : (r.value as any)?.meta?.rateLimit?.local };
+        const retries = Number(sched?.retries) || 0;
+        if (retries) { prog.retried += retries; }
+        return { evald, at, latencyMs: at - s1, rateLimitLocal: r.timedOut ? undefined : (r.value as any)?.meta?.rateLimit?.local, retries,
+          ...(sched?.refused ? { refused: String(sched.refused) } : {}) };
       };
       const s = now();
       let ev: ProviderEvidence;
@@ -567,7 +622,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
         const fbProv = req.fallbackProviders?.[provider.id];
         // P42.9: per-request fallback ONLY for an eligible fault; never for a REJECTED / identity-mismatch / not-found answer
         if (fbProv && fbProv.id !== provider.id && !req.providers.some(p => p.id === fbProv.id) && a.evald.outcome !== 'SUCCESS'
-          && eligible(a.evald.errorCode) && current() && now() < deadline) {
+          && eligible(a.evald.errorCode) && !(a as any).cancelled && current() && now() < deadline) {
           fb = { reason: String(a.evald.errorCode), primary: provider.id, primaryLatencyMs: a.latencyMs };
           stats.fallback++;
           a = await attempt(fbProv);
@@ -576,7 +631,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
         }
         ev = { ...baseFor(served), fetchedAt: new Date(a.at).toISOString(), latencyMs: now() - s, ...a.evald,
           ...(a.evald.errorCode === 'RATE_LIMITED' ? { rateLimited: true, ...(a.rateLimitLocal !== undefined ? { rateLimitLocal: !!a.rateLimitLocal } : {}) } : {}),
-          retryCount: 0,
+          retryCount: (a as any).retries || 0,
+          ...((a as any).refused ? { rateLimitReason: (a as any).refused } : {}),
           ...(fb ? { fallbackUsed: true, fallbackReason: fb.reason, primaryProvider: fb.primary, primaryErrorCode: fb.reason } : {}) };
         if (req.includeFare && deps.getFare && ev.outcome === 'SUCCESS' && current() && now() < deadline) {
           stats.executed++;
@@ -593,6 +649,17 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
       const list = evidenceByPair.get(ek(pair.pairId, cls)) || [];
       list.push(ev);
       evidenceByPair.set(ek(pair.pairId, cls), list);
+      // F3 progress: one finished unit; an interim seat (whole party AVAILABLE / RAC, not the requested pair) is listed
+      // as FOUND-SO-FAR only — the final verdict (merge + rules) comes with the result
+      prog.done++;
+      if (ev.outcome === 'SUCCESS') {
+        prog.succeeded++;
+        const av = ev.availability;
+        if (av && pair.priority !== 'P0' && (av.category === 'RAC' || (av.category === 'AVAILABLE' && evaluateSeatShortage({ status: av.status, requestedPassengerCount: req.passengersCount }).sufficiency !== 'INSUFFICIENT'))) {
+          prog.found.push({ ticketOrigin: q.origin, ticketDestination: q.destination, travelClass: q.travelClass, status: String(av.status) });
+        }
+      } else prog.failed++;
+      emit();
     })));
   };
   await runPhase(plan.phase1);
@@ -611,6 +678,7 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const runTerminal = plan.phase3.length > 0 && !goodAnyClass(windowPairs) && current() && now() < deadline;
   if (runTerminal) await runPhase(plan.phase3);
   const pairs = [...windowPairs, ...(runTerminal ? plan.phase3 : [])];
+  prog.stage = 'FINALIZING'; emit();
 
   // 3) optional public-web route evidence (UNVERIFIED_WEB — never availability, never authoritative)
   const errors: SameTrainErrorCode[] = [];
@@ -731,6 +799,10 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     outcome: foundAlternative ? SameTrainOutcome.FOUND : SameTrainOutcome.NONE,
     verifiedAlternativeCount,
     searchComplete: !plan.truncated && !anyFailure && !checksTruncated,
+    // F3: honest check summary for the screen (counts of real outcomes; skipped = never sent, e.g. search deadline)
+    checkSummary: { total: apiEv.length, succeeded: apiEv.filter(e => e.outcome === 'SUCCESS').length,
+      failed: apiEv.filter(e => e.outcome !== 'SUCCESS' && e.outcome !== 'SKIPPED').length, skipped: apiEv.filter(e => e.outcome === 'SKIPPED').length,
+      retried: apiEv.reduce((n, e) => n + (Number((e as any).retryCount) || 0), 0), paced: scheduled },
     classesChecked: classes, earlierStationsChecked, downstreamStationsChecked, availabilityChecks: checksUsed, checksTruncated,
     ...(req.explicitUserRequest ? { explicitUserRequest: true } : {}),
     toolExecutionId: req.toolExecutionId ?? null,

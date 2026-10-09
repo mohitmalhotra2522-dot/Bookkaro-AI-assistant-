@@ -36,7 +36,10 @@ import { MOCK_IRCTC_REAL_SCENARIOS } from './irctc/mock/mock-irctc-real';
 import { EXECUTION_LOCKED_STATES } from '@shared/states';
 import { sameTrainAlternativesEnabledFromEnv } from './ai/tools/tool-registry';
 import { revalidateSameTrainAlternative, sameTrainSelectionKey } from './railway/same-train/same-train-service';
-import { discoverSameTrainForDisplay, applySameTrainSelection, findAnySameTrainResult } from './railway/same-train/same-train-session';
+import { discoverSameTrainForDisplay, discoverSameTrainForDisplayAsync, sameTrainAutoJobsRunning, applySameTrainSelection, findAnySameTrainResult } from './railway/same-train/same-train-session';
+import { sameTrainSchedulerStats } from './railway/same-train/same-train-scheduler';
+import { rateLimiterStats } from './railway/providers/live/provider-rate-limiter';
+import { sameTrainPacedQueueEnabled } from './railway/same-train/same-train-service';
 import { sameTrainCardData } from './railway/same-train/same-train-view';
 import { buildTrainAlternatives } from './railway/alternatives/train-alternatives';
 
@@ -258,8 +261,12 @@ server.post('/api/session/:id/same-train-alternative/select', async (request, re
 server.post('/api/session/:id/same-train-alternative/discover', async (request, reply) => {
   const { id } = request.params as any;
   if (!stateManager.hasSession(id)) return reply.status(404).send({ error: 'unknown session' });
-  const out = await discoverSameTrainForDisplay(stateManager, id, (request.body || {}) as any,
-    { log: f => console.log(JSON.stringify(f)) });
+  const body: any = request.body || {};
+  // F3: async:true (polling UI) → RUNNING + genuine progress while the paced queue works; the final poll returns the card
+  const out = (body.async === true || String((request.headers as any)['x-same-train-async'] || '') === '1')
+    ? await discoverSameTrainForDisplayAsync(stateManager, id, body, { log: f => console.log(JSON.stringify(f)) })
+    : await discoverSameTrainForDisplay(stateManager, id, body, { log: f => console.log(JSON.stringify(f)) });
+  if (out.ok && out.code === 'RUNNING') return reply.send({ ok: true, code: 'RUNNING', progress: out.progress ?? null });
   if (!out.ok || !out.result) return reply.send({ ok: false, code: out.code, ...(out.budget ? { budget: out.budget } : {}) });
   return reply.send({ ok: true, code: 'OK', card: sameTrainCardData(out.result, { stale: false }) });
 });
@@ -508,7 +515,11 @@ server.get('/api/health', async (_, reply) => {
     webResearch: webResearchStatus(),
     voice: voiceProviderStatus(process.env, batchStt),
     // P42: Same Train Alternative tool exposed to the LLM (feature flag only)
-    sameTrainAlternatives: { enabled: sameTrainAlternativesEnabledFromEnv() }
+    sameTrainAlternatives: { enabled: sameTrainAlternativesEnabledFromEnv(),
+      // F3: paced fair queue — counters only (no key, header value or token); longRemaining/longLimit = provider-reported quota
+      pacedQueue: { enabled: sameTrainPacedQueueEnabled(), runningSearches: sameTrainAutoJobsRunning(), schedulers: sameTrainSchedulerStats(),
+        limiters: rateLimiterStats().map(l => ({ provider: l.provider, started: l.started, backgroundStarted: l.backgroundStarted ?? 0, localRejected: l.localRejected,
+          providerRateLimited: l.providerRateLimited, blocked: l.blockedUntil !== null, longRemaining: l.longRemaining ?? null, longLimit: l.longLimit ?? null })) } }
   });
 });
 

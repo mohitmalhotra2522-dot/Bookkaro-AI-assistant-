@@ -13,7 +13,7 @@ import type {
   TimetableRequest, AvailabilityRequest, AvailabilityData, FareRequest, FareData, TrackRequest, TrackData, PNRRequest, PNRData
 } from '../../types/railway-types';
 import { liveGet, liveError, type FetchLike, type LiveHttpResult } from './live-http';
-import { rateLimiterFor, currentRateWait, pacingApplies } from './provider-rate-limiter';
+import { rateLimiterFor, currentRateWait, pacingApplies, consumeHeldSlot } from './provider-rate-limiter';
 import { providerSupports, type LiveProviderId, type RailwayCapability } from './provider-capabilities';
 
 export interface LiveProviderConfig {
@@ -74,7 +74,8 @@ export abstract class LiveRailwayProvider implements RailwayProvider {
   private async paced(call: () => Promise<LiveHttpResult>): Promise<LiveHttpResult> {
     if (!pacingApplies(!!this.cfg.fetchImpl)) return call();
     const limiter = rateLimiterFor(this.providerId);
-    const slot = await limiter.acquire(currentRateWait());
+    // F3: the automatic same-train queue already took (and counted) this request's slot → no second slot; still observed
+    const slot = consumeHeldSlot(this.providerId) ? { ok: true as const, queuedMs: 0 } : await limiter.acquire(currentRateWait());
     if (!slot.ok) return { ok: false, error: { ...liveError('RATE_LIMITED', null, true) }, latencyMs: 0, localThrottle: true };
     const r = await call();
     limiter.observe(r.ok ? r.httpStatus : r.error.httpStatus, r.rate);

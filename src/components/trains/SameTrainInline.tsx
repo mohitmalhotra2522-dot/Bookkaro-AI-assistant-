@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { IconRoute } from '../icons/Icons';
 import { inr } from '../../lib/format';
-import { discoverSameTrainAlternative, selectSameTrainAlternative, type SameTrainDiscoverResult } from '../../lib/api';
+import { discoverSameTrainAlternative, selectSameTrainAlternative, type SameTrainDiscoverResult, type SameTrainDiscoverProgress } from '../../lib/api';
 import { evaluateSeatShortage, isVerifiedSameTrainAlternative } from '@shared/same-train-shortage';
 
 /**
@@ -25,12 +25,36 @@ async function limited<T>(fn: () => Promise<T>): Promise<T> {
   active++;
   try { return await fn(); } finally { active--; waiters.shift()?.(); }
 }
-const discovered = new Map<string, Promise<SameTrainDiscoverResult>>();
-function discoverOnce(sessionId: string, trainNumber: string, travelClass: string, searchResultsVersion: number): Promise<SameTrainDiscoverResult> {
+/**
+ * F3 — one polling job per (session, list, train, class): the backend's paced fair queue answers RUNNING + genuine
+ * progress until the search is finished; every subscriber (card re-mounts) shares the same job and its last progress.
+ */
+export const SAME_TRAIN_POLL_MS = 2500;
+let pollMs = SAME_TRAIN_POLL_MS;
+/** tests only: shorter poll interval (real timers) */
+export function setSameTrainPollMsForTests(ms: number | null): void { pollMs = ms ?? SAME_TRAIN_POLL_MS; }
+const MAX_POLLS = 1000;                    // > the backend's queue deadline (30 min) at 2.5 s — then honest POLL_TIMEOUT
+type Job = { promise: Promise<SameTrainDiscoverResult>; progress: SameTrainDiscoverProgress | null; listeners: Set<(p: SameTrainDiscoverProgress | null) => void> };
+const discovered = new Map<string, Job>();
+function discoverOnce(sessionId: string, trainNumber: string, travelClass: string, searchResultsVersion: number): Job {
   const key = `${sessionId}|${searchResultsVersion}|${trainNumber}|${travelClass}`;
-  let p = discovered.get(key);
-  if (!p) { p = limited(() => discoverSameTrainAlternative(sessionId, { trainNumber, travelClass, searchResultsVersion })); discovered.set(key, p); }
-  return p;
+  let job = discovered.get(key);
+  if (!job) {
+    const j: Job = { progress: null, listeners: new Set(), promise: Promise.resolve(null as any) };
+    j.promise = (async () => {
+      for (let i = 0; ; i++) {
+        const r = await limited(() => discoverSameTrainAlternative(sessionId, { trainNumber, travelClass, searchResultsVersion }, { async: true }));
+        if (r.code !== 'RUNNING') return r;
+        j.progress = r.progress ?? null;
+        j.listeners.forEach(l => l(j.progress));
+        if (i >= MAX_POLLS) return { ok: false, code: 'POLL_TIMEOUT' };
+        await new Promise(res => setTimeout(res, pollMs));
+      }
+    })();
+    discovered.set(key, j);
+    job = j;
+  }
+  return job;
 }
 
 /** A class chip that should get auto discovery (mirrors the backend gate; the backend decides). */
@@ -39,7 +63,7 @@ export function needsSameTrainDiscovery(status: unknown, passengers: number): bo
   return r.shortage && !!r.triggerReason && r.triggerReason !== 'TRAIN_CANCELLED';
 }
 
-const FALLBACK_CODES = new Set(['BUDGET_EXCEEDED', 'SEARCH_FAILED', 'NETWORK']);
+const FALLBACK_CODES = new Set(['BUDGET_EXCEEDED', 'SEARCH_FAILED', 'NETWORK', 'POLL_TIMEOUT']);
 const stn = (code: string, name?: string) => (name ? String(name).replace(/\s+(Jn|Junction)\.?$/i, ' Jn') : code);
 const nameOf = (d: any, code: string) => ((d?.route?.stations || []) as any[]).find(s => s.code === code)?.name;
 const ruleOk = (r: string) => r === 'NOT_REQUIRED' || r === 'VERIFIED';
@@ -57,41 +81,110 @@ export const SameTrainInline: React.FC<{
   sessionId: string | null; trainNumber: string; travelClass?: string; searchResultsVersion?: number; visible: boolean;
   disabled?: boolean; onHandoff: (text: string) => void; onFallback?: () => void;
 }> = ({ sessionId, trainNumber, travelClass, searchResultsVersion, visible, disabled, onHandoff, onFallback }) => {
-  const [state, setState] = useState<{ phase: 'idle' | 'loading' | 'done'; res?: SameTrainDiscoverResult }>({ phase: 'idle' });
+  const [state, setState] = useState<{ phase: 'idle' | 'loading' | 'done'; res?: SameTrainDiscoverResult; progress?: SameTrainDiscoverProgress | null }>({ phase: 'idle' });
   useEffect(() => {
     if (!visible || !sessionId || typeof searchResultsVersion !== 'number' || state.phase !== 'idle') return;
     let live = true;
-    setState({ phase: 'loading' });
-    discoverOnce(sessionId, trainNumber, travelClass || '', searchResultsVersion).then(res => { if (live) setState({ phase: 'done', res }); });
-    return () => { live = false; };
+    const job = discoverOnce(sessionId, trainNumber, travelClass || '', searchResultsVersion);
+    setState({ phase: 'loading', progress: job.progress });
+    const onProgress = (progress: SameTrainDiscoverProgress | null) => { if (live) setState(s => (s.phase === 'loading' ? { phase: 'loading', progress } : s)); };
+    job.listeners.add(onProgress);
+    job.promise.then(res => { if (live) setState({ phase: 'done', res }); });
+    return () => { live = false; job.listeners.delete(onProgress); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, sessionId, trainNumber, travelClass, searchResultsVersion]);
 
-  if (state.phase === 'loading') return <div className="bk-sti bk-sti--loading" role="status">Same train: pehle ke stations aur classes check ho rahe hain…</div>;
+  const fallbackBtn = onFallback
+    ? <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm bk-sti__fallback" onClick={onFallback} disabled={disabled}
+        aria-label={`Same train alternative for ${trainNumber}${travelClass ? ` ${travelClass}` : ''}`}>↗ Same Train Alternative</button>
+    : null;
+  if (state.phase === 'loading') return <SameTrainProgressView p={state.progress ?? null} />;
   if (state.phase !== 'done' || !state.res) return null;
   const res = state.res;
   if (!res.ok || !res.card) {
-    return FALLBACK_CODES.has(res.code) && onFallback
-      ? <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm bk-sti__fallback" onClick={onFallback} disabled={disabled}
-          aria-label={`Same train alternative for ${trainNumber}${travelClass ? ` ${travelClass}` : ''}`}>↗ Same Train Alternative</button>
-      : null;
+    if (!FALLBACK_CODES.has(res.code) || !onFallback) return null;
+    // F3: a FAILED search is said as failed (provider error / limit), never as "no seat"
+    return res.code === 'SEARCH_FAILED' || res.code === 'POLL_TIMEOUT'
+      ? <div className="bk-sti bk-sti--failed" role="status"><div className="bk-sti__note">{SAME_TRAIN_FAILED_NOTE}</div>{fallbackBtn}</div>
+      : fallbackBtn;
   }
+  const sum = checkSummaryOf(res.card);
+  // same completeness rule as the server card view (an older card without searchComplete: not truncated and not partial)
+  const complete = (res.card.searchComplete ?? (!res.card.candidatesTruncated && res.card.status !== 'PARTIAL')) === true && res.card.status !== 'PARTIAL';
   // P42-14: nothing verified AND the search could not check every station / class (rate limit / timeout) → say so honestly
-  // (never "no seats"), with the existing tap action; a COMPLETE search with nothing verified still shows nothing
+  // (never "no seats"), with the existing tap action. F3: a COMPLETE search with nothing verified says so explicitly
+  // (UNAVAILABLE ≠ pending / failed) — still never an empty option list.
   if (!groupRecoveryByPair(res.card, travelClass || res.card.travelClass).length) {
-    return res.card.status === 'PARTIAL'
-      ? <div className="bk-sti bk-sti--partial" role="status">
-          <div className="bk-sti__note">{SAME_TRAIN_PARTIAL_NOTE}</div>
-          {onFallback && <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm bk-sti__fallback" onClick={onFallback} disabled={disabled}
-            aria-label={`Same train alternative for ${trainNumber}${travelClass ? ` ${travelClass}` : ''}`}>↗ Same Train Alternative</button>}
-        </div>
+    if (res.card.status === 'PARTIAL' || !complete) {
+      // provider errors / limits → the P42-14 note; no error but the search was bounded (truncated) → "not complete"
+      return <div className="bk-sti bk-sti--partial" role="status">
+          <div className="bk-sti__note">{res.card.status === 'PARTIAL' ? SAME_TRAIN_PARTIAL_NOTE : SAME_TRAIN_INCOMPLETE_NOTE}</div>
+          {sum && sum.unchecked > 0 && <div className="bk-sti__meta">{partialCountText(sum)}</div>}
+          {fallbackBtn}
+        </div>;
+    }
+    return res.card.status === 'NOT_FOUND'
+      ? <div className="bk-sti bk-sti--none" role="status">{unavailableText(sum)}</div>
       : null;
   }
-  return <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={BFE_HEADING} requestedClass={travelClass || res.card.travelClass} showTrain />;
+  return <>
+    <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={BFE_HEADING} requestedClass={travelClass || res.card.travelClass} showTrain />
+    {/* F3: completion state under the options — a partial search is never labelled complete */}
+    {complete
+      ? sum && <div className="bk-sti__meta bk-sti__status" role="status">{completeText(sum)}</div>
+      : <div className="bk-sti__note bk-sti__status" role="status">{sum && sum.unchecked > 0 ? partialCountText(sum) : SAME_TRAIN_INCOMPLETE_NOTE}</div>}
+  </>;
 };
 
 /** P42-14: shown when the same-train search was partial (provider limit / timeout) and nothing could be verified. */
 export const SAME_TRAIN_PARTIAL_NOTE = 'Same train: provider limit ki wajah se kuch stations / classes abhi check nahi ho paaye — koi verified seat nahi mili.';
+/** F3 state texts (PENDING / RUNNING / COMPLETED / UNAVAILABLE / PARTIAL / FAILED are never mixed up). */
+export const SAME_TRAIN_QUEUED_TEXT = 'Same train: queue mein hai — provider limit ke andar baari aane par stations check honge…';
+export const SAME_TRAIN_FAILED_NOTE = 'Same train search provider error ki wajah se poora nahi ho paaya — koi result verify nahi hua.';
+export const SAME_TRAIN_INCOMPLETE_NOTE = 'Search poora nahi hua — kuch stations / classes check nahi ho paaye.';
+
+/** F3: counts for the state line, from the backend's own check summary (falls back to the provider coverage). */
+export function checkSummaryOf(d: any): { total: number; succeeded: number; unchecked: number } | null {
+  const c = d?.checkSummary;
+  if (c && Number.isFinite(Number(c.total))) {
+    const total = Number(c.total), succeeded = Number(c.succeeded) || 0;
+    return { total, succeeded, unchecked: Math.max(0, total - succeeded) };
+  }
+  const prov: any[] = Array.isArray(d?.providers) ? d.providers : [];
+  if (!prov.length) return null;
+  const total = prov.reduce((n, p) => n + (Number(p.requested) || 0), 0);
+  const succeeded = prov.reduce((n, p) => n + (Number(p.succeeded) || 0), 0);
+  return { total, succeeded, unchecked: Math.max(0, total - succeeded) };
+}
+export const completeText = (s: { total: number }) => `Saare ${s.total} checks complete.`;
+export const partialCountText = (s: { total: number; unchecked: number }) =>
+  `Search adhoora: ${s.unchecked} / ${s.total} checks provider limit / error ki wajah se nahi ho paaye — inke liye koi result nahi.`;
+export const unavailableText = (s: { total: number } | null) =>
+  `Same train: ${s ? `saare ${s.total} checks complete` : 'search complete'} — is train mein waitlisted class ke liye koi verified seat nahi mili.`;
+
+/** F3: PENDING (queued) / RUNNING (n of total, interim seats NOT selectable) — genuine counts from the backend. */
+export const SameTrainProgressView: React.FC<{ p: SameTrainDiscoverProgress | null }> = ({ p }) => {
+  if (!p || p.total === 0) {
+    return <div className="bk-sti bk-sti--loading" role="status">{p ? SAME_TRAIN_QUEUED_TEXT : 'Same train: pehle ke stations aur classes check ho rahe hain…'}</div>;
+  }
+  if (p.state === 'QUEUED' && p.done === 0) {
+    return <div className="bk-sti bk-sti--loading bk-sti--queued" role="status">{SAME_TRAIN_QUEUED_TEXT} <span className="bk-sti__meta">0 / {p.total}</span></div>;
+  }
+  const pct = Math.min(100, Math.round((p.done / Math.max(1, p.total)) * 100));
+  return (
+    <div className="bk-sti bk-sti--loading bk-sti--running" role="status" aria-live="polite">
+      <div>Same train: {p.done} / {p.total} checks ho gaye — baaki check ho rahe hain…</div>
+      <div className="bk-sti__bar" role="progressbar" aria-valuemin={0} aria-valuemax={p.total} aria-valuenow={p.done}><span style={{ width: `${pct}%` }} /></div>
+      {p.failed > 0 && <div className="bk-sti__meta">{p.failed} checks abhi provider error / limit se nahi ho paaye{p.retried > 0 ? ` · ${p.retried} retry` : ''}</div>}
+      {p.found.length > 0 && (
+        <div className="bk-sti__interim">
+          <div className="bk-sti__meta">Ab tak mili (final verification baaki — abhi select nahi kar sakte):</div>
+          {p.found.map(f => <div key={`${f.ticketOrigin}-${f.ticketDestination}-${f.travelClass}`} className="bk-sti__meta">{f.ticketOrigin} → {f.ticketDestination} · {f.travelClass} {f.status}</div>)}
+        </div>
+      )}
+    </div>
+  );
+};
 
 /** P42.5 headings (Part 29): the earlier-boarding group is the BFE section; destination-only extensions are listed after it. */
 export const BFE_HEADING = 'Same train · pehle station se board karo';

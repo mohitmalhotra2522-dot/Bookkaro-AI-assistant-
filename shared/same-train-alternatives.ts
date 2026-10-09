@@ -109,6 +109,8 @@ export interface ProviderEvidence {
   /** RATE_LIMITED by the local pacer (no provider request spent) vs by the provider (429) */
   rateLimitLocal?: boolean;
   retryCount?: number;
+  /** F3: local refusal reason of the paced queue (e.g. DAILY_RESERVE — provider quota kept for interactive use) */
+  rateLimitReason?: string;
   /** dispatch wave inside the bounded-concurrency matrix (1-based) */
   batchNumber?: number;
 }
@@ -261,6 +263,8 @@ export interface SameTrainAlternativesResult {
   verifiedAlternativeCount?: number;
   /** false when the candidate list was truncated or some provider calls failed / timed out — never claim exhaustive */
   searchComplete?: boolean;
+  /** F3: counts of real provider outcomes of this search (skipped = never sent, e.g. deadline); paced = fair queue used */
+  checkSummary?: { total: number; succeeded: number; failed: number; skipped: number; retried: number; paced: boolean };
   toolExecutionId?: string | null;
   /** P42.9: provider call counters for this recovery execution (observability) */
   callStats?: SameTrainCallStats;

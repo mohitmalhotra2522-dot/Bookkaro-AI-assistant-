@@ -264,11 +264,18 @@ export async function selectSameTrainAlternative(sessionId: string, body: { alte
  * P42.4 — AUTO same-train discovery for one displayed train/class (backend decides whether a search is needed; budget,
  * dedupe and provider choice are server-side). Returns the card payload or a code; never throws.
  */
-export interface SameTrainDiscoverResult { ok: boolean; code: string; card?: any; budget?: { used: number; max: number } }
-export async function discoverSameTrainAlternative(sessionId: string, body: { trainNumber: string; travelClass?: string; searchResultsVersion: number }): Promise<SameTrainDiscoverResult> {
+/** F3 progress of a queued automatic same-train search (counts of real provider outcomes; `found` = interim, unverified) */
+export interface SameTrainDiscoverProgress {
+  state: 'QUEUED' | 'RUNNING' | 'FINALIZING'; total: number; done: number; succeeded: number; failed: number; retried: number;
+  found: { ticketOrigin: string; ticketDestination: string; travelClass: string; status: string }[];
+}
+export interface SameTrainDiscoverResult { ok: boolean; code: string; card?: any; budget?: { used: number; max: number }; progress?: SameTrainDiscoverProgress | null }
+export async function discoverSameTrainAlternative(sessionId: string, body: { trainNumber: string; travelClass?: string; searchResultsVersion: number },
+  opts: { async?: boolean } = {}): Promise<SameTrainDiscoverResult> {
   try {
+    // F3: async polling is requested by header (the discovery body / binding fields stay exactly the same)
     const r = await fetch(`/api/session/${encodeURIComponent(sessionId)}/same-train-alternative/discover`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(opts.async ? { 'X-Same-Train-Async': '1' } : {}) }, body: JSON.stringify(body)
     });
     const j = await r.json().catch(() => null);
     if (j && typeof j.code === 'string') return j as SameTrainDiscoverResult;

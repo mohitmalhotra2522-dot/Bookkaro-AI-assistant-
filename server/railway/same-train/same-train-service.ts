@@ -15,6 +15,8 @@ import { RailwayToolService } from '../tools/railway-tool-service';
 import { WEB_PROVIDER_IDS } from '../providers/web/web-providers';
 import { fallbackProviderFor, isFallbackEligible, primaryProviderId, providerFallbackEnabled } from '../providers/provider-fallback';
 import { withRateWait } from '../providers/live/provider-rate-limiter';
+import { sameTrainSchedulerFor } from './same-train-scheduler';
+import { randomUUID } from 'node:crypto';
 import { evaluateSeatShortage } from '@shared/same-train-shortage';
 import {
   type SameTrainAlternative, type SameTrainAlternativesResult, type SameTrainErrorCode, SameTrainErrorCode as E,
@@ -120,6 +122,48 @@ export function liveSameTrainDeps(tools: RailwayToolService = new RailwayToolSer
       const trains: any[] = Array.isArray(r.data?.trains) ? r.data.trains : [];
       return { ok: true, listed: trains.some(t => String(t.trainNumber ?? t.number) === q.trainNumber) };
     },
+    ...extra
+  };
+}
+
+/** F3: total deadline of one AUTOMATIC (queued) search — long, because the fair queue paces it under the provider limit. */
+export function sameTrainQueueTotalMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.SAME_TRAIN_QUEUE_TOTAL_TIMEOUT_MS);
+  return env.SAME_TRAIN_QUEUE_TOTAL_TIMEOUT_MS !== undefined && env.SAME_TRAIN_QUEUE_TOTAL_TIMEOUT_MS !== '' && Number.isFinite(n) ? Math.min(2 * 3600_000, Math.max(60_000, Math.floor(n))) : 30 * 60_000;
+}
+/** F3 kill switch: SAME_TRAIN_PACED_QUEUE=off → automatic searches use the P42.9 path (liveSameTrainDeps) again. */
+export function sameTrainPacedQueueEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !/^(off|false|0)$/i.test(String(env.SAME_TRAIN_PACED_QUEUE ?? '').trim());
+}
+
+/**
+ * F3 — AUTOMATIC searches: every route / availability call of this search goes through the per-provider paced fair
+ * queue (same-train-scheduler). Same request binding as liveSameTrainDeps (train / class / date / pair / pax are passed
+ * through untouched, each call fresh in its provider's own scope); the queue adds pacing, fairness across searches,
+ * bounded retries and cancellation. A composite (failover-chain) provider ref cannot be paced per provider → that one
+ * call keeps the P42.9 path.
+ */
+export function scheduledSameTrainDeps(tools: RailwayToolService = new RailwayToolService(),
+  extra: Partial<SameTrainDeps> & { isCurrent?: () => boolean } = {}): SameTrainDeps {
+  const base = liveSameTrainDeps(tools, {});
+  const searchId = `stq_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  const isCurrent = extra.isCurrent || (() => true);
+  // composite ref (not paced per provider): keep the P42.9 call but with the per-call timeout the engine skips in scheduled mode
+  const timed = <T>(fn: () => Promise<T>): Promise<any> => new Promise(res => {
+    const t = setTimeout(() => res({ ok: false, error: { code: 'PROVIDER_TIMEOUT' }, meta: { scheduler: { attempts: 1, retries: 0, queuedMs: 0, timedOut: true } } }), base.limits.perCallTimeoutMs);
+    Promise.resolve().then(fn).then(v => { clearTimeout(t); res(v); }, () => { clearTimeout(t); res({ ok: false, error: { code: 'PROVIDER_ERROR' } }); });
+  });
+  const queued = <T>(p: ProviderRef, fn: () => Promise<T>, deadline?: number): Promise<T> => (p.id === ACTIVE
+    ? timed(fn)
+    : sameTrainSchedulerFor(p.id, { paced: !p.isMock }).schedule({ searchId, cancelled: () => !isCurrent() || (deadline !== undefined && Date.now() >= deadline) }, () => inProviderScope(p.id, fn)));
+  const routeDeadline = Date.now() + sameTrainQueueTotalMsFromEnv();
+  return {
+    ...base,
+    limits: { ...base.limits, totalTimeoutMs: sameTrainQueueTotalMsFromEnv() },
+    scheduled: true,
+    getRoute: (p, trainNumber) => (p.id === ACTIVE ? timed(() => base.getRoute(p, trainNumber)) : queued(p, () => tools.GET_TIMETABLE(trainNumber), routeDeadline)),
+    checkAvailability: (p, q, ctx) => (p.id === ACTIVE ? timed(() => base.checkAvailability(p, q))
+      : queued(p, () => tools.CHECK_AVAILABILITY({ trainNumber: q.trainNumber, travelClass: q.travelClass as any, date: q.date, origin: q.origin, destination: q.destination } as any), ctx?.deadline)),
     ...extra
   };
 }

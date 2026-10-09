@@ -18,19 +18,22 @@ import { evaluateSeatShortage } from '@shared/same-train-shortage';
 import type { SameTrainAlternativesResult } from '@shared/same-train-alternatives';
 import { sameTrainAlternativesEnabledFromEnv } from '../../ai/tools/tool-registry';
 import type { RailwayToolService } from '../tools/railway-tool-service';
-import type { SameTrainDeps } from './same-train-engine';
+import type { SameTrainDeps, SameTrainProgress } from './same-train-engine';
+import { scheduledSameTrainDeps, sameTrainPacedQueueEnabled } from './same-train-service';
 import { liveSameTrainDeps, searchSameTrainAlternatives, resolveSameTrainProviders, findSameTrainResult, sameTrainResultsOf, isSameTrainResultStale, type RevalidationOutcome } from './same-train-service';
 
 // ------------------------------------------------------------------ 1) auto display discovery
 
-export const SAME_TRAIN_AUTO_SET_CAP = 24;
+// F3: every eligible (waitlisted) train of a list gets its search — the paced queue (not a small budget) protects the
+// provider quota, so the per-list budget / stored-set cap cover a full result list (hard max 40 as before)
+export const SAME_TRAIN_AUTO_SET_CAP = 40;
 
 export function sameTrainAutoBudgetFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.SAME_TRAIN_AUTO_MAX_PER_RESULTS);
-  return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 40) : 12;
+  return Number.isFinite(n) && n >= 0 ? Math.min(Math.floor(n), 40) : 40;
 }
 
-export type DiscoverCode = 'OK' | 'NOT_ENABLED' | 'INVALID_REQUEST' | 'RESULTS_STALE' | 'TRAIN_NOT_DISPLAYED' | 'CLASS_NOT_LISTED'
+export type DiscoverCode = 'OK' | 'RUNNING' | 'NOT_ENABLED' | 'INVALID_REQUEST' | 'RESULTS_STALE' | 'TRAIN_NOT_DISPLAYED' | 'CLASS_NOT_LISTED'
   | 'NOT_NEEDED' | 'BUDGET_EXCEEDED' | 'LOCKED' | 'SEARCH_FAILED';
 
 export interface DiscoverOutcome {
@@ -39,13 +42,35 @@ export interface DiscoverOutcome {
   result?: SameTrainAlternativesResult;
   errorCode?: string;
   budget?: { used: number; max: number };
+  /** F3: RUNNING → genuine progress of the queued search (counts + interim seats; not a final verdict) */
+  progress?: DiscoverProgress | null;
 }
 
+/** F3 progress view of one automatic search (QUEUED = waiting for its first provider slot). */
+export interface DiscoverProgress extends Omit<SameTrainProgress, 'stage'> { state: 'QUEUED' | 'RUNNING' | 'FINALIZING'; startedAt: string; updatedAt: string }
+
 const inflight = new Map<string, Promise<DiscoverOutcome>>();
+const progressByKey = new Map<string, DiscoverProgress>();
+// F3: the FINAL failure of a finished automatic search, so a polling client gets that outcome instead of starting a new
+// search (successes are stored on the session as before). Bounded + short-lived; outcome codes only, no railway data.
+const finishedFailures = new Map<string, { outcome: DiscoverOutcome; at: number }>();
+const FAILURE_TTL_MS = 15 * 60_000;
+function rememberFailure(key: string, outcome: DiscoverOutcome) {
+  finishedFailures.set(key, { outcome, at: Date.now() });
+  if (finishedFailures.size > 500) { const first = finishedFailures.keys().next().value; if (first !== undefined) finishedFailures.delete(first); }
+}
+function recentFailure(key: string): DiscoverOutcome | null {
+  const f = finishedFailures.get(key);
+  if (!f) return null;
+  if (Date.now() - f.at > FAILURE_TTL_MS) { finishedFailures.delete(key); return null; }
+  return f.outcome;
+}
 
 export async function discoverSameTrainForDisplay(state: ConversationStateManager, sessionId: string,
   body: { trainNumber?: unknown; travelClass?: unknown; searchResultsVersion?: unknown },
-  opts: { tools?: RailwayToolService; deps?: SameTrainDeps; env?: NodeJS.ProcessEnv; log?: (f: Record<string, unknown>) => void } = {}): Promise<DiscoverOutcome> {
+  opts: { tools?: RailwayToolService; deps?: SameTrainDeps; env?: NodeJS.ProcessEnv; log?: (f: Record<string, unknown>) => void;
+    /** F3 (async polling): reports the job key; returns a finished search's failure instead of re-running it */
+    onKey?: (key: string) => void; reuseFailure?: boolean } = {}): Promise<DiscoverOutcome> {
   const env = opts.env || process.env;
   if (!sameTrainAlternativesEnabledFromEnv(env)) return { ok: false, code: 'NOT_ENABLED' };
   const trainNumber = String(body.trainNumber ?? '').trim();
@@ -90,11 +115,13 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   const classes = [travelClass, ...rowClasses.filter(c => c.code !== travelClass && meaningful(c)).map(c => c.code)];
 
   const key = `${sessionId}|${version}|${trainNumber}|${travelClass}|${pax}`;
+  opts.onKey?.(key);
   const running = inflight.get(key);
   if (running) return running;
   // already discovered for THIS list → return it (same result set; not a cache across lists — a new search = new version)
   const prior = ((s.sameTrainAutoSets || []) as any[]).find(r => r?.autoKey === key);
   if (prior) return { ok: true, code: 'OK', result: prior };
+  if (opts.reuseFailure) { const f = recentFailure(key); if (f) return f; }
   // P42.5: Muse (or the BFE safety-net) already searched exactly this train / class / party for THIS list in the current
   // journey → show that same fresh result (no second provider fan-out for one list). Never an older list's result.
   const listAt = Date.parse(String(sr.retrievedAt || sr.searchMeta?.retrievedAt || ''));
@@ -121,6 +148,17 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
     };
     const t0 = Date.now();
     const sel: any = s.selectedTrain;
+    // F3: genuine progress for the polling UI (QUEUED until the first provider outcome arrives)
+    const startedAt = new Date(t0).toISOString();
+    progressByKey.set(key, { state: 'QUEUED', total: 0, done: 0, succeeded: 0, failed: 0, retried: 0, found: [], startedAt, updatedAt: startedAt });
+    const onProgress = (p: SameTrainProgress) => {
+      const { stage, ...counts } = p;
+      progressByKey.set(key, { ...counts, state: stage === 'FINALIZING' ? 'FINALIZING' : p.done > 0 ? 'RUNNING' : 'QUEUED', startedAt, updatedAt: new Date().toISOString() });
+    };
+    const deps: SameTrainDeps = opts.deps
+      ? { ...opts.deps, onProgress: (p: SameTrainProgress) => { onProgress(p); opts.deps!.onProgress?.(p); } }
+      : sameTrainPacedQueueEnabled(env) ? scheduledSameTrainDeps(opts.tools as any, { isCurrent, onProgress })
+      : liveSameTrainDeps(opts.tools as any, { isCurrent, onProgress });
     const out = await searchSameTrainAlternatives({
       sessionId, turnId: null, requestId: null, journeyVersion,
       trainNumber, trainName: row.trainName || row.name, date: String(s.date || j.date), travelClass, classes, passengersCount: pax,
@@ -133,11 +171,13 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
       triggerReason: shortage.triggerReason, triggerSource: 'AUTO_DISPLAY',
       contextSnapshot: { selectedTrain: sel ? String(sel.number || sel.trainNumber || '') || null : null, selectedClass: s.selectedClass ? String(s.selectedClass).toUpperCase() : null, journeyVersion,
         requestedClass: s.requestedClass ? String(s.requestedClass).toUpperCase() : null }
-    } as any, opts.deps || liveSameTrainDeps(opts.tools as any, { isCurrent }));
+    } as any, deps);
     if (!isCurrent()) return { ok: false, code: 'RESULTS_STALE' };
     if (!out.ok) {
-      opts.log?.({ event: 'same_train_auto', ok: false, code: out.code, trainNumber, travelClass, pax, latencyMs: Date.now() - t0 });
-      return { ok: false, code: 'SEARCH_FAILED', errorCode: out.code };
+      opts.log?.({ event: 'same_train_auto', ok: false, code: out.code, trainNumber, travelClass, pax, paced: !!deps.scheduled, latencyMs: Date.now() - t0 });
+      const failed: DiscoverOutcome = { ok: false, code: 'SEARCH_FAILED', errorCode: out.code };
+      rememberFailure(key, failed);
+      return failed;
     }
     const result: any = { ...out.result, autoKey: key, searchResultsVersion: version };
     const cur: any = state.getSession(sessionId);
@@ -146,12 +186,35 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
       requestedClassKnown: !!requested, recoveryEligible: true, recoveryReason: shortage.triggerReason, classesChecked: (result.classesChecked || []).join(','),
       earlierStationsChecked: result.earlierStationsChecked ?? null, downstreamStationsChecked: result.downstreamStationsChecked ?? null,
       candidates: result.candidateCount ?? null, verified: (result.alternatives || []).filter((a: any) => !a.isRequestedPair && (a.availability === 'RAC' || a.availability === 'AVAILABLE') && (a.verificationStatus === 'VERIFIED' || a.verificationStatus === 'PARTIALLY_VERIFIED')).length,
-      budgetUsed: b.used + 1, budgetMax: max, latencyMs: Date.now() - t0 });
+      budgetUsed: b.used + 1, budgetMax: max, paced: !!deps.scheduled, searchComplete: result.searchComplete ?? null,
+      checks: result.checkSummary ?? null, latencyMs: Date.now() - t0 });
     return { ok: true, code: 'OK', result };
-  })().finally(() => inflight.delete(key));
+  })().finally(() => { inflight.delete(key); progressByKey.delete(key); });
   inflight.set(key, run);
   return run;
 }
+
+/**
+ * F3 — asynchronous automatic discovery for a POLLING client: starts (or joins) the queued search and returns at once
+ * with RUNNING + genuine progress while it is still running; a finished search returns its final outcome (OK card /
+ * failure). Repeated polls never start a second search for the same list / train / class / party (in-flight dedupe,
+ * stored result, remembered failure) and never spend budget.
+ */
+export async function discoverSameTrainForDisplayAsync(state: ConversationStateManager, sessionId: string,
+  body: { trainNumber?: unknown; travelClass?: unknown; searchResultsVersion?: unknown },
+  opts: Parameters<typeof discoverSameTrainForDisplay>[3] & { waitMs?: number } = {}): Promise<DiscoverOutcome> {
+  let key: string | undefined;
+  const job = discoverSameTrainForDisplay(state, sessionId, body, { ...opts, reuseFailure: true, onKey: k => { key = k; } })
+    .catch((): DiscoverOutcome => ({ ok: false, code: 'SEARCH_FAILED', errorCode: 'INTERNAL' }));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const waited = await Promise.race([job, new Promise<null>(r => { timer = setTimeout(() => r(null), Math.max(0, opts.waitMs ?? 300)); })]);
+  if (timer) clearTimeout(timer);
+  if (waited) return waited;
+  return { ok: true, code: 'RUNNING', progress: key ? progressByKey.get(key) ?? null : null };
+}
+
+/** F3 observability: number of automatic searches currently running (counts only). */
+export function sameTrainAutoJobsRunning(): number { return inflight.size; }
 
 // ------------------------------------------------------------------ 2) apply an explicitly selected, freshly revalidated option
 

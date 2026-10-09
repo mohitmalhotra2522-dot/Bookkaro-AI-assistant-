@@ -174,7 +174,7 @@ describe('P42-14 UI — 3 options, then "See other alternatives" (nothing cut)',
     await act(async () => { button(/See other alternatives/)!.click(); });
     expect(opts()).toHaveLength(22);
   });
-  it('[11] automatic section: partial search (rate limit) with nothing verified → honest note + existing tap action; complete search with nothing → nothing', async () => {
+  it('[11] automatic section: partial search (rate limit) with nothing verified → honest note + existing tap action; complete search with nothing → explicit UNAVAILABLE line (F3)', async () => {
     let card: any = cardOf([alt('W1', 'HSX', 'NDLS', { availability: 'WAITLIST', availabilityStatusText: 'WL 3' })], { status: 'PARTIAL' });
     vi.stubGlobal('fetch', vi.fn(async () => ({ status: 200, json: async () => ({ ok: true, code: 'OK', card }) })));
     const fallbacks: string[] = [];
@@ -186,6 +186,12 @@ describe('P42-14 UI — 3 options, then "See other alternatives" (nothing cut)',
     expect(fallbacks).toEqual(['x']);
     card = cardOf([alt('W1', 'HSX', 'NDLS', { availability: 'WAITLIST', availabilityStatusText: 'WL 3' })], { status: 'NOT_FOUND' });
     act(() => root.render(el('b'))); await flush();
-    expect(host.textContent).toBe('');
+    // F3 (user spec #47.6): completed-but-unavailable is shown as such — distinct from pending / partial / failed; no option
+    // list, no tap action, never the partial note
+    expect(host.textContent).toContain('koi verified seat nahi mili');
+    expect(host.textContent).toMatch(/complete/);
+    expect(host.textContent).not.toContain(SAME_TRAIN_PARTIAL_NOTE);
+    expect(host.querySelector('section.bk-sti')).toBeNull();
+    expect(button(/Same Train Alternative/)).toBeFalsy();
   });
 });
