@@ -46,11 +46,11 @@ describe('P42.5 G4 — BFE UI', () => {
     const g = groupSameTrainOptions(card([alt('A1', 'JUC', 'UMB', 'RAC', 'RAC 1'), alt('A2', 'JUC', 'KKDE', 'AVAILABLE', 'AVL 3'), alt('A3', 'ASR', 'UMB', 'AVAILABLE', 'AVL 3')]));
     expect(g.earlier.map(a => a.alternativeId)).toEqual(['A1', 'A3']);
   });
-  it('[G4.6] at most 15 options', () => {
+  it('[G4.6] P42-14 (user decision 2026-10-09, replaces "at most 15"): nothing is cut — every verified option is listed', () => {
     const many = Array.from({ length: 22 }, (_, i) => alt(`A${i}`, `S${String(i).padStart(2, '0')}`, 'UMB', 'AVAILABLE', 'AVL 3'));
     const g = groupSameTrainOptions(card(many));
-    expect(g.earlier.length + g.further.length).toBe(MAX_SAME_TRAIN_OPTIONS);
-    expect(MAX_SAME_TRAIN_OPTIONS).toBe(15);
+    expect(g.earlier.length + g.further.length).toBe(22);
+    expect(MAX_SAME_TRAIN_OPTIONS).toBe(Number.POSITIVE_INFINITY);
   });
   it('[G4.7] same train number only — another train is never listed under the same-train section', () => {
     const g = groupSameTrainOptions(card([alt('A1', 'JUC', 'UMB', 'RAC', 'RAC 1'), alt('A2', 'ASR', 'UMB', 'AVAILABLE', 'AVL 3', { trainNumber: '12904' })]));

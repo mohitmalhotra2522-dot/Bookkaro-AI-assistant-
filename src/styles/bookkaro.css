@@ -590,6 +590,8 @@ img, svg { display: block; }
 .bk-sti__use { margin-left: auto; }
 .bk-sti__note { font-size: 12px; color: var(--warn); }
 .bk-sti__fallback { margin-top: 6px; }
+.bk-sti__more { justify-self: start; align-self: flex-start; margin-top: 4px; }
+.bk-sti--partial { gap: 4px; }
 /* P42.7 — automatic same-train recovery section under a train card (BookKaro tokens: warm surface, navy, rounded) */
 .bk-train .bk-sti { margin: 12px 0 0; border-style: solid; background: var(--surface-2); box-shadow: var(--shadow-1); }
 .bk-sti__train { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 6px; font-size: 13px; color: var(--navy-900); }

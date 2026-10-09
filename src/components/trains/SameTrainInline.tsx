@@ -76,13 +76,30 @@ export const SameTrainInline: React.FC<{
           aria-label={`Same train alternative for ${trainNumber}${travelClass ? ` ${travelClass}` : ''}`}>↗ Same Train Alternative</button>
       : null;
   }
+  // P42-14: nothing verified AND the search could not check every station / class (rate limit / timeout) → say so honestly
+  // (never "no seats"), with the existing tap action; a COMPLETE search with nothing verified still shows nothing
+  if (!groupRecoveryByPair(res.card, travelClass || res.card.travelClass).length) {
+    return res.card.status === 'PARTIAL'
+      ? <div className="bk-sti bk-sti--partial" role="status">
+          <div className="bk-sti__note">{SAME_TRAIN_PARTIAL_NOTE}</div>
+          {onFallback && <button type="button" className="bk-btn bk-btn--quiet bk-btn--sm bk-sti__fallback" onClick={onFallback} disabled={disabled}
+            aria-label={`Same train alternative for ${trainNumber}${travelClass ? ` ${travelClass}` : ''}`}>↗ Same Train Alternative</button>}
+        </div>
+      : null;
+  }
   return <SameTrainOptionList d={res.card} sessionId={sessionId} disabled={disabled || !!res.card.stale} onHandoff={onHandoff} heading={BFE_HEADING} requestedClass={travelClass || res.card.travelClass} showTrain />;
 };
+
+/** P42-14: shown when the same-train search was partial (provider limit / timeout) and nothing could be verified. */
+export const SAME_TRAIN_PARTIAL_NOTE = 'Same train: provider limit ki wajah se kuch stations / classes abhi check nahi ho paaye — koi verified seat nahi mili.';
 
 /** P42.5 headings (Part 29): the earlier-boarding group is the BFE section; destination-only extensions are listed after it. */
 export const BFE_HEADING = 'Same train · pehle station se board karo';
 export const EXTENSION_HEADING = 'Same train · aage ke station tak ticket';
-export const MAX_SAME_TRAIN_OPTIONS = 15;
+/** P42-14 (user decision 2026-10-09): nothing is cut — every verified option is listed (no cap). */
+export const MAX_SAME_TRAIN_OPTIONS = Number.POSITIVE_INFINITY;
+/** P42-14: options (ticket pairs) shown before "See other alternatives" */
+export const SAME_TRAIN_PREVIEW = 3;
 
 /**
  * P42.5 Part 32 — BookKaro's canBookAvail for a same-train option: AVAILABLE (whole party) and RAC can be booked;
@@ -191,8 +208,13 @@ const shortDate = (iso?: string) => {
  */
 export const SameTrainOptionList: React.FC<{ d: any; sessionId: string | null; disabled?: boolean; onHandoff: (text: string) => void; heading?: string; classTag?: string; requestedClass?: string | null; showTrain?: boolean }>
   = ({ d, sessionId, disabled, onHandoff, heading, classTag, requestedClass, showTrain }) => {
-  const groups = groupRecoveryByPair(d, requestedClass || classTag || d?.travelClass);
-  if (!groups.length) return null;
+  const [all, setAll] = useState(false);
+  const groupsAll = groupRecoveryByPair(d, requestedClass || classTag || d?.travelClass);
+  if (!groupsAll.length) return null;
+  // P42-14: first SAME_TRAIN_PREVIEW options (backend route order: earlier boarding, then further destination), then
+  // "See other alternatives" reveals ALL the remaining verified options — purely local, no chat turn, nothing dropped
+  const groups = all ? groupsAll : groupsAll.slice(0, SAME_TRAIN_PREVIEW);
+  const hidden = groupsAll.length - groups.length;
   const earlier = groups.filter(g => g.earlier);
   const further = groups.filter(g => !g.earlier);
   const pax = Number(d?.requestedPassengerCount ?? d?.passengersCount) || null;
@@ -209,6 +231,16 @@ export const SameTrainOptionList: React.FC<{ d: any; sessionId: string | null; d
       {earlier.map(g => <PairOption key={g.key} d={d} g={g} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
       {earlier.length > 0 && further.length > 0 && head(EXTENSION_HEADING)}
       {further.map(g => <PairOption key={g.key} d={d} g={g} sessionId={sessionId} disabled={disabled} onHandoff={onHandoff} />)}
+      {hidden > 0 && (
+        <button type="button" className="bk-btn bk-btn--ghost bk-sti__more" onClick={() => setAll(true)} aria-expanded={false}>
+          See other alternatives ({hidden}) →
+        </button>
+      )}
+      {all && groupsAll.length > SAME_TRAIN_PREVIEW && (
+        <button type="button" className="bk-btn bk-btn--ghost bk-sti__more" onClick={() => setAll(false)} aria-expanded={true}>
+          Hide other alternatives ↑
+        </button>
+      )}
     </section>
   );
 };

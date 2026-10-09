@@ -225,6 +225,8 @@ export interface SameTrainAlternativesResult {
     /** downstream stations used as alternative ticket destinations (route order) */
     destinationExtension: string[];
     destinationSweep: 'NONE_TERMINAL' | 'EXTENSION' | 'DISABLED';
+    /** P42-14: further ticket destinations checked after the 5..7 window up to the train's terminal (only when the window found no seat) */
+    terminalSweep?: string[];
     stations: RouteStation[];
     /** RailRadar Phase 1: which route data verified the requested pair in order (a statement about provider DATA only) */
     verification?: SameTrainRouteVerification;

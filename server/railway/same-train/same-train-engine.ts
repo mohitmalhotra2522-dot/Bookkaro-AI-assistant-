@@ -124,6 +124,12 @@ export interface PlanInput {
   destinationExtensionStations?: number;
   /** AUTO = P3 only when P0–P2 found no AVAILABLE / RAC (second phase) · ALWAYS · NEVER */
   combinedPairs?: 'AUTO' | 'ALWAYS' | 'NEVER';
+  /**
+   * P42-14 terminal sweep: AUTO = when the bounded window (≤15 earlier stations, destination + 5..7) found no AVAILABLE /
+   * RAC in any searched class, extend the ticket destination over the REST of the route up to the train's terminal
+   * (requested origin → each further station, route order) · NEVER (default — pre-P42-14 behaviour).
+   */
+  terminalSweep?: 'AUTO' | 'NEVER';
 }
 
 export interface CandidatePlan {
@@ -135,6 +141,9 @@ export interface CandidatePlan {
   destinationSweep: 'NONE_TERMINAL' | 'EXTENSION' | 'DISABLED';
   phase1: CandidatePair[];                 // P0, P1, P2
   phase2: CandidatePair[];                 // P3 (combined) — run per combinedPairs policy
+  /** P42-14: stations after the destination extension up to the train's terminal (route order) — phase 3 only */
+  terminalExtension: RouteStation[];
+  phase3: CandidatePair[];                 // P2-kind pairs requested origin → terminalExtension (terminalSweep AUTO)
   truncated: boolean;
 }
 
@@ -189,8 +198,13 @@ export function planCandidates(stations: RouteStation[], duplicates: Set<string>
   const seen = new Set<string>();
   const phase1 = all.filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, cap);
   const phase2 = combined.filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, Math.max(0, cap - phase1.length));
-  const truncated = all.length > phase1.length || combined.length > phase2.length;
-  return { ok: true, plan: { route: stations, originIndex: oi, destinationIndex: di, originAlternatives, destinationExtension, destinationSweep, phase1, phase2, truncated } };
+  // P42-14: the rest of the route after the extension window, up to the terminal (never a duplicate station, never re-checked)
+  const lastWindowIndex = destinationExtension.length ? destinationExtension[destinationExtension.length - 1].index : di;
+  const terminalExtension = input.terminalSweep === 'AUTO' && destinationSweep === 'EXTENSION'
+    ? stations.slice(lastWindowIndex + 1).filter(s => !duplicates.has(s.code)) : [];
+  const phase3 = terminalExtension.map(s => pairOf(stations, oi, s.index, 'P2')).filter(p => !seen.has(p.pairId) && (seen.add(p.pairId), true)).slice(0, cap);
+  const truncated = all.length > phase1.length || combined.length > phase2.length || terminalExtension.length > phase3.length;
+  return { ok: true, plan: { route: stations, originIndex: oi, destinationIndex: di, originAlternatives, destinationExtension, destinationSweep, phase1, phase2, terminalExtension, phase3, truncated } };
 }
 
 // ------------------------------------------------------------------ provider answers
@@ -367,6 +381,8 @@ export interface SameTrainSearchRequest {
   trainNumber: string; trainName?: string; date: string; travelClass: string; passengersCount: number;
   origin: string; destination: string; originName?: string; destinationName?: string;
   originSweep: boolean; destinationSweep: boolean; destinationExtensionStations?: number; combinedPairs?: 'AUTO' | 'ALWAYS' | 'NEVER';
+  /** P42-14: see PlanInput.terminalSweep (default NEVER) */
+  terminalSweep?: 'AUTO' | 'NEVER';
   includeFare: boolean; webEvidence: boolean;
   providers: ProviderRef[]; routeProvider: ProviderRef; webProviders: ProviderRef[];
   /** P42.2 (optional, recorded only): why this search ran, the tool execution id and the session selection at call time */
@@ -587,7 +603,14 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     && (e.availability?.category === 'RAC' || (e.availability?.category === 'AVAILABLE' && evaluateSeatShortage({ status: e.availability.status, requestedPassengerCount: req.passengersCount }).sufficiency !== 'INSUFFICIENT'))));
   const runCombined = plan.phase2.length > 0 && (policy === 'ALWAYS' || (policy === 'AUTO' && !goodCategory(plan.phase1)));
   if (runCombined) await runPhase(plan.phase2);
-  const pairs = [...plan.phase1, ...(runCombined ? plan.phase2 : [])];
+  // P42-14: nothing bookable (AVAILABLE for the whole party / RAC) in ANY searched class inside the bounded window → continue
+  // the destination over the rest of the route up to the train's terminal (same classes, same providers, same check cap)
+  const goodAnyClass = (pairs: CandidatePair[]) => classes.some(c => pairs.some(p => (evidenceByPair.get(ek(p.pairId, c)) || []).some(e => e.level === 'PROVIDER_API' && e.outcome === 'SUCCESS'
+    && (e.availability?.category === 'RAC' || (e.availability?.category === 'AVAILABLE' && evaluateSeatShortage({ status: e.availability.status, requestedPassengerCount: req.passengersCount }).sufficiency !== 'INSUFFICIENT')))));
+  const windowPairs = [...plan.phase1, ...(runCombined ? plan.phase2 : [])];
+  const runTerminal = plan.phase3.length > 0 && !goodAnyClass(windowPairs) && current() && now() < deadline;
+  if (runTerminal) await runPhase(plan.phase3);
+  const pairs = [...windowPairs, ...(runTerminal ? plan.phase3 : [])];
 
   // 3) optional public-web route evidence (UNVERIFIED_WEB — never availability, never authoritative)
   const errors: SameTrainErrorCode[] = [];
@@ -657,7 +680,8 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
   const completedAt = new Date(now()).toISOString();
   const latencyMs = now() - t0;
   const earlierStationsChecked = plan.originAlternatives.length;
-  const downstreamStationsChecked = plan.destinationExtension.length;
+  const terminalChecked = runTerminal ? plan.phase3.length : 0;
+  const downstreamStationsChecked = plan.destinationExtension.length + terminalChecked;
   const partialRun = apiEv.some(e => e.outcome !== 'SUCCESS');
   const callStats = { ...stats, partial: partialRun };
   deps.log?.('same_train_search', { alternativeSearchId, providers: req.providers.map(p => p.id).join(','), candidateCount: pairs.length,
@@ -691,9 +715,10 @@ export async function runSameTrainSearch(req: SameTrainSearchRequest, deps: Same
     route: { provider: routeProvider.id, ...(routeFallbackReason ? { fallbackUsed: true, fallbackReason: routeFallbackReason } : {}), fetchedAt: routeFetchedAt, trainOrigin: plan.route[0].code, trainTerminal: plan.route[plan.route.length - 1].code,
       stationCount: plan.route.length, originSweep: plan.originAlternatives.map(s => s.code), destinationExtension: plan.destinationExtension.map(s => s.code),
       destinationSweep: plan.destinationSweep,
+      ...(runTerminal ? { terminalSweep: plan.phase3.map(p => p.ticketDestination) } : {}),
       verification, verifiedBy: routeProvider.id,
       ...(primaryRouteResult ? { primaryRouteProvider: req.routeProvider.id, primaryRouteResult } : {}),
-      stations: plan.route.slice(Math.max(0, (plan.originAlternatives[0]?.index ?? plan.originIndex)), (plan.destinationExtension[plan.destinationExtension.length - 1]?.index ?? plan.destinationIndex) + 1) },
+      stations: plan.route.slice(Math.max(0, (plan.originAlternatives[0]?.index ?? plan.originIndex)), (runTerminal ? plan.phase3[plan.phase3.length - 1].destinationIndex : plan.destinationExtension[plan.destinationExtension.length - 1]?.index ?? plan.destinationIndex) + 1) },
     providers, candidateCount: pairs.length, candidatesTruncated: plan.truncated,
     alternatives, invalidCount: all.length - visible.length,
     status: anyFailure ? 'PARTIAL' : foundAlternative ? 'OK' : 'NOT_FOUND',

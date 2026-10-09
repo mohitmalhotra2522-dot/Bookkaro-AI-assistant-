@@ -85,7 +85,9 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
   const shortage = cls ? meaningful(cls) : null;
   if (!cls || !shortage) return { ok: false, code: 'NOT_NEEDED' };
   const travelClass = cls.code;
-  const classes = [travelClass, ...rowClasses.map(c => c.code).filter(c => c !== travelClass)];
+  // P42-14 (user decision 2026-10-09): search ONLY the classes that show a shortage (waiting) on this train's search row —
+  // seed / requested class first; a class that is already available on the row is not re-searched
+  const classes = [travelClass, ...rowClasses.filter(c => c.code !== travelClass && meaningful(c)).map(c => c.code)];
 
   const key = `${sessionId}|${version}|${trainNumber}|${travelClass}|${pax}`;
   const running = inflight.get(key);
@@ -124,6 +126,8 @@ export async function discoverSameTrainForDisplay(state: ConversationStateManage
       trainNumber, trainName: row.trainName || row.name, date: String(s.date || j.date), travelClass, classes, passengersCount: pax,
       origin: String(s.origin || j.origin), destination: String(s.destination || j.destination), originName: s.originName, destinationName: s.destinationName,
       originSweep: true, destinationSweep: true, combinedPairs: 'NEVER', includeFare: false, webEvidence: false,
+      // P42-14: no seat inside ≤15 earlier stations / destination + 5..7 → continue the destination up to the train's terminal
+      terminalSweep: 'AUTO',
       // primary availability provider only (bounded cost); route from the resolved route provider — never a hidden failover
       providers: pr.providers.slice(0, 1), routeProvider: pr.routeProvider, webProviders: [], fallbackProviders: pr.fallbacks, routeFallback: pr.routeFallback,
       triggerReason: shortage.triggerReason, triggerSource: 'AUTO_DISPLAY',
