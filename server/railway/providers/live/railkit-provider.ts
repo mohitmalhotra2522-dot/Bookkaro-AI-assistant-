@@ -21,6 +21,27 @@ const isoOfDMY = (x: unknown): string | undefined => { const m = str(x)?.match(/
 /** "19:55 hrs" → "19h 55m" */
 const travelTime = (x: unknown): string => { const m = str(x)?.match(/^(\d{1,3}):(\d{2})/); return m ? `${Number(m[1])}h ${Number(m[2])}m` : ''; };
 const DAYS = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+/**
+ * 2026-10-09 (live, paid plan): RailKit's coarse `status` reports RAC rows as "WAITLIST" (status WAITLIST,
+ * availabilityText "RAC 80", rawStatus "GNWL53/RAC80"). The class's current status is the availabilityText
+ * ("AVL n" / "RAC n" / "WL n" / "REGRET"); the coarse `status` is used only when the text carries no recognised status.
+ * Any other text/status contradiction is rejected as malformed (never guessed → the failover layer moves on).
+ */
+const TEXT_STATUS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^(AVL|AVBL|AVAILABLE|CURR_AVBL)\b/i, 'AVAILABLE'], [/^RAC\b/i, 'RAC'], [/^(WL|GNWL|RLWL|PQWL|TQWL|RSWL|RQWL|WAITLIST)\b/i, 'WAITLIST'],
+  [/^REGRET\b/i, 'REGRET'], [/^NOT[\s_-]*AVAILABLE\b/i, 'NOT_AVAILABLE']
+];
+const COMPATIBLE: Record<string, readonly string[]> = {
+  AVAILABLE: ['AVAILABLE'], RAC: ['RAC', 'WAITLIST'], WAITLIST: ['WAITLIST'], REGRET: ['REGRET', 'WAITLIST'], NOT_AVAILABLE: ['NOT_AVAILABLE', 'WAITLIST']
+};
+export function railKitStatusOf(availabilityText: unknown, coarseStatus: unknown): string | undefined {
+  const text = str(availabilityText) || '';
+  const coarse = (str(coarseStatus) || '').toUpperCase().replace(/[\s-]+/g, '_');
+  const fromText = TEXT_STATUS.find(([re]) => re.test(text))?.[1];
+  if (!fromText) return coarse || undefined;
+  if (coarse && !COMPATIBLE[fromText].includes(coarse)) throw new MalformedProviderData('status-conflict');
+  return fromText;
+}
 
 export class RailKitProvider extends LiveRailwayProvider {
   readonly providerId = 'railkit' as const;
@@ -68,7 +89,7 @@ export class RailKitProvider extends LiveRailwayProvider {
       if (!day) throw new MalformedProviderData('availability-date');
       const text = str(day.availabilityText) || '';
       const n = num(text.match(/(\d+)\s*$/)?.[1]);
-      const c = canonicalAvailability(str(day.status), { available: n, rac: n, wl: n });
+      const c = canonicalAvailability(railKitStatusOf(day.availabilityText, day.status), { available: n, rac: n, wl: n });
       if (!c) throw new MalformedProviderData('status');
       return { ok: true, data: { trainNumber: str(x.d.train?.trainNo) || req.trainNumber, travelClass: cls, date: req.date, status: c.status, available: c.available,
         ...(str(day.rawStatus) ? { statusText: str(day.rawStatus) } : {}), ...(str(x.d.train?.quota) ? { quota: str(x.d.train.quota) } : {}), providerUpdatedAt: null
